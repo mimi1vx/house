@@ -1,0 +1,28 @@
+#!/usr/bin/expect -f
+# Boot a kernel ELF under QEMU virt (host-side) and wait for a marker string.
+# Usage: expect scripts/qemu-smoke.exp <kernel.elf> <marker-regex> [timeout] [accel]
+set timeout [expr {[lindex $argv 2] > 0 ? [lindex $argv 2] : 60}]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set accel [lindex $argv 3]
+if {$accel eq ""} { set accel hvf }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -m 512G -nographic -kernel $kernel
+expect {
+    -re $marker {
+        puts "\nPASS: saw /$marker/"
+    }
+    timeout {
+        puts "\nFAIL: timed out waiting for /$marker/"
+        catch {exec kill -9 [exp_pid]}
+        exit 1
+    }
+    eof {
+        puts "\nFAIL: qemu exited before marker appeared"
+        exit 1
+    }
+}
+catch {exec kill -9 [exp_pid]}
+wait
+exit 0

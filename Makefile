@@ -155,3 +155,18 @@ distclean:
 .phony:
 	# dummy target to force rebuilding
 
+# --- aarch64 port build environment (plans/phase-1-build-env.md) ---
+IMAGE := house-port:latest
+
+container-image:
+	container builder start -c 4 -m 4G || true
+	CONTAINER_DEFAULT_PLATFORM=linux/arm64 container build \
+	  --platform linux/arm64 -f Containerfile -t $(IMAGE) .
+	@archs=$$(container image inspect $(IMAGE) | \
+	  jq -r '.[0].variants[].config.architecture' | sort -u); \
+	[ "$$archs" = "arm64" ] || { echo "FAIL: variants: $$archs" >&2; exit 1; }
+
+container-shell:
+	container run --platform linux/arm64 --rm -it \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) bash
+
