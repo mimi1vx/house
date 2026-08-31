@@ -94,13 +94,16 @@ void c_handle_irq(uint64_t *gpr, void *fpi)
         __asm__ volatile("msr CNTV_TVAL_EL0, %0" :: "r"((uint64_t)house_timer_interval));
         __asm__ volatile("isb");
         if (house_isr_active) house_isr_pending[core]++;
-        house_irq_push(intid);
+        // Timer tick is via pending counter + timerfd, not via H.Interrupts
+        // ring. Suppress MPSC ring push for timer to avoid contention with N
+        // cores each firing at 100Hz (SPSC assumption).
         extern void house_sched_maybe_preempt_from_isr(void);
         house_sched_maybe_preempt_from_isr();
     } else if (intid == 29 || intid == 30) {
         __asm__ volatile("msr CNTP_TVAL_EL0, %0" :: "r"((uint64_t)house_timer_interval));
         __asm__ volatile("isb");
-        house_irq_push(intid);
+        // physical timer also via pending; no ring push
+        // house_irq_push(intid);
     } else {
         house_irq_push(intid);
     }

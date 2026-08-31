@@ -7,6 +7,10 @@
 #include "irq.h"
 #include "uart.h"
 
+#ifndef HOUSE_MAX_SMP
+#define HOUSE_MAX_SMP 16
+#endif
+
 volatile int house_isr_active = 0;
 volatile uint64_t house_isr_pending[HOUSE_MAX_SMP] = {0};
 uint32_t house_timer_interval = 0;
@@ -73,7 +77,19 @@ void house_timer_init(void) {
 }
 
 void house_timer_init_secondary(uint32_t core) {
-    house_timer_init_for_core(core);
+    // Single global ticker: keep timer disabled on secondaries to avoid MPSC
+    // ring contention and per-core pending divergence. The primary core's
+    // 100Hz tick drives timerfd for all caps (RTS ticker is single-threaded
+    // or pinned to core 0 via tid<10). Secondaries still record boot tick
+    // for uptime but do not arm their virtual/physical timers.
+    if (core >= HOUSE_MAX_SMP) return;
+    uint64_t now; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+    house_boot_ticks[core] = now;
+    house_isr_pending[core] = 0;
+    __asm__ volatile("msr CNTV_CTL_EL0, %0" :: "r"((uint64_t)0));
+    __asm__ volatile("msr CNTP_CTL_EL0, %0" :: "r"((uint64_t)0));
+    __asm__ volatile("isb");
+    uart_puts("[house] timer secondary "); uart_putc('0'+core); uart_puts(" ok (no arm)\n");
 }
 
 void house_timer_rearm_virt(void) {
