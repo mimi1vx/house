@@ -2,9 +2,9 @@
 
 module HouseA64 where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (forM_, replicateM_)
+import Control.Monad (forM_)
 import Data.Word (Word64)
 import Foreign.C.String (peekCString, withCString)
 import Foreign.C.Types (CChar (..), CInt (..))
@@ -34,10 +34,10 @@ house_main = do
   where
     loop = do
       withCString "> " c_uart_puts
-      line <- getLine
+      line <- shellGetLine
       handle line
       loop
-    getLine = allocaBytes 256 $ \buf -> go buf 0
+    shellGetLine = allocaBytes 256 $ \buf -> go buf 0
       where
         go b n = do
           c <- c_getc_nonblock
