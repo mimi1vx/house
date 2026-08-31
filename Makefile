@@ -254,6 +254,12 @@ house-check:
 	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.elf \
 	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM)
 
+# Interactive shell (phase 5): prompt → help/lambda/wastemem via PL011 RX
+house-shell-check:
+	$(MAKE) house-build
+	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM)
+	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM)
+
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check
+        house-build house-run house-check house-shell-check

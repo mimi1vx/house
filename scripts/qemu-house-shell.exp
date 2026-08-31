@@ -1,0 +1,57 @@
+#!/usr/bin/expect -f
+# Interactive shell test for House/aarch64 (phase 5).
+# Boots house.elf, waits for welcome + prompt, sends commands, checks output.
+# Usage: expect scripts/qemu-house-shell.exp <kernel.elf> [timeout] [accel] [mem]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 30}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+# first prompt "> " comes from LineEditor getLine after welcome
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# help should print usage containing "Usage:"
+send "help\r"
+expect {
+    -re "Usage:" { puts "\nPASS: help printed Usage" }
+    timeout { puts "\nFAIL: help timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before help output"; exit 1 }
+}
+# next prompt
+expect {
+    -re "> " { puts "\nPASS: prompt after help" }
+    timeout { puts "\nFAIL: prompt after help timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after help"; exit 1 }
+}
+send "lambda\r"
+expect {
+    -re "Too much to abstract" { puts "\nPASS: lambda output" }
+    timeout { puts "\nFAIL: lambda timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before lambda"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after lambda" }
+    timeout { puts "\nFAIL: prompt after lambda timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after lambda"; exit 1 }
+}
+send "wastemem 10\r"
+expect {
+    -re "55" { puts "\nPASS: wastemem 10 => 55" }
+    timeout { puts "\nFAIL: wastemem timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before wastemem"; exit 1 }
+}
+puts "\nPASS: shell interactive ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

@@ -9,7 +9,7 @@ import H.Monad (H, runH)
 import Kernel.Console
 import Kernel.Debug (v_defaultConsole)
 import Kernel.Driver.Keyboard (KeyPress)
-import Kernel.Driver.PL011 (launchConsoleDriver)
+import Kernel.Driver.PL011 (launchConsoleDriver, launchPL011KeyboardDriver)
 import Kernel.LineEditor
 import Monad.Util
 import Util.CmdLineParser hiding ((!))
@@ -27,9 +27,9 @@ mainH = do
   enableInterrupts
   _ <- forkH idle
   console <- launchConsoleDriver
+  kbdChan <- launchPL011KeyboardDriver
   putMVar v_defaultConsole console
   putString console (welcome ++ "\n\n")
-  kbdChan <- newChan
   textShell console kbdChan
 
 welcome :: String
