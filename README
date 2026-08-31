@@ -143,3 +143,10 @@ Repository layout
 notes kept on disk for contributors but not committed.  See
 `plans/porting-log.md` for the full deviation log and the DFSC 0x35 debug
 story.
+
+License
+-------
+MIT -- see `LICENSE`. Inspired by House/hOp (S. Carlier / J. Bobbio,
+Programatica, 2004-2005) but no verbatim original code is retained; this
+aarch64/GHC-9.14 port is a clean rewrite. MIT is compatible with GHC 9.14's
+BSD-3-Clause RTS/license.
