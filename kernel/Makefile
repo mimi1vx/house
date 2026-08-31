@@ -21,7 +21,7 @@ PKGS := -package mtl -package array -package containers -package pretty
 # ExistentialQuantification/PatternGuards are unused; FFI is default-on).
 EXTS := -XGHC2024
 
-GHCFLAGS := -O1 -outputdir $(BUILD) -i. $(PKGS) $(EXTS) -Wall
+GHCFLAGS := -O1 -outputdir $(BUILD) -i. $(PKGS) $(EXTS) -Wall -Werror
 
 # Default: compile-only check (no link). Mirrors platform Makefile idiom for
 # verifying the closure compiles under stock GHC 9.14.

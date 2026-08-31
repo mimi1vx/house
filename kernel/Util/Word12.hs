@@ -3,7 +3,7 @@ module Util.Word12 (Word12) where
 import Data.Bits
 import Data.Ix
 import Data.Ratio
-import Data.Word (Word32 (..))
+import Data.Word (Word32)
 
 newtype Word12 = Word12 {unWord12 :: Word32}
   deriving (Eq, Ord)

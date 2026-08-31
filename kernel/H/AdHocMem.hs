@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -Wno-unused-imports -Wno-missing-signatures #-}
-
 -- | Ad-hoc memory access, not necessarily safe!
 module H.AdHocMem
   ( module H.AdHocMem,
@@ -17,12 +15,11 @@ module H.AdHocMem
   )
 where
 
-import Control.Monad (zipWithM_)
-import Data.Array.IArray
-import Data.Array.IO (IOUArray, freeze, newArray_, writeArray)
--- import Data.Ix
+import Data.Array.IArray (IArray, assocs, bounds)
+import Data.Array.IO (IOUArray, MArray, freeze, newArray_, writeArray)
 -- For SPECIALIZE pragma:
 import Data.Array.Unboxed (UArray)
+import Data.Ix (Ix, index, range)
 import Data.Word
   ( Word16,
     Word32,
@@ -36,8 +33,10 @@ import Foreign.Ptr (Ptr, alignPtr, castPtr, minusPtr, nullPtr, plusPtr)
 import qualified Foreign.Storable as IO
 import H.Monad (H, liftIO, runH)
 
+mallocBytes :: Int -> H (Ptr a)
 mallocBytes n = liftIO $ IO.mallocBytes n
 
+free :: Ptr a -> H ()
 free p = liftIO $ IO.free p
 
 absolutePtr :: Word32 -> Ptr a
@@ -46,26 +45,37 @@ absolutePtr n = nullPtr `plusPtr` fromIntegral n
 absolutePtr64 :: Word64 -> Ptr a
 absolutePtr64 n = nullPtr `plusPtr` fromIntegral n
 
+poke :: (IO.Storable a) => Ptr a -> a -> H ()
 poke p x = liftIO $ IO.poke p x
 
+peek :: (IO.Storable a) => Ptr a -> H a
 peek p = liftIO $ IO.peek p
 
+pokeByteOff :: (IO.Storable a) => Ptr b -> Int -> a -> H ()
 pokeByteOff p o x = liftIO $ IO.pokeByteOff p o x
 
+peekByteOff :: (IO.Storable a) => Ptr b -> Int -> H a
 peekByteOff p o = liftIO $ IO.peekByteOff p o
 
+pokeElemOff :: (IO.Storable a) => Ptr a -> Int -> a -> H ()
 pokeElemOff p o x = liftIO $ IO.pokeElemOff p o x
 
+peekElemOff :: (IO.Storable a) => Ptr a -> Int -> H a
 peekElemOff p o = liftIO $ IO.peekElemOff p o
 
+moveBytes :: Ptr a -> Ptr a -> Int -> H ()
 moveBytes dst src n = liftIO $ IO.moveBytes dst src n
 
+copyArray :: (IO.Storable a) => Ptr a -> Ptr a -> Int -> H ()
 copyArray dst src n = liftIO $ IO.copyArray dst src n
 
+withArray :: (IO.Storable a) => [a] -> (Ptr a -> H b) -> H b
 withArray xs h = liftIO $ IO.withArray xs (runH . h)
 
+allocaArray :: (IO.Storable a) => Int -> (Ptr a -> H b) -> H b
 allocaArray i h = liftIO $ IO.allocaArray i (runH . h)
 
+pokeArray :: (IO.Storable e, IArray UArray e, Ix Int) => Ptr e -> UArray Int e -> H ()
 pokeArray p a =
   --    zipWithM_ (pokeElemOff p) [0..] (elems a) -- slow
   mapM_ (uncurry (pokeElemOff p . index b)) (assocs a) -- avoids bounds checks?
@@ -73,6 +83,7 @@ pokeArray p a =
   where
     b = bounds a
 
+peekArray :: (IO.Storable e, IArray UArray e, MArray IOUArray e IO) => Ptr e -> Int -> H (UArray Int e)
 peekArray p n =
   do
     let b = (0, n - 1)

@@ -18,13 +18,10 @@ where
 -- import Kernel.Debug(putStrLn)
 import Control.Monad
 import Data.Bits
-import Data.Word (Word64, Word8)
 import H.AdHocMem
-import H.Monad (H, liftIO)
-import H.Mutable (HUArray, newArray, readArray, writeArray)
+import H.Monad (liftIO)
 import qualified H.Pages as P
 import H.PhysicalMemory (PhysPage, fromPhysPage, toPhysPage)
-import H.Unsafe (unsafePerformH)
 import H.Utils
 
 ------------------------------- INTERFACE --------------------------------------
@@ -78,20 +75,20 @@ type PDir = Table
 data PageMap = PageMap {fromPageMap :: PDir}
   deriving (Show, Eq, Ord)
 
+toPageMap :: PDir -> PageMap
 toPageMap = PageMap
 
 -- Descriptor bits (aarch64 4KB granule, page descriptor)
-bValid, bTable, bAF, bNG, bUXN, bPXN :: Int
+bValid, bAF, bNG, bUXN, bPXN :: Int
 bValid = 0
-bTable = 1
 bAF = 10
 bNG = 11
 bUXN = 54
 bPXN = 53
 
 -- SW bits for dirty/accessed structure-level round-trip (never walked by HW)
+bSwDirty, bSwAccessed :: Int
 bSwDirty = 55
-
 bSwAccessed = 56
 
 mAddress :: Word64
@@ -136,12 +133,12 @@ pageInfoToDesc pinfo =
           .|. (1 `shiftL` bUXN)
           .|. (1 `shiftL` bPXN)
           .|. attrNormal
-      ap = if writable pinfo then apRW else apRO
+      apBits = if writable pinfo then apRW else apRO
       sw =
         condBit (dirty pinfo) bSwDirty
           $ condBit (accessed pinfo) bSwAccessed
           $ 0
-   in base .|. ap .|. sw
+   in base .|. apBits .|. sw
 
 -- Table helpers
 descFromTable :: Table -> Desc
@@ -197,6 +194,7 @@ getPage (PageMap l0) vaddr | validVAddr vaddr =
               Just l3 -> do
                 d3 <- peekElemOff l3 (l3Index vaddr)
                 return (descToPageInfo d3)
+getPage _ _ = return Nothing
 
 setPage (PageMap l0) vaddr Nothing | validVAddr vaddr =
   do
@@ -250,6 +248,8 @@ setPage (PageMap l0) vaddr (Just pinfo) | validVAddr vaddr =
         pokeElemOff l3 (l3Index vaddr) (pageInfoToDesc pinfo)
         invalidate l0 vaddr
         return True
+setPage _ vaddr _ | not (validVAddr vaddr) = return False
+setPage _ _ _ = return False
 
 allocPageMap =
   do
@@ -275,7 +275,7 @@ allocPageMap =
                 P.registerPage l0 pm freePDir
                 return (Just pm)
 
-freePageMap pmap = return () -- nop; underlying Pages are freed when corresponding registered PageMap is discovered dead
+freePageMap _ = return () -- nop; underlying Pages are freed when corresponding registered PageMap is discovered dead
 
 freePDir :: PDir -> H ()
 freePDir l0 =
@@ -304,12 +304,15 @@ freePDir l0 =
 
 foreign import ccall unsafe "userspace.h init_page_dir" initPDirIO :: PDir -> IO ()
 
+initPDir :: PDir -> H ()
 initPDir = liftIO . initPDirIO
 
 foreign import ccall unsafe "userspace.h current_pdir" currentPDirIO :: IO PDir
 
 foreign import ccall unsafe "userspace.h invalidate_page" invalidatePageIO :: VAddr -> IO ()
 
+currentPDir :: H PDir
 currentPDir = liftIO currentPDirIO
 
+invalidatePage :: VAddr -> H ()
 invalidatePage = liftIO . invalidatePageIO

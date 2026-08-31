@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -Wno-unused-top-binds #-}
-
 -- | Volatile RamFS over 'H.Pages' 512x4K pool.
 -- Backed purely by 'H.Pages' ('P.Page Word8'); 2 MiB cap, no host I/O.
 -- Single global root protected by one 'QSem' (matches 'H.Pages.pageSem' pattern).
@@ -51,8 +49,8 @@ data FsStat = FsStat
 -- | In-memory node. 'File' pages are 'P.validPage' and
 -- length equals ceil(fileSize/4096).
 data Node
-  = File {filePages :: [P.Page Word8], fileSize :: Int, fileMtime :: Word64}
-  | Dir {dirKids :: Map String Node}
+  = File [P.Page Word8] Int Word64
+  | Dir (Map String Node)
 
 -- Global root and semaphore. Matches 'H.Pages.freeList'/'pageSem' pattern.
 {-# NOINLINE fsRoot #-}

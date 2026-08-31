@@ -1,17 +1,19 @@
-{-# OPTIONS_GHC -Wno-unused-imports -Wno-missing-signatures #-}
-
 module H.Utils where
 
 import Data.Bits
 import Data.Word (Word32, Word64)
-import H.AdHocMem (Ptr, absolutePtr64, alignPtr, minusPtr, nullPtr, plusPtr)
+import H.AdHocMem (Ptr, absolutePtr64, alignPtr, minusPtr, nullPtr)
 
+setBit' :: (Bits a) => Int -> a -> a
 setBit' b = flip setBit b
 
+clearBit' :: (Bits a) => Int -> a -> a
 clearBit' b = flip clearBit b
 
+testBit' :: (Bits a) => Int -> a -> Bool
 testBit' b = flip testBit b
 
+condBit :: (Bits a) => Bool -> Int -> a -> a
 condBit True = setBit'
 condBit False = clearBit'
 
