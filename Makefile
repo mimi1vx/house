@@ -231,5 +231,29 @@ irq-check:
 	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.elf \
 	  'vm-ok' 120 tcg $(SPIKE_MEM)
 
+# --- aarch64 house kernel (plans/phase-4-module-port.md) ---
+house-build:
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C $(SPIKE_DIR) house DEFS_C='$(SPIKE_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S)'
+
+house-run:
+	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
+	  -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.elf
+
+house-check:
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C $(SPIKE_DIR) clean
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C kernel -f Makefile.aarch64 clean
+	$(MAKE) house-build
+	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.elf \
+	  'Welcome to the House shell' 30 hvf $(SPIKE_MEM)
+	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.elf \
+	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM)
+
 .PHONY: container-image container-shell spike-build spike-run spike-check \
-        irq-build irq-run irq-check
+        irq-build irq-run irq-check \
+        house-build house-run house-check

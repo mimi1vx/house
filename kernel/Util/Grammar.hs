@@ -1,4 +1,5 @@
 module Util.Grammar where
+import Prelude hiding ((<>))
 import Text.PrettyPrint
 
 data Grammar

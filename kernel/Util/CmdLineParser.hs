@@ -45,6 +45,7 @@ token f s = P (Terminal s) (tokenP f s)
 P g1 p1 ! P g2 p2 = P (Alt g1 g2) (p1 `mplus` p2)
 many (P g p) = P (Many g) (manyP p)
 opt (P g p) = P (Opt g) (fmap Just p `mplus` return Nothing)
+oneof :: [P res] -> P res
 oneof = foldr1 (!)
 
 chk p p' = const `fmap` p <@ p'

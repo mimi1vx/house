@@ -8,9 +8,7 @@ module Kernel.LineEditor
  Loosely based on SimpleLineEditor by Malcom Wallace
  http://www.haskell.org/pipermail/glasgow-haskell-users/2003-June/005370.html
 ---}
-{-P:
 import Prelude hiding (getLine)
--}
 import H.Monad(H)
 import H.Concurrency
 import Control.Monad(unless)

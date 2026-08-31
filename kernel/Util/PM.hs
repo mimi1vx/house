@@ -1,5 +1,7 @@
 module Util.PM(PM,tokenP,manyP,parsePM,runPM,render') where
+import Control.Applicative(Alternative(..))
 import Control.Monad(liftM,MonadPlus(..),ap)
+import Control.Monad.Fail(MonadFail(..))
 import Text.PrettyPrint
 
 {-+
@@ -24,7 +26,7 @@ parsePM p args =
     Left (args,errs) ->
         Left $ ('\n':) $ render' $
                text expected<+>fsep (map text errs)
-               $$ (if null args then empty else text "Found: "<+>fsep (map text args))
+               $$ (if null args then Text.PrettyPrint.empty else text "Found: "<+>fsep (map text args))
                $$ text ""
       where expected = if length errs==1
 		       then "Expected:"
@@ -32,12 +34,21 @@ parsePM p args =
 
 instance Functor PM where fmap = liftM
 
+instance Applicative PM where
+  pure x = PM $ \args->Right (x,args)
+  (<*>) = ap
+
 instance Monad PM where
-  fail s = PM $ \ args->Left (args,[s])
-  return x = PM $ \args->Right (x,args)
   PM p1>>=xp2 = PM $ \ args->case p1 args of
 			       Left err -> Left err
 			       Right (x,args') -> unPM (xp2 x) args'
+
+instance MonadFail PM where
+  fail s = PM $ \ args->Left (args,[s])
+
+instance Alternative PM where
+  empty = fail "no parse"
+  (<|>) = mplus
 
 instance MonadPlus PM where
   mzero = fail "no parse" -- Hmm. Error message should say what was expected

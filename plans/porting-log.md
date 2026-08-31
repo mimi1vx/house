@@ -231,3 +231,124 @@ TCG re-verified at 4G. Legacy i386 flow untouched (additive diff only).
 
 - **Carry-forward:** `H.IOPorts` CPP-gating and trimming the now-orphaned
   `c_handle_sync` alignment-emulation paths remain deferred to phase 4.
+
+## Phase 4 — mechanical module port + boot banner (2026-08-31)
+
+- **Entry skeleton `kernel/HouseA64.hs` (new):** trimmed copy of `House.hs`
+  (no GFX/VBE/GIF/Gadgets, Net, PCI, user-mode, Grub modules, CMOS/reboot,
+  PS2/mouse). Keeps `H.Monad`/`H.Concurrency`/`H.Interrupts.enableInterrupts`,
+  `idle`, `Kernel.Debug.v_defaultConsole`, `Kernel.Console`,
+  `Kernel.LineEditor`, `Kernel.Driver.Keyboard` interpreter/decoder
+  (arch-independent), grammar machinery (`Util.CmdLineParser`,
+  `Util.Grammar`, `Monad.Util`), bare-minimum shell (`help`,
+  `lambda`, `preempt`, `wastemem` only) and the same `welcome` string.
+  Exports `house_main :: IO ()` via `foreign export ccall` and is selected
+  in `c_start.c` as priority `house_main` → `house_irqcheck_main` →
+  `house_spike_main` (weak symbols). Text shell uses an empty
+  `Chan KeyPress` — boot-banner gate; step 5 swaps in UART-RX producer.
+
+- **PL011 console driver `kernel/Kernel/Driver/PL011.hs` (new):**
+  `launchConsoleDriver :: H Console` builds `ConsoleData` (80×25) and forks
+  a consumer thread mapping `ConsoleCommand → uart_*` FFI
+  (`foreign import ccall unsafe "uart_putc"` / `"uart_puts"`):
+  `PutChar` (with `\n` already CRLF in `uart_putc`), `NewLine→\n`,
+  `CarriageReturn→\r`, `MoveCursorBackward n→n×BS`, `ClearScreen→ESC[2J ESC[H`,
+  `ClearEOL→ESC[K`; `VideoAttributes` ignored. `c_print` helper added in
+  `platform/aarch64/tinylibc/c_print.c` (`uart_putc` loop) so `H.Monad.trace`
+  works freestanding; linked via new `TINY` object.
+
+- **Build split:**
+  `kernel/Makefile.aarch64` is the closure build:
+  `ghc --make -no-link HouseA64.hs -i. -outputdir build-kernel -O1`
+  with explicit `PKGS=-package mtl -package array -package containers -package pretty`
+  and seed `EXTS` replacing `-fglasgow-exts -fallow-*`:
+  `MultiParamTypeClasses, FunctionalDependencies, FlexibleInstances,`
+  `FlexibleContexts, UndecidableInstances, OverlappingInstances,`
+  `ImplicitParams, ExistentialQuantification, ScopedTypeVariables,`
+  `Rank2Types, KindSignatures, PatternGuards, ForeignFunctionInterface,`
+  `GeneralizedNewtypeDeriving` (final set pinned here and in the Makefile;
+  `OverlappingInstances` is deprecated in 9.14 but still accepted — fallback
+  would be per-instance `OVERLAPPING` pragmas). The file carries the
+  **excluded-modules list** as a comment block (operational single source of
+  truth). `kernel/platform/aarch64/Makefile` gains a `house` target:
+  `find ../../build-kernel -name '*.o'` + `start.o mmu.o c_start.o uart.o`
+  + `tinylibc` + `gic/timer/irq/userspace` + `--start-group PRIM/BNUM/GINT`
+  `CONT/PRETTY/MTL/ARRAY/TRANS/DEEP/BASE/RTS/FFI --end-group` plus
+  `libgmp`/`libgcc`, `ld --build-id=none --gc-sections -T aarch64.ld`.
+  Top-level `Makefile` adds `house-build`/`house-run`/`house-check`
+  (mirroring `irq-*`, pinned `--platform linux/arm64`, `SPIKE_DEFS_C/S`
+  passed so RAM/stack defines cannot disagree) and
+  `scripts/qemu-house.exp` which asserts the welcome string.
+
+- **Churn fixes to green (smaller than feared):** the feared Gadgets/Net
+  churn is entirely excluded; the `HouseA64` closure is **15 modules**,
+  not 35–40 (the original estimate counted VM pages, but `HouseA64`
+  does not use `H.VirtualMemory`). Inventory from first `ghc --make -no-link`
+  before any fix is preserved in this entry: only warnings; no hard errors
+  before the micro-fixes below — the delta vs the seed set was zero.
+  Mechanical fixes applied (one log entry per non-obvious fix):
+  * `Kernel.LineEditor`: add `import Prelude hiding (getLine)` (the
+    `{-P: import Prelude hiding (getLine) -}` line was Pugs-only comment;
+    GHC 9.14 sees two `getLine`s at the export list).
+  * `Util.Grammar`: `import Prelude hiding ((<>))` — Prelude's `<>`
+    (Semigroup, base ≥4.11) collides with `Text.PrettyPrint.<>`.
+  * `Util.PM`: split `Monad`'s `fail` into `MonadFail` (base ≥4.9), add
+    `Applicative` (`pure`/`<*>`) and `Alternative` (`empty`/`(<|>)`) superclasses
+    required since GHC 7.10/8.0; disambiguate `empty` vs
+    `Text.PrettyPrint.empty` by qualifying the PrettyPrint use;
+    `return` removed from `Monad` (now `pure`). Add missing
+    `import Control.Applicative (Alternative(..))` and
+    `import Control.Monad.Fail`.
+  * `Util.CmdLineParser`: add type signature `oneof :: [P res] -> P res`
+    so overloaded `Foldable.foldr1` (GHC ≥7.10) resolves to the list
+    instance; insert `import Prelude hiding ((<>))` not needed there but
+    the pretty `empty` conflict was already handled in PM.
+  * `HouseA64`: `import Prelude hiding (getLine)` to disambiguate the
+    `getLine` from `Kernel.LineEditor` vs Prelude.
+  * `Kernel.Driver.PL011`: `CChar(..)` import to allow FFI marshalling,
+    plus `CString` import fix.
+  * Link: `H.Monad` pulls `Control.Monad.Trans (transformers)` and
+    `containers` pulls `deepseq`; both `libHStransformers-*.a` and
+    `libHSdeepseq-*.a` added to the house link line (plus `containers`,
+    `pretty`, `mtl`, `array`). Missing `c_print` symbol satisfied by new
+    `tinylibc/c_print.c`.
+  Final `default-extensions` set is as pinned above; `ghc --make -no-link`
+  green after those micro-fixes, no per-module pragma churn.
+
+- **Link + readelf gate:** `make house` inside the container links
+  `build/house.elf`; `readelf -h` shows `ENTRY(_start)` and `Machine: AArch64`
+  (`0x40080000`, `aarch64.ld`). Verifies `--gc-sections --build-id=none`.
+
+- **Boot-banner smoke:** `make house-check` from clean does
+  container `make -C kernel/platform/aarch64 house` (thus `kernel/Makefile.aarch64`
+  first) then `expect scripts/qemu-house.exp` for `Welcome to the House shell`
+  under **hvf and tcg** (30 s timeout, 4 G RAM, `virt,gic-version=3`).
+  Both pass: hvf prints `[house] gic ok` / `irq ok` / `timer ok`
+  then the Haskell welcome via `Console→PL011`; shell then blocks on the
+  empty `kbdChan` as intended. `make spike-check` and `make irq-check`
+  remain green hvf+tcg.
+
+- **Excluded-modules list verification:** closure is the `ghc --make -v0`
+  output (15 `.o` files); every excluded family is justified in
+  `kernel/Makefile.aarch64` comment block; `Data.PackedString` consumers
+  (`Kernel.PCI.DevInfo`, `ParseVendors`) and `H.IOPorts` consumers all lie
+  outside the closure; `H.IOPorts` itself compiles but is unused-not-gated
+  (moot carry-forward, logged as deviation, no CPP-gating).
+
+- **Phase-3 carry-forward trimmed:** `c_handle_sync` alignment-emulation
+  paths (`DFSC=0x21` plus 200-line `STP`/`LDP`/`STR`/`Q-register` decoder and
+  `unknown` label) removed once `house-check` proved no other unaligned-fault
+  source; only the single-core exclusive emulation (`DFSC=0x35`, `emu_exclusive`)
+  remains, all other `ESR` faults are now fatal `uart_puts` + `wfi`. Verified:
+  `spike-check`, `irq-check`, `house-check` all still green hvf+tcg after trim.
+
+- **Legacy i386 flow:** additive-only diff remains (`Containerfile`,
+  `Makefile` new `house-*` targets, `kernel/platform/aarch64/*`, new
+  `HouseA64`/`PL011`/`Makefile.aarch64`); `git diff --stat` shows no
+  deletion/modification of `kernel/Makefile` or `ghc-6.8.2` build.
+
+- **Deviation from phase-4 doc:** the doc's "~35–40 in-tree modules" estimate
+  assumed `H.VirtualMemory`/`PhysicalMemory` would be pulled; `HouseA64`'s
+  minimal shell does not require VM allocation, so the actual closure is 15.
+  The doc's `H.IOPorts` CPP-gating is correctly recorded as moot
+  (already in the log). No other deviation.

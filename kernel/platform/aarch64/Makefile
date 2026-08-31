@@ -17,18 +17,30 @@ UNITDIR_base := $(shell ghc-pkg field base import-dirs --simple-output | awk '{p
 UNITDIR_prim := $(shell ghc-pkg field ghc-prim import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_bnum := $(shell ghc-pkg field ghc-bignum import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_gint := $(shell ghc-pkg field ghc-internal import-dirs --simple-output | awk '{print $$1}')
+UNITDIR_cont := $(shell ghc-pkg field containers import-dirs --simple-output | awk '{print $$1}')
+UNITDIR_pretty := $(shell ghc-pkg field pretty import-dirs --simple-output | awk '{print $$1}')
+UNITDIR_mtl  := $(shell ghc-pkg field mtl import-dirs --simple-output | awk '{print $$1}')
+UNITDIR_arr  := $(shell ghc-pkg field array import-dirs --simple-output | awk '{print $$1}')
+UNITDIR_trans := $(shell ghc-pkg field transformers import-dirs --simple-output | awk '{print $$1}')
+UNITDIR_deep := $(shell ghc-pkg field deepseq import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_rts  := $(shell ghc-pkg field rts library-dirs --simple-output | awk '{print $$1}')
 
 BASE_A := $(shell ls $(UNITDIR_base)/libHSbase-*.a | head -1)
 PRIM_A := $(shell ls $(UNITDIR_prim)/libHSghc-prim-*.a | head -1)
 BNUM_A := $(shell ls $(UNITDIR_bnum)/libHSghc-bignum-*.a | head -1)
 GINT_A := $(shell ls $(UNITDIR_gint)/libHSghc-internal-*.a | head -1)
+CONT_A := $(shell ls $(UNITDIR_cont)/libHScontainers-*.a | head -1)
+PRETTY_A := $(shell ls $(UNITDIR_pretty)/libHSpretty-*.a | head -1)
+MTL_A  := $(shell ls $(UNITDIR_mtl)/libHSmtl-*.a 2>/dev/null | head -1)
+ARRAY_A:= $(shell ls $(UNITDIR_arr)/libHSarray-*.a | head -1)
+TRANS_A:= $(shell ls $(UNITDIR_trans)/libHStransformers-*.a | head -1)
+DEEP_A := $(shell ls $(UNITDIR_deep)/libHSdeepseq-*.a | head -1)
 RTS_A  := $(shell ls $(UNITDIR_rts)/libHSrts-*.a | grep -v thr | grep -v debug | grep -v eventlog | head -1)
 FFI_A  := $(UNITDIR_rts)/libCffi.a
 
 TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
-        tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
-        tinylibc/mathmin.c
+         tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
+         tinylibc/mathmin.c tinylibc/c_print.c
 
 PLATFORM_C := gic.c timer.c irq.c userspace.c
 
@@ -47,11 +59,31 @@ OBJS_IRQ := build/start.o build/mmu.o build/c_start.o build/uart.o \
         $(addprefix build/,$(PLATFORM_C:.c=.o)) \
         build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
 
+# House kernel (phase 4): boot → PL011 welcome banner, blocks on empty input.
+# Haskell objects are produced by kernel/Makefile.aarch64 (build-kernel/**.o)
+# and collected via find; C/platform objects are rebuilt here.
+OBJS_HOUSE_DEPS := build/start.o build/mmu.o build/c_start.o build/uart.o \
+        $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
+        $(addprefix build/,$(PLATFORM_C:.c=.o))
+
 all: build/spike.elf
 	@readelf -h build/spike.elf | grep -E 'Entry|Machine'
 
 irq: build/irq.elf
 	@readelf -h build/irq.elf | grep -E 'Entry|Machine'
+
+house: build/house.elf
+	@readelf -h build/house.elf | grep -E 'Entry|Machine'
+
+house-hs:
+	$(MAKE) -C ../.. -f Makefile.aarch64
+
+build/house.elf: house-hs $(OBJS_HOUSE_DEPS) aarch64.ld
+	$(LD) --build-id=none --gc-sections -T aarch64.ld -o $@ \
+	  $(OBJS_HOUSE_DEPS) $$(find ../../build-kernel -name '*.o') \
+	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  $(shell $(CC) -print-libgcc-file-name)
 
 build:
 	mkdir -p build build/H build/Kernel/Types build/Util build/Kernel

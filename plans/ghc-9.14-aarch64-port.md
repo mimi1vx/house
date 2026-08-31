@@ -72,10 +72,14 @@ the only official 9.14.1 aarch64 bindist is `deb10`; no musl build exists)
 4. **[large] Mechanical module port** — introduce a cabal-less `ghc --make`
    build (new `kernel/Makefile.aarch64` or top-level rewrite) with a
    `default-extensions` set replacing `-fglasgow-exts/-fallow-*`; fix
-   base/containers/MonadFail/API churn across the ~167 modules; maintain an
-   explicit **excluded-modules list** (IA32 drivers, gfx, net, osker/hovel,
-   DomOS4, user/). Keep a porting log. — verify: `ghc --make` green for the
-   reduced Main; excluded list reviewed and justified.
+   base/containers/MonadFail/API churn across the reduced-Main closure
+   (measured: ~35–40 of the ~123-module full closure; Gadgets/Net/PCI
+   excluded); maintain an explicit **excluded-modules list** (IA32 drivers,
+   gfx, net, osker/hovel, DomOS4, user/). Keep a porting log. Gate extended
+   (2026-08-31): the linked kernel also boots and prints the shell welcome
+   via PL011. Details: `plans/phase-4-module-port.md`.
+   — verify: `ghc --make` green for the reduced Main; `make house-check`
+   (banner) green; excluded list reviewed and justified.
 
 5. **[medium] Shell bring-up** — wire `Kernel.LineEditor` + shell to PL011 RX;
    ensure `threadDelay`/timers work via synthesized ticks. — verify: scripted
@@ -118,6 +122,6 @@ the only official 9.14.1 aarch64 bindist is `deb10`; no musl build exists)
       `make spike-check` from clean at 512M/1G/2G/4G (see porting-log
       phase 2 for the four stacked root causes behind DFSC=0x35)
 - [x] Tick counter advances via IRQ-driven dispatcher + `vm-ok` PageMap round-trip (step 3 — GICv3 PPIs 27/30, timerfd tick seam, dispatcher thread, aarch64 L0–L3 descriptors, see porting-log phase 3 + `plans/phase-3-interrupts-vm.md`)
-- [ ] Reduced-module kernel links; `readelf -h` shows correct entry/load addr (step 4)
+- [x] Reduced-module kernel links; `readelf -h` shows correct entry/load addr (step 4 — `make house-check` green hvf+tcg, 15-module closure via `kernel/Makefile.aarch64`, see `plans/phase-4-module-port.md` + porting-log phase 4)
 - [ ] Scripted QEMU session reaches shell prompt and executes a command (step 5)
 - [ ] `make check` reproduces the above from clean state (step 6)
