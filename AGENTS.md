@@ -25,6 +25,7 @@ make irq-build / irq-run / irq-check                # irq-check = hvf+tcg, asser
 make house-build / house-run / house-check          # banner "Welcome to the House shell" hvf+tcg
 make house-shell-check        # prompt + help->Usage + lambda + wastemem 10->55 hvf+tcg
 make house-posix-check        # help -- descriptions, echo/uname/uptime, shutdown -r (reboot) / -h (halt)
+make house-fs-check           # ramfs: write/cat/ls/mkdir/rm + echo > /path over H.FileSystem (2 MiB pool) hvf+tcg
 make smp-check                # smp: N cores online + caps N + parfib 20=6765 + mvar ok hvf+tcg (default N=2; SMP_N=4 for >2 gate)
 make check                    # CI gate: spike-check + irq-check + house-check + house-shell-check + house-posix-check
 make run                      # alias for house-run (hvf, $SPIKE_MEM)
@@ -47,7 +48,7 @@ make -C platform/aarch64 house SMP_N=2 DEFS_C='... -DHOUSE_SMP_N=2' DEFS_S='... 
 - **Link:** `platform/aarch64/Makefile:28-39` locates `HsFFI.h` + `libHS{rts,base,ghc-prim,ghc-bignum,ghc-internal,containers,pretty,mtl,array,transformers,deepseq,Cffi}.a` via `ghc --print-libdir`/`ghc-pkg field`; `rts` is threaded (`grep thr`); archives + `libgmp.a` + `libgcc` linked `--start-group/--end-group`. `readelf -h` gate checks `ENTRY(_start)` / `Machine: AArch64`.
 - **Haskell exts** pinned in `kernel/Makefile:20-32`: `MultiParamTypeClasses FunctionalDependencies FlexibleInstances FlexibleContexts UndecidableInstances ImplicitParams ExistentialQuantification ScopedTypeVariables Rank2Types KindSignatures PatternGuards ForeignFunctionInterface GeneralizedNewtypeDeriving` (`-O1 -Wall`; `OverlappingInstances` is per-instance `OVERLAPPING`, not global).
 - **PSCI:** `psci.c` via `hvc #0` (`SYSTEM_OFF`/`SYSTEM_RESET`/`CPU_ON 0xC4000003`/`CPU_OFF`/`AFFINITY_INFO`) with `smc` fallback; QEMU `virt` pins `psci-conduit=hvc`. `timer.c` records `CNTVCT_EL0` per core at boot for `house_uptime_secs`.
-- **Shell:** `HouseA64.hs` — `help`/`echo`/`clear`/`uname` (`House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt`)/`uptime`/`shutdown [-h|-r]` (xor semantics; both/neither → `usage: shutdown [-h|-r]`) + `lambda`/`preempt`/`wastemem` + `smp` (`cores=N onlineMask timers PPI27+30 ipi=SGI0 caches=WB`)/`caps` (`getNumCapabilities`)/`parfib`/`mvar`. UART via `Kernel.Driver.PL011`.
+- **Shell:** `HouseA64.hs` — `help`/`echo`/`clear`/`uname` (`House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt`)/`uptime`/`shutdown [-h|-r]` (xor semantics; both/neither → `usage: shutdown [-h|-r]`) + `lambda`/`preempt`/`wastemem` + `smp` (`cores=N onlineMask timers PPI27+30 ipi=SGI0 caches=WB`)/`caps` (`getNumCapabilities`)/`parfib`/`mvar` + `ls`/`cat`/`write`/`rm`/`mkdir`/`stat` + `echo > /path` via `H.FileSystem` ramfs (volatile 2 MiB pool over `H.Pages` 512×4K). UART via `Kernel.Driver.PL011`.
 
 ## Verification order
 

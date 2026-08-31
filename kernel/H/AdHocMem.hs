@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wno-unused-imports -Wno-missing-signatures #-}
+
 -- | Ad-hoc memory access, not necessarily safe!
 module H.AdHocMem
   ( module H.AdHocMem,

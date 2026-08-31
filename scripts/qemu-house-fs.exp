@@ -1,0 +1,144 @@
+#!/usr/bin/expect -f
+# RamFS test for House/aarch64 (Track 1).
+# Boots house.elf, waits for welcome + prompt, runs ls/cat/mkdir/rm/write + echo > sugar.
+# Usage: expect scripts/qemu-house-fs.exp <kernel.elf> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 30}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# write /a hello
+send "write /a hello\r"
+expect {
+    -re "> " { puts "\nPASS: write /a hello" }
+    timeout { puts "\nFAIL: write /a timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /a\r"
+expect {
+    -re "hello" { puts "\nPASS: cat /a -> hello" }
+    timeout { puts "\nFAIL: cat /a timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after cat /a" }
+    timeout { puts "\nFAIL: prompt after cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "ls /\r"
+expect {
+    -re "a" { puts "\nPASS: ls / contains a" }
+    timeout { puts "\nFAIL: ls / timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "mkdir /d\r"
+expect {
+    -re "> " { puts "\nPASS: mkdir /d" }
+    timeout { puts "\nFAIL: mkdir /d timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "write /d/b world\r"
+expect {
+    -re "> " { puts "\nPASS: write /d/b world" }
+    timeout { puts "\nFAIL: write /d/b timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "ls /d\r"
+expect {
+    -re "b" { puts "\nPASS: ls /d -> b" }
+    timeout { puts "\nFAIL: ls /d timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ls /d timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /d/b\r"
+expect {
+    -re "world" { puts "\nPASS: cat /d/b -> world" }
+    timeout { puts "\nFAIL: cat /d/b timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat /d/b timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# overwrite
+send "write /a goodbye\r"
+expect {
+    -re "> " { puts "\nPASS: overwrite /a" }
+    timeout { puts "\nFAIL: overwrite timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /a\r"
+expect {
+    -re "goodbye" { puts "\nPASS: cat /a -> goodbye after overwrite" }
+    timeout { puts "\nFAIL: cat /a goodbye timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat goodbye timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# rm and verify
+send "rm /a\r"
+expect {
+    -re "> " { puts "\nPASS: rm /a" }
+    timeout { puts "\nFAIL: rm /a timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "ls /\r"
+expect {
+    -re "d" { puts "\nPASS: ls / after rm contains d" }
+    timeout { puts "\nFAIL: ls after rm timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ls after rm timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /a\r"
+expect {
+    -re "ENOENT|No such" { puts "\nPASS: cat /a after rm -> ENOENT" }
+    timeout { puts "\nFAIL: cat /a after rm timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat ENOENT timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# echo > sugar
+send "echo hello > /a\r"
+expect {
+    -re "> " { puts "\nPASS: echo hello > /a" }
+    timeout { puts "\nFAIL: echo > timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /a\r"
+expect {
+    -re "hello" { puts "\nPASS: cat /a after echo -> hello" }
+    timeout { puts "\nFAIL: cat after echo timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat echo timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# verify hierarchy preserved after rm/echo
+send "cat /d/b\r"
+expect {
+    -re "world" { puts "\nPASS: cat /d/b still world" }
+    timeout { puts "\nFAIL: cat /d/b after echo timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt final timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+puts "\nPASS: ramfs ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

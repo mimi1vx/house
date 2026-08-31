@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wno-unused-imports -Wno-missing-signatures #-}
+
 module H.Utils where
 
 import Data.Bits

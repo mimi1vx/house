@@ -13,6 +13,8 @@ import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (poke)
 import GHC.Conc (getNumCapabilities, getNumProcessors)
+import qualified H.FileSystem as FS
+import H.Monad (runH)
 
 foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 
@@ -31,6 +33,7 @@ foreign export ccall house_main :: IO ()
 house_main :: IO ()
 house_main = do
   withCString "Welcome to the House shell! Enter help to see a list of commands.\n\n" c_uart_puts
+  _ <- runH FS.fsInit
   loop
   where
     loop = do
@@ -54,7 +57,7 @@ house_main = do
     handle line = case words line of
       [] -> return ()
       ("help" : _) -> withCString usage c_uart_puts
-      ("echo" : ws) -> withCString (unwords ws ++ "\n") c_uart_puts
+      ("echo" : ws) -> handleEcho ws
       ["clear"] -> withCString "\ESC[2J\ESC[H" c_uart_puts
       ["uname"] -> withCString "House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt\n" c_uart_puts
       ["uptime"] -> do s <- c_uptime; withCString ("up " ++ show s ++ " seconds\n") c_uart_puts
@@ -78,17 +81,78 @@ house_main = do
       ["mvar", nStr] -> case reads nStr of
         [(n, "")] -> do ok <- mvarTest n; withCString (if ok then "mvar ok\n" else "mvar fail\n") c_uart_puts
         _ -> withCString "usage: mvar <number>\n" c_uart_puts
+      ["ls"] -> handleLs "/"
+      ["ls", p] -> handleLs p
+      ["cat", p] -> handleCat p
+      ["mkdir", p] -> handleMkdir p
+      ["rm", p] -> handleRm p
+      ["stat", p] -> handleStat p
+      ("write" : p : rest) -> handleWrite p (unwords rest)
+      ["write"] -> withCString "usage: write <path> <text>\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
+    handleEcho ws = case break (== ">") ws of
+      (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
+      (pre, _ : rest) -> case rest of
+        [] -> withCString "EINVAL: missing target after >\n" c_uart_puts
+        (target : _) -> do
+          r <- runH (FS.fsWrite target (unwords pre))
+          case r of
+            Left e -> withCString (showFsError e ++ "\n") c_uart_puts
+            Right () -> return ()
+    handleLs p = do
+      r <- runH (FS.fsLs p)
+      case r of
+        Left e -> withCString (showFsError e ++ "\n") c_uart_puts
+        Right xs -> withCString (unwords xs ++ "\n") c_uart_puts
+    handleCat p = do
+      r <- runH (FS.fsRead p)
+      case r of
+        Left e -> withCString (showFsError e ++ "\n") c_uart_puts
+        Right s -> withCString (s ++ "\n") c_uart_puts
+    handleMkdir p = do
+      r <- runH (FS.fsMkdir p)
+      case r of
+        Left e -> withCString (showFsError e ++ "\n") c_uart_puts
+        Right () -> return ()
+    handleRm p = do
+      r <- runH (FS.fsRm p)
+      case r of
+        Left e -> withCString (showFsError e ++ "\n") c_uart_puts
+        Right () -> return ()
+    handleStat p = do
+      r <- runH (FS.fsStat p)
+      case r of
+        Left e -> withCString (showFsError e ++ "\n") c_uart_puts
+        Right st -> withCString (show st ++ "\n") c_uart_puts
+    handleWrite p txt = do
+      r <- runH (FS.fsWrite p txt)
+      case r of
+        Left e -> withCString (showFsError e ++ "\n") c_uart_puts
+        Right () -> return ()
+    showFsError e = case e of
+      FS.ENOENT -> "ENOENT: No such file or directory"
+      FS.EEXIST -> "EEXIST: File exists"
+      FS.ENOTDIR -> "ENOTDIR: Not a directory"
+      FS.EISDIR -> "EISDIR: Is a directory"
+      FS.ENOSPC -> "ENOSPC: No space left on device"
+      FS.EINVAL s -> "EINVAL: " ++ s
     usage =
       unlines
-        [ "Usage: help | echo <word>... | clear | uname | uptime | shutdown [-h|-r] -- halt or reboot the machine",
+        [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname | uptime | shutdown [-h|-r] -- halt or reboot the machine",
           "       lambda -- lambda demo",
           "       preempt -- preemption demo",
           "       wastemem <number> -- allocate memory",
           "       smp -- show SMP cores online",
           "       caps -- show capabilities",
           "       parfib <n> -- parallel fib",
-          "       mvar <n> -- MVar ping-pong test"
+          "       mvar <n> -- MVar ping-pong test",
+          "       ls [path] -- list directory",
+          "       cat <path> -- show file",
+          "       mkdir <path> -- create directory",
+          "       rm <path> -- remove file or empty dir",
+          "       write <path> <text> -- write file (truncate)",
+          "       stat <path> -- show file stat",
+          "       echo <word>... [> /path] -- echo or write via ramfs (volatile 2 MiB pool)"
         ]
     seqFib :: Int -> Int
     seqFib n

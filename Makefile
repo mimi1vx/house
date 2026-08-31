@@ -122,6 +122,11 @@ smp-check:
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) $(SMP_N)
 
+# RamFS + VFS (Track 1): volatile 2 MiB pool over H.Pages, H.FileSystem via ls/cat/write/rm/mkdir/stat + echo > /path
+house-fs-check: house-build
+	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
 # spike ticks, GIC dispatch + VM, house banner, and interactive shell,
@@ -139,4 +144,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check run check
