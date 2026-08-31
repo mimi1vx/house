@@ -133,7 +133,7 @@ build/spike.elf: $(OBJS) aarch64.ld
 
 build/irq.elf: $(OBJS_IRQ) aarch64.ld
 	$(LD) --build-id=none --gc-sections -T aarch64.ld -o $@ $(OBJS_IRQ) \
-	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
 
