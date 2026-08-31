@@ -40,6 +40,7 @@ static struct {
     int kind;
     int peer;
     uint64_t ticks;
+    uint64_t last_ns;           /* timerfd pacing anchor */
     char buf[PIPE_CAP];
     size_t len;
 } fdt[FAKE_FD_N];
@@ -53,9 +54,16 @@ static int fd_slot(int fd)
 static char *empty_env[] = { 0 };
 char **environ = empty_env;
 
+int strcmp(const char *a, const char *b);
+
 char *getenv(const char *n)
 {
-    (void)n;
+    /* Base derives the Handle TextEncoding from LC_ALL/LC_CTYPE/LANG;
+       advertising UTF-8 keeps GHC off its wide-char fallback (which
+       would emit UCS-4 bytes on the UART). */
+    if (n && (!strcmp(n, "LANG") || !strcmp(n, "LC_ALL") ||
+              !strcmp(n, "LC_CTYPE")))
+        return "C.UTF-8";
     return 0;
 }
 
@@ -307,8 +315,36 @@ int timerfd_gettime(int fd, struct itimerspec *v)
     return 0;
 }
 
+extern volatile int house_isr_active;
+extern volatile uint64_t house_isr_pending;
+
+/* Timerfd pacing: the fd reads as due once tick_interval_ns has elapsed
+   since its previous delivered tick; before that read() answers EAGAIN
+   and poll() reports it not-ready, so the RTS ticker paces instead of
+   spinning on an always-ready fd.
+   When ISR ticks are active (house_isr_active), readiness is driven by
+   the hardware pending counter fed by the generic-timer ISR (see timer.c)
+   instead of wall-clock. */
+int house_timerfd_due(int fd)
+{
+    int s = fd_slot(fd);
+    if (s < 0 || fdt[s].kind != FD_TIMER)
+        return 0;
+    if (house_isr_active) return house_isr_pending > 0;
+    if (!tick_interval_ns)
+        return 1;
+    return house_uptime_ns() - fdt[s].last_ns >= tick_interval_ns;
+}
+
+int house_fd_pipe_readable(int fd)
+{
+    int s = fd_slot(fd);
+    return s >= 0 && fdt[s].kind == FD_PIPE_R && fdt[s].len > 0;
+}
+
 /* ---- console / fd io ---- */
 
+/* Timerfd pacing: see house_timerfd_due below / read() above. */
 ssize_t write(int fd, const void *buf, size_t n)
 {
     const char *b = buf;
@@ -318,8 +354,7 @@ ssize_t write(int fd, const void *buf, size_t n)
     if (s >= 0 && fdt[s].kind == FD_PIPE_W) {
         int p = fd_slot(fdt[s].peer);
         size_t room, k;
-        if (p < 0)
-            return -1;
+        if (p < 0) return -1;
         room = PIPE_CAP - fdt[p].len;
         k = n < room ? n : room;
         memcpy(fdt[p].buf + fdt[p].len, b, k);
@@ -341,6 +376,20 @@ ssize_t read(int fd, void *buf, size_t n)
     if (s < 0)
         return 0;
     if (fdt[s].kind == FD_TIMER && buf && n >= 8) {
+        if (!house_timerfd_due(fd)) {
+            *__errno_location() = EAGAIN;
+            return -1;
+        }
+        if (house_isr_active) {
+            /* Hardware tick: consume one pending ISR tick at a time.
+               Returning 1 per read keeps the RTS ticker in lockstep with
+               the ARM generic timer (PPI 27) without depending on SIGVTALRM. */
+            house_isr_pending--;
+            ++fdt[s].ticks;
+            *(uint64_t *)buf = 1;
+            return 8;
+        }
+        fdt[s].last_ns = house_uptime_ns();
         *(uint64_t *)buf = ++fdt[s].ticks;
         return 8;
     }
@@ -443,8 +492,9 @@ int pipe(int fds[2])
         *__errno_location() = ENFILE;
         return -1;
     }
-    fdt[r].peer = w;
-    fdt[w].peer = r;
+    /* peers are stored as FD NUMBERS (fd_slot-convertible), not slots */
+    fdt[r].peer = FAKE_FD_BASE + w;
+    fdt[w].peer = FAKE_FD_BASE + r;
     fds[0] = FAKE_FD_BASE + r;
     fds[1] = FAKE_FD_BASE + w;
     return 0;

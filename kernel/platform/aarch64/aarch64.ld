@@ -46,6 +46,12 @@ SECTIONS
     __bss_end = .;
   }
 
+  /* Scratch stack for early C before RAM size is known (mmu.c) */
+  __early_stack = .;
+  . = ALIGN(16);
+  . += 4096;
+  __early_stack_top = .;
+
   /DISCARD/ : {
     *(.comment)
     *(.note*)
@@ -59,8 +65,8 @@ SECTIONS
   }
 }
 
-__heap_base      = 0x42000000;   /* bump mmap / malloc region (low bank) */
-__heap_end       = 0xBC000000;
-boot_stack_bottom = 0x7F000000;   /* high bank for mmap lives at
-                                    0x4000000000+ (see tinylibc/alloc.c) */
-boot_stack_top    = 0x80000000;
+__ram_base       = 0x40000000;   /* guest RAM start (QEMU virt) */
+__heap_base      = 0x42000000;   /* bump malloc / mmap-commit region;
+                                    RAM extent itself is compiled in via
+                                    HOUSE_RAM_BYTES/BOOT_STACK_TOP from
+                                    the top-level Makefile (SPIKE_MEM) */

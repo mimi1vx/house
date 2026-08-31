@@ -2,12 +2,12 @@ module Kernel.Driver.NE2000.Test where
 
 import Kernel.Driver.NE2000.Driver as NE2000
 import Net.Test as Net(initialize)
-import H.Interrupts(IRQ(..))
+import H.Interrupts(IntId,spi)
 import Net.H()
 
 testnet putStrLn pci config =
   case pci of
-    Nothing -> do eth <- NE2000.initialize putStrLn IRQ9 0x300
+    Nothing -> do eth <- NE2000.initialize putStrLn (spi 9) 0x300
                   Just `fmap` start eth
     Just dev  -> do eth <- NE2000.initPCI putStrLn dev
                     case eth of

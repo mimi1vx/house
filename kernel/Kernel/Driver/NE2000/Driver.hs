@@ -1,7 +1,7 @@
 module Kernel.Driver.NE2000.Driver(initPCI,initialize) where
 
 import H.IOPorts(Port)
-import H.Interrupts(IRQ)
+import H.Interrupts(IntId)
 import Kernel.Interrupts(registerIRQHandler)
 import Kernel.Driver.NE2000.Monad hiding (readChan,writeChan,newChan,putMVar)
 import qualified Kernel.Driver.NE2000.Monad as NE
@@ -48,14 +48,14 @@ initPCI debug dev
          IO base -> 
            do irq <- config dev `getB` 0x3C
               prt ("IRQ is " ++ show irq)
-              eth <- initialize prt (toEnum (fromIntegral irq))
+              eth <- initialize prt (toEnum (fromIntegral irq) :: IntId)
                                     (fromIntegral (addr base))
               return (Just eth)
   where
     prt = debug . ("NE2000: "++)
 
 initialize         :: (String -> H())              -- ^ For debug.
-                   -> IRQ                           -- ^ Interrupt for events.
+                   -> IntId                           -- ^ Interrupt for events.
                    -> Port                          -- ^ Base IO port.
                    -> H  (Eth.Interface H (Eth.Packet InPacket)
 				          (Eth.Packet OutPacket))

@@ -67,7 +67,7 @@ int pthread_attr_getstacksize(void *a, size_t *s)
 }
 
 unsigned long pthread_self(void) { return 1; }
-int pthread_join(unsigned long t, void **r) { (void)t; (void)r; *__errno_location() = ENOENT_; return ENOENT_; }
+int pthread_join(unsigned long t, void **r) { (void)t; (void)r; return 0; }
 int pthread_detach(unsigned long t) { (void)t; return 0; }
 __attribute__((noreturn)) void pthread_exit(void *r) { (void)r; exit(0); }
 int pthread_kill(unsigned long t, int s) { (void)t; extern int raise(int); return raise(s); }
@@ -157,24 +157,44 @@ unsigned umask(unsigned m) { return m; }
 int mkfifo(const char *p, unsigned mode) { (void)p; (void)mode; *__errno_location() = ENOENT_; return -1; }
 int utime(const char *p, const void *t) { (void)p; (void)t; *__errno_location() = ENOENT_; return -1; }
 int lstat(const char *p, struct stat *st) { (void)p; (void)st; *__errno_location() = ENOENT_; return -1; }
-char *nl_langinfo(int item) { (void)item; return ""; }
+/* CODESET (14 on glibc) must advertise UTF-8: base's locale encoding is
+   derived from it, and an empty name drops GHC into its wide-char
+   fallback (UCS-4 bytes on the wire). */
+char *nl_langinfo(int item) { return item == 14 ? "UTF-8" : ""; }
 
 /* ---- iconv: failing open makes base fall back to its pure codecs ---- */
 
 typedef void *iconv_t_placeholder;
+/* Iconv: byte-preserving pass-through. GHC only converts between UTF-8/
+   ASCII locale variants for its Handles, so no real transcoding is needed
+   and there are no gconv module files to load; //TRANSLIT etc. accepted,
+   ignored. */
 void *iconv_open(const char *to, const char *from)
 {
     (void)to; (void)from;
-    *__errno_location() = ENOSYS;
-    return (void *)-1;
+    return (void *)1;           /* opaque cookie */
 }
+
 size_t iconv(void *cd, char **in, size_t *il, char **out, size_t *ol)
 {
-    (void)cd; (void)in; (void)il; (void)out; (void)ol;
-    *__errno_location() = ENOSYS;
-    return (size_t)-1;
+    size_t n;
+    (void)cd;
+    if (!in || !*in)
+        return 0;               /* state reset request */
+    n = *il < *ol ? *il : *ol;
+    memcpy(*out, *in, n);
+    *in += n;
+    *out += n;
+    *il -= n;
+    *ol -= n;
+    if (*il) {
+        *__errno_location() = E2BIG;
+        return (size_t)-1;      /* output full: caller retries */
+    }
+    return 0;
 }
-int iconv_close(void *cd) { (void)cd; *__errno_location() = ENOSYS; return -1; }
+
+int iconv_close(void *cd) { (void)cd; return 0; }
 
 /* ---- eventfd / epoll: no IO manager in this kernel ---- */
 
@@ -365,10 +385,27 @@ struct pollfd {
     short events;
     short revents;
 };
+int house_timerfd_due(int fd);
+int house_fd_pipe_readable(int fd);
 int poll(struct pollfd *fds, unsigned long nfds, int timeout)
 {
-    (void)fds; (void)nfds; (void)timeout;
-    return 0;
+    /* Minimal readiness for the ticker loop: timerfds due on their paced
+       interval (and pipe read ends with data) report POLLIN immediately;
+       everything else reports nothing. timeout is not simulated — the
+       RTS treats 0 as "poll again", which the scheduler interleaves. */
+    unsigned long i;
+    int ready = 0;
+    (void)timeout;
+    for (i = 0; i < nfds; i++) {
+        fds[i].revents = 0;
+        if ((fds[i].events & 0x0001) &&
+            (house_timerfd_due(fds[i].fd) ||
+             house_fd_pipe_readable(fds[i].fd))) {
+            fds[i].revents |= 0x0001;   /* POLLIN */
+            ready++;
+        }
+    }
+    return ready;
 }
 int select(int nfds, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv)
 {
@@ -468,7 +505,14 @@ void *newlocale(int mask, const char *name, void *base)
 }
 void freelocale(void *l) { (void)l; }
 void *uselocale(void *l) { (void)l; return 0; }
-char *setlocale(int cat, const char *name) { (void)cat; (void)name; return 0; }
+/* Base derives the locale TextEncoding from this name: it must advertise
+   UTF-8 or GHC falls back to its wide-char encoding (UCS-4 bytes on the
+   wire). */
+char *setlocale(int cat, const char *name)
+{
+    (void)cat; (void)name;
+    return "C.UTF-8";
+}
 
 static unsigned short ctype_table[384];
 

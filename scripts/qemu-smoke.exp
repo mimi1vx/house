@@ -1,14 +1,22 @@
 #!/usr/bin/expect -f
 # Boot a kernel ELF under QEMU virt (host-side) and wait for a marker string.
-# Usage: expect scripts/qemu-smoke.exp <kernel.elf> <marker-regex> [timeout] [accel]
+# Usage:
+#   expect scripts/qemu-smoke.exp <kernel.elf> <marker-regex> [timeout] [accel] [mem]
+#
+# Guest RAM defaults to 4G: comfortable on a 32GB dev host, and far saner
+# than the 512G an early experiment used (lazy allocation or not, huge
+# guest RAM upsets hypervisors and slows stage-2 setup). The RTS arena
+# commits only MBs, so 512M works too — pass it as argv[4] to prove it.
 set timeout [expr {[lindex $argv 2] > 0 ? [lindex $argv 2] : 60}]
 set kernel [lindex $argv 0]
 set marker [lindex $argv 1]
 set accel [lindex $argv 3]
+set mem [lindex $argv 4]
 if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
 log_user 1
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
-    -m 512G -nographic -kernel $kernel
+    -m $mem -nographic -kernel $kernel
 expect {
     -re $marker {
         puts "\nPASS: saw /$marker/"
@@ -23,6 +31,7 @@ expect {
         exit 1
     }
 }
+# The kernel parks forever once it has said its piece: kill QEMU and get
+# out without waiting on the dead pty.
 catch {exec kill -9 [exp_pid]}
-wait
 exit 0

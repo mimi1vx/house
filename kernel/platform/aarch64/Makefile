@@ -6,9 +6,12 @@ HSINC  := $(shell dirname "$(shell find "$(LIBDIR)" -name HsFFI.h | head -1)")
 
 CC      := gcc
 LD      := ld
+DEFS_C  ?=
+DEFS_S  ?=
 CFLAGS  := -O2 -ffreestanding -fno-builtin -fno-pic -fno-pie \
-           -fno-stack-protector -Wall -Werror -I. -I$(HSINC)
-ASFLAGS := -I.
+           -fno-stack-protector -Wall -Werror -I. -I$(HSINC) $(DEFS_C)
+ASFLAGS := -I. $(DEFS_S)
+HS_GHCFLAGS := -package mtl -package array -i../.. -ibuild -outputdir build
 
 UNITDIR_base := $(shell ghc-pkg field base import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_prim := $(shell ghc-pkg field ghc-prim import-dirs --simple-output | awk '{print $$1}')
@@ -27,15 +30,31 @@ TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
         tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
         tinylibc/mathmin.c
 
-OBJS := build/start.o build/c_start.o build/uart.o \
+PLATFORM_C := gic.c timer.c irq.c userspace.c
+
+OBJS := build/start.o build/mmu.o build/c_start.o build/uart.o \
         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
+        $(addprefix build/,$(PLATFORM_C:.c=.o)) \
         build/Spike.o
+
+VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
+         H/Concurrency Kernel/Types/Console Kernel/Console Kernel/Debug \
+         H/Pages H/PhysicalMemory H/VirtualMemory
+VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
+
+OBJS_IRQ := build/start.o build/mmu.o build/c_start.o build/uart.o \
+        $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
+        $(addprefix build/,$(PLATFORM_C:.c=.o)) \
+        build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
 
 all: build/spike.elf
 	@readelf -h build/spike.elf | grep -E 'Entry|Machine'
 
+irq: build/irq.elf
+	@readelf -h build/irq.elf | grep -E 'Entry|Machine'
+
 build:
-	mkdir -p build
+	mkdir -p build build/H build/Kernel/Types build/Util build/Kernel
 
 build/start.o: start.S | build
 	$(CC) -c $(ASFLAGS) -o $@ $<
@@ -51,8 +70,28 @@ build/%.o: %.c | build
 build/Spike.o: Spike.hs | build
 	ghc -O1 -c Spike.hs -outputdir build
 
+# H-layer modules for IrqCheck (compiled individually; IrqCheck depends on them)
+build/H/Monad.o: ../../H/Monad.hs | build
+	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
+
+build/H/Interrupts.o: ../../H/Interrupts.hs build/H/Monad.o | build
+	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
+
+# Generic pattern for VM and other Haskell modules
+build/%.o: ../../%.hs | build
+	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
+
+build/IrqCheck.o: IrqCheck.hs build/H/Interrupts.o build/H/Monad.o $(VM_OBJS) | build
+	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
+
 build/spike.elf: $(OBJS) aarch64.ld
 	$(LD) --build-id=none --gc-sections -T aarch64.ld -o $@ $(OBJS) \
+	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  $(shell $(CC) -print-libgcc-file-name)
+
+build/irq.elf: $(OBJS_IRQ) aarch64.ld
+	$(LD) --build-id=none --gc-sections -T aarch64.ld -o $@ $(OBJS_IRQ) \
 	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)

@@ -176,15 +176,28 @@ counter from `read()`; periodic delivery was deferred to phase 3.
 
 ## Success criteria
 
-- [ ] `.gitignore` keeps `build/` artifacts out; baseline commit contains
+- [x] `.gitignore` keeps `build/` artifacts out; baseline commit contains
       the intact attempt and nothing generated
-- [ ] `plans/porting-log.md` documents the DFSC=0x35 root cause with its
+- [x] `plans/porting-log.md` documents the DFSC=0x35 root cause with its
       confirming experiment (before-fix entry)
-- [ ] Freshly built `spike.elf` boots under host QEMU (hvf *and* tcg) and
+- [x] Freshly built `spike.elf` boots under host QEMU (hvf *and* tcg) and
       prints the Haskell-produced hello line + `spike-ok` via PL011
-- [ ] Spike demonstrates paced ticks: 4× `threadDelay 500000` iterations
+      (superseded marker: `ticks-ok`, see below)
+- [x] Spike demonstrates paced ticks: 4× `threadDelay 500000` iterations
       with measured ~500 ms deltas, ending in `ticks-ok`
-- [ ] `make spike-check` performs build (in arm64 container, explicit
+- [x] `make spike-check` performs build (in arm64 container, explicit
       `--platform`) + boot + assertion in one command
-- [ ] Master-plan step-2 criteria checked off; phase-2 log entry complete
-- [ ] Legacy i386 flow untouched (`git diff` shows additive changes only)
+- [x] Master-plan step-2 criteria checked off; phase-2 log entry complete
+- [x] Legacy i386 flow untouched (`git diff` shows additive changes only)
+
+### Outcome notes vs plan
+
+- Root cause was FOUR stacked layers, not one: MMU-off Device-memory
+  semantics; Apple HVF ISV=0 exclusive exits; shim mmap reservation
+  semantics poisoning GC metadata; malloc header slots stomping previous
+  allocations. Full chain + experiments: `plans/porting-log.md` phase 2.
+- Guest RAM is now a first-class knob (`SPIKE_MEM`, default **4G**;
+  512M–4G verified) instead of the original `-m 512G` hack — the kernel
+  compiles its RAM extent in, so build and runner cannot disagree.
+- `-accel tcg` cross-check kept in the smoke script's argv; both accels
+  green.

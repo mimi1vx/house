@@ -170,3 +170,66 @@ container-shell:
 	container run --platform linux/arm64 --rm -it \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) bash
 
+
+# --- aarch64 freestanding spike (plans/phase-2-spike-completion.md) ---
+# Guest RAM for the spike: 4G default — comfortable on 32GB dev hosts.
+# The kernel is COMPILED with the same size (kernel learns it at link
+# time via SPIKE_DEFS), so SPIKE_MEM and QEMU -m can never disagree.
+# Small values are first-class: SPIKE_MEM=512M make spike-check works.
+SPIKE_DIR := kernel/platform/aarch64
+SPIKE_MEM ?= 4G
+
+ifeq ($(findstring G,$(SPIKE_MEM)),G)
+  SPIKE_RAM_BYTES := $(shell echo $$(( $(subst G,,$(SPIKE_MEM)) * 1024 * 1024 * 1024 )))
+else
+  SPIKE_RAM_BYTES := $(shell echo $$(( $(subst M,,$(SPIKE_MEM)) * 1024 * 1024 )))
+endif
+SPIKE_DEFS_C := -DHOUSE_RAM_BYTES=$(SPIKE_RAM_BYTES)ULL \
+                -DHOUSE_STACK_TOP="(0x40000000ULL + $(SPIKE_RAM_BYTES)ULL - 0x200000ULL)"
+SPIKE_STACK_TOP := $(shell echo $$((1073741824 + $(SPIKE_RAM_BYTES) - 2097152)))
+SPIKE_DEFS_S := -DHOUSE_RAM_BYTES=$(SPIKE_RAM_BYTES) \
+                -DBOOT_STACK_TOP=$(SPIKE_STACK_TOP)
+SPIKE_DEFS_C += -DHOUSE_STACK_TOP="(0x40000000ULL + $(SPIKE_RAM_BYTES)ULL - 0x200000ULL)"
+
+spike-build:
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C $(SPIKE_DIR) DEFS_C='$(SPIKE_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S)'
+
+spike-run:
+	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
+	  -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/spike.elf
+
+spike-check:
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C $(SPIKE_DIR) clean
+	$(MAKE) spike-build
+	expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.elf \
+	  'ticks-ok' 90 hvf $(SPIKE_MEM)
+
+# --- aarch64 irq-check kernel (plans/phase-3-interrupts-vm.md) ---
+# Shares SPIKE_DEFS_C/SPIKE_DEFS_S with the spike so RAM/stack defines stay
+# identical; only the Haskell entry point differs (IrqCheck vs Spike).
+irq-build:
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C $(SPIKE_DIR) irq DEFS_C='$(SPIKE_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S)'
+
+irq-run:
+	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
+	  -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/irq.elf
+
+# irq-check runs both hvf and tcg and requires vm-ok (which implies irq-ok).
+irq-check:
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C $(SPIKE_DIR) clean
+	$(MAKE) irq-build
+	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.elf \
+	  'vm-ok' 120 hvf $(SPIKE_MEM)
+	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.elf \
+	  'vm-ok' 120 tcg $(SPIKE_MEM)
+
+.PHONY: container-image container-shell spike-build spike-run spike-check \
+        irq-build irq-run irq-check

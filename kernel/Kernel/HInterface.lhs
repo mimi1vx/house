@@ -6,7 +6,7 @@
 > import Data.Word(Word8)
 > import Kernel.HDatatypes
 > import H.IOPorts
-> import H.Interrupts(IRQ)
+> import H.Interrupts(IntId)
 > import Monad.MonadT
 
 ! import H.All(Stateful,Independent,ValidVAddr,OnSamePage,NotMappedWriteable,
@@ -120,8 +120,8 @@ Execution
 IO Operations
 
 > class Monad m => HIOMonad m where
->   registerIRQHandler :: IRQ -> H () -> m ()
->   callIRQHandler     :: IRQ -> m ()
+>   registerIRQHandler :: IntId -> H () -> m ()
+>   callIRQHandler     :: IntId -> m ()
 
 > instance (MonadT t, Monad (t m), HIOMonad m) => HIOMonad (t m) where
 >   registerIRQHandler irq h = lift (registerIRQHandler irq h)

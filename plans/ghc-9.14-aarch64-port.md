@@ -60,11 +60,14 @@ the only official 9.14.1 aarch64 bindist is `deb10`; no musl build exists)
    `-M virt -nographic -kernel spike.elf` prints a line produced by Haskell
    `putStrLn` through RTS→shim→UART, plus paced threadDelay ticks.
 
-3. **[medium] H-layer adaptation** — rewrite `kernel/H/Interrupts.hs` per the
-   design above; add GIC/timer/wfi C glue; adjust `H.MemRegion`/`AdHocMem`
-   address constants to the `virt` map (RAM @ 0x4000_0000); CPP-gate
-   `H.IOPorts`. — verify: test kernel prints periodic tick counter
-   (timer IRQs delivered through the dispatcher thread).
+3. **[medium] H-layer adaptation** — rewrite `kernel/H/Interrupts.hs` with a
+   GIC-native API (decided 2026-08-26: no x86 IRQ0..15 compat enum); GICv3 +
+   generic-timer drivers, ISR tick switchover, Haskell dispatcher thread;
+   adapt `H.VirtualMemory` to aarch64 page-table format with `userspace.c`
+   support (MemRegion/AdHocMem turned out to hold no address constants).
+   Details: `plans/phase-3-interrupts-vm.md`.
+   — verify: `make irq-check` green (hvf+tcg): timer counters advance via
+   dispatcher handlers + PageMap round-trip; `spike-check` stays green.
 
 4. **[large] Mechanical module port** — introduce a cabal-less `ghc --make`
    build (new `kernel/Makefile.aarch64` or top-level rewrite) with a
@@ -109,9 +112,12 @@ the only official 9.14.1 aarch64 bindist is `deb10`; no musl build exists)
 
 ## Success criteria
 
-- [ ] Container: `ghc --version` = 9.14.x on linux/arm64 (step 1)
-- [ ] Spike kernel prints Haskell-produced text via PL011 in QEMU (step 2)
-- [ ] Tick counter advances via IRQ-driven dispatcher (step 3)
+- [x] Container: `ghc --version` = 9.14.x on linux/arm64 (step 1)
+- [x] Spike kernel prints Haskell-produced text via PL011 in QEMU (step 2)
+      — plus paced threadDelay ticks (`ticks-ok`), hvf *and* tcg,
+      `make spike-check` from clean at 512M/1G/2G/4G (see porting-log
+      phase 2 for the four stacked root causes behind DFSC=0x35)
+- [x] Tick counter advances via IRQ-driven dispatcher + `vm-ok` PageMap round-trip (step 3 — GICv3 PPIs 27/30, timerfd tick seam, dispatcher thread, aarch64 L0–L3 descriptors, see porting-log phase 3 + `plans/phase-3-interrupts-vm.md`)
 - [ ] Reduced-module kernel links; `readelf -h` shows correct entry/load addr (step 4)
 - [ ] Scripted QEMU session reaches shell prompt and executes a command (step 5)
 - [ ] `make check` reproduces the above from clean state (step 6)

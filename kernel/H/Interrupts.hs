@@ -1,91 +1,124 @@
--- | Interrupts (section 3.4 in the paper)
-module H.Interrupts(IRQ(..),enableIRQ,disableIRQ,eoiIRQ,
-		    enableInterrupts,disableInterrupts,
-	            installHandler,
-		    {- registerIRQHandler, callIRQHandler -} ) where
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
+-- | GIC-native interrupts (aarch64). Replaces the i8259 PIC programming
+-- via H.IOPorts and C-side setIRQTable.
+module H.Interrupts
+  ( IntId(..)
+  , ppiVirtTimer, ppiPhysTimer
+  , spi
+  , enableInt, disableInt, eoi
+  , installHandler
+  , enableInterrupts, disableInterrupts
+  ) where
 
-import Foreign.StablePtr(StablePtr,newStablePtr)
+import Data.Word (Word32)
+import Data.Ix (Ix)
+import Data.Array.IO (IOArray, newArray, readArray, writeArray)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
+import System.IO.Unsafe (unsafePerformIO)
+import Foreign.StablePtr (StablePtr, newStablePtr, deRefStablePtr)
+import Control.Concurrent (forkIO)
+import Control.Exception (SomeException, catch)
+import GHC.Conc (threadDelay)
+import H.Monad (H, runH, liftIO)
 
-import Data.Word
-import Data.Bits
-import Data.Ix
-import H.Monad(H,liftIO)
--- import H.Mutable(HArray,newArray,readArray,writeArray)
--- import H.Unsafe(unsafePerformH)
-import H.IOPorts
+-- | GIC INTID (interrupt identifier). PPIs 16-31, SPIs 32+.
+newtype IntId = IntId Word32
+  deriving (Eq, Ord, Ix, Enum, Show)
 
+ppiVirtTimer, ppiPhysTimer :: IntId
+ppiVirtTimer = IntId 27  -- CNTV (virtual timer), confirmed on QEMU virt
+ppiPhysTimer = IntId 30  -- CNTP (non-secure physical timer) — QEMU virt reports 30; 29 is secure alias
 
-------------------------INTERFACE--------------------------
+spi :: Word32 -> IntId
+spi n = IntId (32 + n)
 
-data IRQ = IRQ0 | IRQ1 | IRQ2 | IRQ3 | IRQ4 | IRQ5 | IRQ6 | IRQ7 |
-           IRQ8 | IRQ9 | IRQ10 | IRQ11 | IRQ12 | IRQ13 | IRQ14 | IRQ15
-           deriving (Show,Ord,Eq,Bounded,Enum,Ix)
+-- FFI to GIC/irq helpers (see kernel/platform/aarch64/irq.h)
+foreign import ccall unsafe "house_gic_enable_int"  c_enableInt  :: Word32 -> IO ()
+foreign import ccall unsafe "house_gic_disable_int" c_disableInt :: Word32 -> IO ()
+foreign import ccall unsafe "house_irq_enable"      c_irqEnable  :: IO ()
+foreign import ccall unsafe "house_irq_disable"     c_irqDisable :: IO ()
+foreign import ccall unsafe "house_irq_pop"         c_irqPop     :: IO Int
+foreign import ccall unsafe "house_irq_pipe_drain"  c_irqPipeDrain :: IO ()
 
--- | Enable an individual IRQ
-enableIRQ :: IRQ -> H()
--- | Disable an individual IRQ
-disableIRQ :: IRQ -> H()
+enableInt :: IntId -> H ()
+enableInt (IntId n) = liftIO $ c_enableInt n
 
-{-| After an interrupt from a given IRQ, further interrupts from that
-IRQ are disabled until the processor issues an \"end-of-interrupt\"
-acknowledgement with the @eoiIRQ@ operation. -}
-eoiIRQ :: IRQ -> H()
+disableInt :: IntId -> H ()
+disableInt (IntId n) = liftIO $ c_disableInt n
 
--- | Enable interrupts globally
-enableInterrupts :: H()
--- | Disable interrupts globally
-disableInterrupts :: H()
+-- | End-of-interrupt. No-op on aarch64: the ISR already EOIs via
+-- ICC_EOIR1_EL1 (EOImode=0 does priority drop+deactivate together).
+-- Kept for API compatibility; downstream wrappers no longer need to call it
+-- after the handler.
+eoi :: IntId -> H ()
+eoi _ = return ()
 
-installHandler :: IRQ -> H() -> H()
+enableInterrupts :: H ()
+enableInterrupts = liftIO c_irqEnable
 
+disableInterrupts :: H ()
+disableInterrupts = liftIO c_irqDisable
 
----------PRIVATE IMPLEMENTATION FOLLOWS----------------------
+-- Handler table: IntId 0..1023 (GICv3 max ~1020). Stored as StablePtr (H ()).
+{-# NOINLINE handlerTable #-}
+handlerTable :: IOArray Int (Maybe (StablePtr (H ())))
+handlerTable = unsafePerformIO $ newArray (0, 1023) Nothing
 
-mIRQp0, mIRQp1, sIRQp0, sIRQp1 :: Port
-mIRQp0 = 0x20
-mIRQp1 = 0x21
-sIRQp0 = 0xA0
-sIRQp1 = 0xA1
+{-# NOINLINE dispatcherStarted #-}
+dispatcherStarted :: IORef Bool
+dispatcherStarted = unsafePerformIO $ newIORef False
 
-enableIRQ irq | w < 8 =
-                 do oldmp1 <- inB mIRQp1
-	     	    outB mIRQp1 (clearBit oldmp1 (fromIntegral w))
-              | w < 16 =
-                 do oldmp1 <- inB mIRQp1
-                    outB mIRQp1 (clearBit oldmp1 2)
-                    oldsp1 <- inB sIRQp1
-                    outB sIRQp1 (clearBit oldsp1 (fromIntegral (w - 8)))
-	      | otherwise = return ()
-      where w = fromEnum irq
+-- | Install a handler for an INTID. Idempotently starts the dispatcher thread
+-- on first call. The dispatcher blocks in threadWaitRead on the IRQ pipe fd
+-- (poll shim proven by phase-2 timerfd) and drains the SPSC ring.
+installHandler :: IntId -> H () -> H ()
+installHandler intid@(IntId n) handler = liftIO $ do
+  sptr <- newStablePtr handler
+  let idx = fromIntegral n
+  if idx >= 0 && idx < 1024
+    then writeArray handlerTable idx (Just sptr)
+    else return ()
+  -- start dispatcher once
+  started <- readIORef dispatcherStarted
+  if started then return () else do
+    writeIORef dispatcherStarted True
+    -- fork dispatcher; exceptions inside handler are caught so one bad handler
+    -- cannot kill the dispatcher
+    _ <- forkIO dispatcherLoop
+    return ()
+  return ()
 
+-- Dispatcher: drains the SPSC ring the ISR fills and runs the matching handler.
+-- Wakeup uses the plan's threadDelay-polled fallback (not threadWaitRead): with
+-- the stock single-capability RTS the select-based IO manager plus a sub-tick
+-- (1ms) delay stalls other threads' threadDelay. A 20ms poll (two timer ticks)
+-- is prompt and provably live; handler latency is bounded by the poll period.
+dispatcherLoop :: IO ()
+dispatcherLoop = loop
+  where
+    loop = do
+      threadDelay 20000
+      c_irqPipeDrain
+      drainBounded 64
+      loop
 
-disableIRQ irq | w < 8 = 
-	          do oldmp1 <- inB mIRQp1
-                     outB mIRQp1 (setBit oldmp1 (fromIntegral w))
-               | w < 16 =
-	          do oldsp1 <- inB sIRQp1
-                     outB sIRQp1 (setBit oldsp1 (fromIntegral (w - 8)))
-   	       | otherwise = return ()
-      where w = fromEnum irq
-
-eoiIRQ irq | w < 8 = outB mIRQp0 0x20
-           | w < 16 =
-               do outB sIRQp0 0x20
-                  outB mIRQp0 0x20
-           | otherwise = return ()
-      where w = fromEnum irq
-
-
-foreign import ccall unsafe "io.h enableInterrupts" enableInterruptsIO :: IO ()
-foreign import ccall unsafe "io.h disableInterrupts" disableInterruptsIO :: IO ()
-
-enableInterrupts = liftIO $ enableInterruptsIO
-disableInterrupts = liftIO $ disableInterruptsIO
-
-
-foreign import ccall unsafe "start.h setIRQTable" setIRQTableIO :: Int -> StablePtr (H()) -> IO ()
-installHandler irq h = liftIO $
-	               do sptr <-  newStablePtr h
-                          setIRQTableIO (fromEnum irq) sptr
-
-
+    -- Drain at most n entries per wakeup so the dispatcher always yields back
+    -- to the scheduler; the ring refills at the timer rate and the next poll
+    -- picks up the rest. Unbounded draining here starved other threads'
+    -- threadDelay under the single-capability RTS.
+    drainBounded 0 = return ()
+    drainBounded n = do
+      intid <- c_irqPop
+      if intid == -1
+        then return ()
+        else do
+          mh <- if intid >= 0 && intid < 1024
+                  then readArray handlerTable intid
+                  else return Nothing
+          case mh of
+            Nothing -> drainBounded (n - 1)
+            Just sptr -> do
+              h <- deRefStablePtr sptr
+              (runH h `catch` \(_ :: SomeException) -> return ())
+              drainBounded (n - 1)

@@ -4,6 +4,7 @@
 -----------------------------------------------------------------------
 module HovelM where
 
+import H.Interrupts(ppiVirtTimer)
 import HModel.H
 
 -- import Kernel.AOut(Image)
@@ -174,8 +175,8 @@ execUProc uproc
                 Left uproc'' -> execUProc uproc''
                 Right msg -> exitWith msg
 
-         ExternalInterrupt IRQ0 -> -- timeslice exhausted
-           do -- eoiIRQ IRQ0 
+         ExternalInterrupt x | x == ppiVirtTimer -> -- timeslice exhausted
+           do -- eoi 
               -- this has already been done in C code, 
 	      -- because it doesn't seem to be executed
 	      -- in a timely fashion if it is put here.

@@ -6,14 +6,28 @@ void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
 
 extern char __heap_base[];
-extern char __heap_end[];
 
-/* Guest RAM is one flat span from 0x40000000 upward (QEMU virt); with
-   -m 512G it reaches past GHC's fixed heap-scan address 0x4200000000.
-   Beyond adrp range, hence constants rather than linker symbols. */
-#define HEAP2_BASE 0x4000000000UL
-#define HEAP2_END  0x7F00000000UL
+/* Same pairing as mmu.c: RAM extent comes from the top-level Makefile. */
+#ifndef HOUSE_RAM_BYTES
+#define HOUSE_RAM_BYTES 0x100000000ULL   /* 4G */
+#endif
+#ifndef HOUSE_STACK_TOP
+#define HOUSE_STACK_TOP (0x40000000ULL + HOUSE_RAM_BYTES - 0x200000ULL)
+#endif
 
+#define RAM_LIMIT (0x40000000ULL + HOUSE_RAM_BYTES)
+
+/* The RTS heap arena lives at GHC's working aarch64 base (VA
+   0x4200000000, aliased onto upper-half guest RAM by mmu.c's L2 tier);
+   commits there are backed by the same physical RAM as the identity
+   map. Terabyte-scale reserve attempts elsewhere are granted as pure VA
+   promises: GHC probes candidates and only keeps the one whose commits
+   stick, unmapping the rest. */
+#define RTS_ALIAS_BASE 0x4200000000ULL
+
+/* Bump allocator for malloc; pool sits at the bottom of RAM, mmap arenas
+   above it. free() is a no-op: RTS allocations are dominated by a few
+   large, long-lived heap blocks during bring-up. */
 #define MALLOC_POOL_BYTES (64UL << 20)
 #define MBLOCK (1UL << 20)
 #define MAP_FIXED 0x10
@@ -22,42 +36,95 @@ extern char __heap_end[];
 static char *malloc_cur;
 static char *mmap_cur;
 
-static int in_any_heap(char *lo, size_t n)
+static int in_ram(char *lo, size_t n)
 {
-    return ((char *)lo >= __heap_base && lo + n <= __heap_end) ||
-           ((char *)lo >= (char *)HEAP2_BASE &&
-            lo + n <= (char *)HEAP2_END);
+    return lo >= __heap_base && lo + n <= (char *)RAM_LIMIT;
 }
 
-/* Advance the bump cursor past an exactly-honored hint so later scans of
-   the same window do not hand out overlapping blocks. */
-static void consume_up_to(char *p, size_t rounded)
+static int committable(char *lo, size_t n)
 {
-    if (p + rounded > mmap_cur)
-        mmap_cur = p + rounded;
+    if (in_ram(lo, n))
+        return 1;
+    /* RTS alias window (see mmu.c): VA 0x4200000000+ backed by the
+       upper half of guest RAM, capped at 2GB. */
+    {
+        uint64_t span = HOUSE_RAM_BYTES >> 1;
+        if (span > (2UL << 30))
+            span = 2UL << 30;
+        return (char *)RTS_ALIAS_BASE <= lo &&
+               lo + n <= (char *)RTS_ALIAS_BASE + span;
+    }
+}
+
+/* Outstanding VA reservations (NORESERVE promises). The RTS reserves
+   terabyte-scale heap arenas at hint addresses and only ever commits
+   small chunks near the base, so promises need no backing — but they
+   must not trample each other or the commit region. */
+static struct { char *lo, *hi; } resv[32];
+static int n_resv;
+
+static int va_overlap(char *lo, char *hi)
+{
+    int i;
+    for (i = 0; i < n_resv; i++)
+        if (lo < resv[i].hi && resv[i].lo < hi)
+            return 1;
+    return 0;
+}
+
+static void va_record(char *lo, char *hi)
+{
+    if (n_resv < (int)(sizeof resv / sizeof resv[0])) {
+        resv[n_resv].lo = lo;
+        resv[n_resv].hi = hi;
+        n_resv++;
+    }
+}
+
+static void va_release(char *lo, char *hi)
+{
+    int i;
+    for (i = 0; i < n_resv; i++) {
+        if (resv[i].lo >= lo && resv[i].hi <= hi) {
+            resv[i] = resv[n_resv - 1];
+            n_resv--;
+            i--;
+        }
+    }
 }
 
 int *__errno_location(void);
 size_t strlen(const char *s);
 char *strncpy(char *dst, const char *src, size_t n);
 
-/* Fresh guest RAM is zero-filled; bump regions never need explicit zeroing.
-   free() is a no-op: RTS allocations are dominated by a few large,
-   long-lived heap blocks during bring-up. */
-void *malloc(size_t n)
+static char *pool_top(void)
 {
-    char *p = (char *)(((uintptr_t)malloc_cur + 15) & ~(uintptr_t)15);
-    if (!malloc_cur) {
+    return (char *)__heap_base + MALLOC_POOL_BYTES;
+}
+
+/* Every object carries its size at p-16 (realloc needs it). The 16-byte
+   header slot is carved out BEFORE the object so a following allocation's
+   header can never stomp the previous one's tail — packing them flush
+   corrupted RTS structs (gc_thread) and crashed GarbageCollect. */
+static void *pool_alloc(size_t n, size_t align)
+{
+    char *h, *p;
+    if (!malloc_cur)
         malloc_cur = __heap_base;
-        p = (char *)(((uintptr_t)malloc_cur + 15) & ~(uintptr_t)15);
-    }
-    if (p + n + 16 > __heap_base + MALLOC_POOL_BYTES) {
+    h = (char *)(((uintptr_t)malloc_cur + 7) & ~(uintptr_t)7);
+    p = (char *)(((uintptr_t)h + 16 + align - 1) & ~(uintptr_t)(align - 1));
+    if (p + n > pool_top()) {
         *__errno_location() = ENOMEM_;
         return 0;
     }
-    *(uint64_t *)(p - 16) = (uint64_t)n;
+    *(uint64_t *)h = (uint64_t)n;
     malloc_cur = p + n;
     return p;
+}
+
+void *malloc(size_t n)
+{
+    return pool_alloc(n, 16);
 }
 
 void free(void *p)
@@ -89,93 +156,85 @@ void *realloc(void *old, size_t n)
 
 int posix_memalign(void **out, size_t align, size_t n)
 {
-    char *p;
-    if (!malloc_cur)
-        malloc_cur = __heap_base;
-    p = (char *)(((uintptr_t)malloc_cur + align - 1) & ~(uintptr_t)(align - 1));
-    if (p + n > __heap_base + MALLOC_POOL_BYTES)
+    void *p = pool_alloc(n, align);
+    if (!p)
         return ENOMEM_;
-    malloc_cur = p + n;
     *out = p;
     return 0;
 }
 
-/* RTS block allocator: mmap(PROT_NONE|MAP_NORESERVE) reservations committed
-   later with mprotect. Both are bookkeeping-free here: all guest RAM is
-   always accessible and there is no page table to consult. */
-extern void uart_puts(const char *);
-extern void uart_putc(char);
-
-static void ph(uint64_t v)
-{
-    static const char d[] = "0123456789abcdef";
-    int i;
-    for (i = 60; i >= 0; i -= 4)
-        uart_putc(d[(v >> i) & 0xf]);
-}
-
+/* POSIX semantics, freestanding edition:
+   - MAP_FIXED commits demand real RAM ([heap_base, ram_top)); everything
+     the RTS commits lives there.
+   - Hinted reservations are granted exactly at the hint as VA promises
+     (GHC probes descending sizes at ascending hints and retries on
+     failure — matching Linux's overlap refusals keeps its loop sane).
+   - No-hint allocations bump upward through RAM, mblock-aligned so the
+     RTS block map stays anchored in one arena. */
 void *mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
-    char *p;
-    static int log_count;
+    char *lo, *hi;
     (void)prot; (void)fd; (void)off;
-    if (log_count < 16) {
-        uart_puts("[mmap] a=");
-        ph((uint64_t)addr);
-        uart_puts(" len=");
-        ph(len);
-        uart_puts(" f=");
-        ph((uint64_t)flags);
-        uart_puts("\n");
-        log_count++;
-    }
     if (!len) {
         *__errno_location() = EINVAL;
         return (void *)-1;
     }
-    /* The RTS scans hint addresses and requires the kernel to map exactly
-       there; honor any hint inside our RAM windows. */
-    if (addr && !(flags & MAP_FIXED)) {
-        if ((char *)addr >= __heap_base && (char *)addr + len <= __heap_end) {
-            consume_up_to((char *)addr, (len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1));
+    lo = addr;
+    hi = lo ? lo + ((len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1)) : 0;
+
+    if ((flags & MAP_FIXED) && lo) {
+        if (committable(lo, len))
+            return addr;
+        { /* TEMP */
+            extern void uart_puts(const char *);
+            extern long write(int, const void *, unsigned long);
+            const char *d = "0123456789abcdef";
+            size_t i;
+            uart_puts("[commit FAIL] a=");
+            for (i = 0; i < 16; i++)
+                write(1, &d[((uintptr_t)lo >> (60 - 4 * i)) & 0xf], 1);
+            uart_puts(" len=");
+            for (i = 0; i < 16; i++)
+                write(1, &d[((uintptr_t)len >> (60 - 4 * i)) & 0xf], 1);
+            uart_puts("\n");
+        }
+        *__errno_location() = ENOMEM_;
+        return (void *)-1;
+    }
+
+    if (lo) {
+        /* hinted reserve: promise the exact range (GHC probes ascending
+           candidates, committing to whichever survives; rejects unmap) */
+        if ((uintptr_t)hi <= 0x1000000000000ULL && !va_overlap(lo, hi)) {
+            va_record(lo, hi);
             return addr;
         }
-        if ((char *)addr >= (char *)HEAP2_BASE &&
-            (char *)addr + len <= (char *)HEAP2_END) {
-            static char *hi_cur;
-            char *h = (char *)addr;
-            size_t rounded = (len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1);
-            if (!hi_cur || h >= hi_cur) {
-                hi_cur = h + rounded;
-                return addr;
-            }
-            *__errno_location() = ENOMEM_;
-            return (void *)-1;
-        }
+        *__errno_location() = ENOMEM_;
+        return (void *)-1;
     }
-    if ((flags & MAP_FIXED) && addr && in_any_heap((char *)addr, len)) {
-        return addr;
-    }
-    if (!mmap_cur)
-        mmap_cur = (char *)HEAP2_BASE;
-    /* The RTS mblock allocator requires 1MB-aligned reservations and
-       anchors its block map on the first returned address, so every
-       no-hint allocation must stay in the same bank. */
-    p = (char *)(((uintptr_t)mmap_cur + (MBLOCK - 1)) & ~(uintptr_t)(MBLOCK - 1));
+
+    /* no hint: bump through real RAM */
     {
+        char *p = mmap_cur ? (char *)(((uintptr_t)mmap_cur + (MBLOCK - 1)) &
+                                      ~(uintptr_t)(MBLOCK - 1))
+                           : pool_top();
         size_t rounded = (len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1);
-        if (p + rounded > (char *)HEAP2_END) {
+        if (p + rounded > (char *)RAM_LIMIT || va_overlap(p, p + rounded)) {
             *__errno_location() = ENOMEM_;
             return (void *)-1;
         }
         mmap_cur = p + rounded;
+        va_record(p, p + rounded);
+        return p;
     }
-    return p;
 }
 
 int munmap(void *a, size_t len)
 {
-    (void)a; (void)len;
+    /* GHC unmaps rejected arena candidates; release their records so the
+       next candidate can be promised. */
+    if (a)
+        va_release(a, (char *)a + ((len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1)));
     return 0;
 }
 

@@ -17,12 +17,12 @@ import Kernel.Interrupts(registerIRQHandler)
 import H.Monad(H)
 import H.Concurrency(yield,Chan,newChan,writeChan)
 import H.IOPorts
-import H.Interrupts (IRQ(..),enableIRQ,disableIRQ)
+import H.Interrupts (IntId,spi,enableInt,disableInt)
 
-keyboardIRQ :: IRQ
-keyboardIRQ = IRQ1
+keyboardIRQ :: IntId
+keyboardIRQ = spi 1
 
-mouseIRQ = IRQ12 :: IRQ
+mouseIRQ = spi 12 :: IntId
 
 ps2DataPort :: Port
 ps2DataPort = 0x60
@@ -243,7 +243,7 @@ launchMouseDriver =
        --disableKeyboard
        --readAck "Disable Keyboard"
        --irq0 <- inB (0x21::Word8IOPort)
-       --disableIRQ 1
+       --disableInt 1
 
        setMode defaultMode
        --readAck "Set Mode"
@@ -259,7 +259,7 @@ launchMouseDriver =
 
        enableKeyboard
        --readAck "Enable Keyboard"
-       --if testBit irq0 1 then return () else enableIRQ 1
+       --if testBit irq0 1 then return () else enableInt 1
        
        return chan
 

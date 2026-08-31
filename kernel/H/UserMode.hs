@@ -7,7 +7,7 @@ import Data.Word(Word8,Word32)
 import Data.Bits
 import H.Monad(H,liftIO)
 import H.VirtualMemory
-import H.Interrupts(IRQ)
+import H.Interrupts(IntId)
 import H.Utils
 import H.Unsafe(unsafePerformH)
 import H.Concurrency(QSem,newQSem,withQSem)
@@ -55,7 +55,7 @@ data Interrupt -- both "Interrupts" and "Exceptions" in IA32 terminology
     | AlignmentCheck ErrorCode
     | MachineCheck
     | SIMDException
-    | ExternalInterrupt IRQ
+    | ExternalInterrupt IntId
     | ProgrammedException Word8 -- otherwise unclassifiable interrupts
     deriving Show
 

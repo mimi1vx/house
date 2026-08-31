@@ -1,0 +1,42 @@
+#!/usr/bin/expect -f
+# Boot an irq-check kernel ELF under QEMU virt and wait for marker(s).
+# Usage:
+#   expect scripts/qemu-irq.exp <kernel.elf> [marker] [timeout] [accel] [mem]
+# Defaults to marker=irq-ok, timeout=90, accel=hvf, mem=4G.
+# If the marker is "vm-ok", the script waits for irq-ok then vm-ok in order.
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout [expr {[lindex $argv 2] > 0 ? [lindex $argv 2] : 90}]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+if {$marker eq ""} { set marker "irq-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -m $mem -nographic -kernel $kernel
+# For vm-ok we require irq-ok first to prove both paths.
+if {$marker eq "vm-ok"} {
+    expect {
+        -re "irq-ok" { puts "\nPASS: saw /irq-ok/ (pre-vm)" }
+        timeout { puts "\nFAIL: timed out waiting for /irq-ok/ before vm-ok"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: qemu exited before irq-ok"; exit 1 }
+    }
+    set marker "vm-ok"
+}
+expect {
+    -re $marker {
+        puts "\nPASS: saw /$marker/"
+    }
+    timeout {
+        puts "\nFAIL: timed out waiting for /$marker/"
+        catch {exec kill -9 [exp_pid]}
+        exit 1
+    }
+    eof {
+        puts "\nFAIL: qemu exited before marker appeared"
+        exit 1
+    }
+}
+catch {exec kill -9 [exp_pid]}
+exit 0

@@ -29,13 +29,17 @@ newtype H a = H { unH :: IO a }
 
 runH = unH
 
-trappedRunH h = Exception.handle (cPrint . show) $ 
+trappedRunH h = Exception.handle (\(e :: Exception.SomeException) -> cPrint (show e)) $
          do runH h;
             return ()
 
 liftIO = H
 
 instance Functor H where fmap f (H m) = H (fmap f m)
+
+instance Applicative H where
+  pure = return
+  H f <*> H x = H (f <*> x)
 
 instance Monad H where
   return x = H (return x)
