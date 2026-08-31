@@ -1,6 +1,9 @@
 /* House aarch64 boot entry. QEMU -kernel jumps here at EL2 (virtualization
    enabled) or EL1. Drops to EL1 flat/unmapped, applies static-PIC relative
-   relocations, clears BSS, hands off to c_start(). */
+   relocations, clears BSS, hands off to c_start(). SMP: primary (core 0)
+   does relocs/BSS+MMU+ c_start; secondaries arrive via PSCI CPU_ON at
+   secondary_entry (4K-aligned), skip relocs/BSS, enable MMU via shared
+   tables and enter c_start_secondary. Per-core SP = BOOT_STACK_TOP - core*16K. */
 
     .section .text.boot, "ax"
     .global _start
@@ -52,8 +55,14 @@ el1_setup:
     msr     cpacr_el1, x1
     isb
 
-    /* Self-relocation: static link of PIC archives leaves R_AARCH64_RELATIVE
-       entries nobody else applies (bias is 0, so entry = final value). */
+    /* SMP: check core id; non-zero cores that land on _start (not PSCI)
+       spin on wfe — real secondaries arrive via secondary_entry. */
+    mrs     x19, MPIDR_EL1
+    and     x19, x19, #0xff
+    cbnz    x19, secondary_spin
+
+    /* Primary (core 0) — Self-relocation: static link of PIC archives leaves
+       R_AARCH64_RELATIVE entries nobody else applies (bias is 0). */
     ldr     x0, =__rela_start
     ldr     x1, =__rela_end
 1:  cmp     x0, x1
@@ -68,7 +77,11 @@ el1_setup:
 3:  add     x0, x0, #24
     b       1b
 2:
+    /* Per-core SP: BOOT_STACK_TOP - core*16K (core 0 = top). */
     ldr     x1, =BOOT_STACK_TOP
+    mov     x2, #16384
+    mul     x3, x19, x2
+    sub     x1, x1, x3
     mov     sp, x1
 
     ldr     x0, =__bss_start
@@ -85,13 +98,86 @@ el1_setup:
     msr     vbar_el1, x1
     isb
 
-    /* Identity map RAM as Normal (see mmu.c) before anything executes RTS
-       code; exclusives/unaligned pairs abort on Device memory. */
+    /* Identity map RAM as Normal WB (see mmu.c) before RTS code. */
     bl      house_mmu_early
 
     bl      c_start
 6:  wfi
     b       6b
+
+secondary_spin:
+    wfe
+    b       secondary_spin
+
+    /* PSCI entry for secondaries: x0 = ctx = core_id (from primary's
+       psci_cpu_on). 4K-aligned as required by some PSCI impls. */
+    .align 12
+    .global secondary_entry
+secondary_entry:
+    mov     x19, x0                 /* save core_id */
+    msr     daifset, #0xf
+
+    /* Handle EL2/EL3 if firmware entered secondary at higher EL. */
+    mrs     x0, CurrentEL
+    cmp     x0, #0xc
+    b.eq    sec_enter_el3
+    cmp     x0, #0x8
+    b.eq    sec_enter_el2
+    b       sec_el1
+
+sec_enter_el3:
+    mov     x1, #0x3c9
+    msr     spsr_el3, x1
+    ldr     x1, =sec_enter_el2
+    msr     elr_el3, x1
+    eret
+
+sec_enter_el2:
+    mov     x1, #(1 << 31)
+    msr     hcr_el2, x1
+    mrs     x1, cnthctl_el2
+    orr     x1, x1, #0x3
+    msr     cnthctl_el2, x1
+    msr     cntvoff_el2, xzr
+    mrs     x1, ICC_SRE_EL2
+    orr     x1, x1, #1
+    msr     ICC_SRE_EL2, x1
+    isb
+    mov     x1, #0x3c5
+    msr     spsr_el2, x1
+    ldr     x1, =sec_el1
+    msr     elr_el2, x1
+    eret
+
+sec_el1:
+    /* SRE for sysreg GIC access, FP enable per core. */
+    mrs     x1, ICC_SRE_EL1
+    orr     x1, x1, #1
+    msr     ICC_SRE_EL1, x1
+    isb
+    mrs     x1, cpacr_el1
+    ldr     x2, =(3 << 20) | (3 << 18)
+    orr     x1, x1, x2
+    msr     cpacr_el1, x1
+    isb
+
+    /* Per-core SP */
+    ldr     x1, =BOOT_STACK_TOP
+    mov     x2, #16384
+    mul     x3, x19, x2
+    sub     x1, x1, x3
+    mov     sp, x1
+
+    ldr     x1, =vectors
+    msr     vbar_el1, x1
+    isb
+
+    bl      house_mmu_enable_secondary
+
+    mov     x0, x19
+    bl      c_start_secondary
+7:  wfi
+    b       7b
 
 
     .align 11

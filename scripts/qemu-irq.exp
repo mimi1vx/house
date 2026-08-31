@@ -9,12 +9,14 @@ set marker [lindex $argv 1]
 set timeout [expr {[lindex $argv 2] > 0 ? [lindex $argv 2] : 90}]
 set accel [lindex $argv 3]
 set mem [lindex $argv 4]
+set smp [lindex $argv 5]
 if {$marker eq ""} { set marker "irq-ok" }
 if {$accel eq ""} { set accel hvf }
 if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
 log_user 1
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
-    -m $mem -nographic -kernel $kernel
+    -smp $smp -m $mem -nographic -kernel $kernel
 # For vm-ok we require irq-ok first to prove both paths.
 if {$marker eq "vm-ok"} {
     expect {

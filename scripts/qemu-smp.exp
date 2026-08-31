@@ -1,0 +1,66 @@
+#!/usr/bin/expect -f
+# SMP verification for House/aarch64 (2 cores, Haskell parallel).
+# Usage: expect scripts/qemu-smp.exp <kernel.elf> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 60}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "smp\r"
+expect {
+    -re "cores online" { puts "\nPASS: smp cores online" }
+    timeout { puts "\nFAIL: smp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before smp"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after smp" }
+    timeout { puts "\nFAIL: prompt after smp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after smp"; exit 1 }
+}
+send "caps\r"
+expect {
+    -re "caps 2" { puts "\nPASS: caps 2" }
+    timeout { puts "\nFAIL: caps timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before caps"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after caps" }
+    timeout { puts "\nFAIL: prompt after caps timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after caps"; exit 1 }
+}
+send "parfib 20\r"
+expect {
+    -re "6765" { puts "\nPASS: parfib 20 => 6765" }
+    timeout { puts "\nFAIL: parfib timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before parfib"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after parfib" }
+    timeout { puts "\nFAIL: prompt after parfib timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after parfib"; exit 1 }
+}
+send "mvar 100\r"
+expect {
+    -re "mvar ok" { puts "\nPASS: mvar ok" }
+    timeout { puts "\nFAIL: mvar timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before mvar"; exit 1 }
+}
+puts "\nPASS: smp interactive ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

@@ -2,12 +2,16 @@
 
 module HouseA64 where
 
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Monad (forM_, replicateM_)
 import Data.Word (Word64)
 import Foreign.C.String (peekCString, withCString)
 import Foreign.C.Types (CChar (..), CInt (..))
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (poke)
+import GHC.Conc (getNumCapabilities, getNumProcessors)
 
 foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 
@@ -61,11 +65,38 @@ house_main = do
       ["wastemem", nStr] -> case reads nStr of
         [(n, "")] -> withCString (show (sum [1 .. n :: Integer]) ++ "\n") c_uart_puts
         _ -> withCString "usage: wastemem <number>\n" c_uart_puts
+      ["smp"] -> do caps <- getNumCapabilities; procs <- getNumProcessors; withCString ("smp: " ++ show caps ++ " cores online caps=" ++ show caps ++ " procs=" ++ show procs ++ " timers=PPI27+30 ipi=SGI0 caches=WB onlineMask=0x" ++ showHex procs ++ "\n") c_uart_puts
+      ["caps"] -> do caps <- getNumCapabilities; procs <- getNumProcessors; withCString ("caps " ++ show caps ++ " procs " ++ show procs ++ "\n") c_uart_puts
+      ["parfib", nStr] -> case reads nStr of
+        [(n, "")] -> withCString ("parfib " ++ show n ++ " = " ++ show (parFib n) ++ "\n") c_uart_puts
+        _ -> withCString "usage: parfib <n>\n" c_uart_puts
+      ["mvar", nStr] -> case reads nStr of
+        [(n, "")] -> do ok <- mvarTest n; withCString (if ok then "mvar ok\n" else "mvar fail\n") c_uart_puts
+        _ -> withCString "usage: mvar <number>\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     usage =
       unlines
         [ "Usage: help | echo <word>... | clear | uname | uptime | shutdown [-h|-r] -- halt or reboot the machine",
           "       lambda -- lambda demo",
           "       preempt -- preemption demo",
-          "       wastemem <number> -- allocate memory"
+          "       wastemem <number> -- allocate memory",
+          "       smp -- show SMP cores online",
+          "       caps -- show capabilities",
+          "       parfib <n> -- parallel fib",
+          "       mvar <n> -- MVar ping-pong test"
         ]
+    parFib :: Int -> Int
+    parFib n
+      | n <= 1 = n
+      | otherwise = parFib (n - 1) + parFib (n - 2)
+    mvarTest :: Int -> IO Bool
+    mvarTest n = do
+      m <- newEmptyMVar
+      forM_ [1 .. n] $ \_ -> forkIO $ putMVar m (1 :: Int)
+      s <- sumMVars n m 0
+      return (s == n)
+      where
+        sumMVars 0 _ acc = return acc
+        sumMVars k mv acc = do v <- takeMVar mv; sumMVars (k - 1) mv (acc + v)
+    showHex :: Int -> String
+    showHex m = let h = "0123456789abcdef" in if m < 16 then [h !! m] else showHex (m `div` 16) ++ [h !! (m `mod` 16)]

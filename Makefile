@@ -19,8 +19,13 @@ container-shell:
 # The kernel is COMPILED with the same size (kernel learns it at link
 # time via SPIKE_DEFS), so SPIKE_MEM and QEMU -m can never disagree.
 # Small values are first-class: SPIKE_MEM=512M make spike-check works.
+# SMP_N: number of vCPUs for QEMU -smp and compiled-in early stacks.
+# Default 2 (generalizes to 4); single-core via SMP_N=1 keeps old path.
 SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
+SMP_N ?= 2
+SMP_DEFS_C := -DHOUSE_SMP_N=$(SMP_N)
+SMP_DEFS_S := -DHOUSE_SMP_N=$(SMP_N)
 
 ifeq ($(findstring G,$(SPIKE_MEM)),G)
   SPIKE_RAM_BYTES := $(shell echo $$(( $(subst G,,$(SPIKE_MEM)) * 1024 * 1024 * 1024 )))
@@ -37,11 +42,11 @@ SPIKE_DEFS_C += -DHOUSE_STACK_TOP="(0x40000000ULL + $(SPIKE_RAM_BYTES)ULL - 0x20
 spike-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) DEFS_C='$(SPIKE_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S)'
+	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) DEFS_C='$(SPIKE_DEFS_C) $(SMP_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S) $(SMP_DEFS_S)'
 
 spike-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
-	  -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/spike.elf
+	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/spike.elf
 
 spike-check:
 	container run --platform linux/arm64 --rm \
@@ -49,7 +54,7 @@ spike-check:
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) spike-build
 	expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.elf \
-	  'ticks-ok' 90 hvf $(SPIKE_MEM)
+	  'ticks-ok' 90 hvf $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 irq-check kernel ---
 # Shares SPIKE_DEFS_C/SPIKE_DEFS_S with the spike so RAM/stack defines stay
@@ -57,11 +62,11 @@ spike-check:
 irq-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) irq DEFS_C='$(SPIKE_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S)'
+	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) DEFS_C='$(SPIKE_DEFS_C) $(SMP_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S) $(SMP_DEFS_S)'
 
 irq-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
-	  -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/irq.elf
+	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/irq.elf
 
 # irq-check runs both hvf and tcg and requires vm-ok (which implies irq-ok).
 irq-check:
@@ -70,19 +75,19 @@ irq-check:
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) irq-build
 	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.elf \
-	  'vm-ok' 120 hvf $(SPIKE_MEM)
+	  'vm-ok' 120 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.elf \
-	  'vm-ok' 120 tcg $(SPIKE_MEM)
+	  'vm-ok' 120 tcg $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 house kernel ---
 house-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) house DEFS_C='$(SPIKE_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S)'
+	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) DEFS_C='$(SPIKE_DEFS_C) $(SMP_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S) $(SMP_DEFS_S)'
 
 house-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
-	  -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.elf
+	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.elf
 
 house-check:
 	container run --platform linux/arm64 --rm \
@@ -93,21 +98,27 @@ house-check:
 	  make -C kernel clean
 	$(MAKE) house-build
 	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.elf \
-	  'Welcome to the House shell' 30 hvf $(SPIKE_MEM)
+	  'Welcome to the House shell' 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.elf \
-	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM)
+	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Interactive shell (phase 5): prompt → help/lambda/wastemem via PL011 RX
 house-shell-check:
 	$(MAKE) house-build
-	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM)
-	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM)
+	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # POSIX-ish shell + PSCI (phase 7): help descriptions, echo/clear/uname/uptime, shutdown -r/-h
 house-posix-check:
 	$(MAKE) house-build
-	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM)
-	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM)
+	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) $(SMP_N)
+
+# SMP check (phase 9): 2 cores online + Haskell parallel
+smp-check:
+	$(MAKE) house-build SMP_N=2
+	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) 2
+	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) 2
 
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
@@ -126,4 +137,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check run check

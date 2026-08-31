@@ -56,11 +56,19 @@ SECTIONS
     __bss_end = .;
   } :data
 
-  /* Scratch stack for early C before RAM size is known (mmu.c) */
+  /* Per-core early stacks: SMP_N * 16K, 16-byte aligned.
+     Primary uses top of first 16K (__early_stack_top / core0), secondaries
+     compute base + (core+1)*16K in start.S. Keep old names as aliases. */
+#ifndef HOUSE_SMP_N
+#define HOUSE_SMP_N 2
+#endif
+  __early_stacks_base = .;
   __early_stack = .;
   . = ALIGN(16);
-  . += 4096;
-  __early_stack_top = .;
+  . += HOUSE_SMP_N * 16384;
+  __early_stacks_top = .;
+  __early_stack_top = __early_stacks_base + 16384;
+  __early_stack_top_core0 = __early_stack_top;
 
   /DISCARD/ : {
     *(.comment)

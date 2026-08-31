@@ -8,9 +8,9 @@
 #include "uart.h"
 
 volatile int house_isr_active = 0;
-volatile uint64_t house_isr_pending = 0;
+volatile uint64_t house_isr_pending[HOUSE_MAX_SMP] = {0};
 uint32_t house_timer_interval = 0;
-static uint64_t house_boot_ticks = 0;
+static uint64_t house_boot_ticks[HOUSE_MAX_SMP] = {0};
 
 static uint64_t cntfrq(void) {
     uint64_t f;
@@ -23,7 +23,13 @@ uint64_t house_uptime_secs(void) {
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
     uint64_t freq = cntfrq();
     if (freq == 0) return 0;
-    return (now - house_boot_ticks) / freq;
+    uint64_t boot = house_boot_ticks[0] ? house_boot_ticks[0] : house_boot_ticks[0];
+    // use current core's boot if available
+    uint64_t mpidr; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+    uint32_t core = (uint32_t)(mpidr & 0xFF);
+    if (core < HOUSE_MAX_SMP && house_boot_ticks[core]) boot = house_boot_ticks[core];
+    else if (house_boot_ticks[0]) boot = house_boot_ticks[0];
+    return (now - boot) / freq;
 }
 
 static void puthex64(uint64_t v) {
@@ -31,37 +37,41 @@ static void puthex64(uint64_t v) {
     for (int i = 60; i >= 0; i -= 4) uart_putc(d[(v >> i) & 0xf]);
 }
 
-void house_timer_init(void) {
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(house_boot_ticks));
+static void house_timer_init_for_core(uint32_t core) {
+    uint64_t now;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+    if (core < HOUSE_MAX_SMP) house_boot_ticks[core] = now;
     uint64_t freq = cntfrq();
-    /* 10ms tick — cntfrq/100 */
-    uint32_t interval = (uint32_t)(freq / 100);
-    if (interval == 0) interval = (uint32_t)(freq / 10);
-    house_timer_interval = interval;
-
-    uart_puts("[house] timer: cntfrq=0x"); puthex64(freq);
-    uart_puts(" interval=0x"); puthex64(interval); uart_puts("\n");
-
-    /* Virtual timer (PPI 27): enable, not masked. */
+    uint32_t interval = house_timer_interval;
+    if (interval == 0) {
+        interval = (uint32_t)(freq / 100);
+        if (interval == 0) interval = (uint32_t)(freq / 10);
+        house_timer_interval = interval;
+        uart_puts("[house] timer: cntfrq=0x"); puthex64(freq);
+        uart_puts(" interval=0x"); puthex64(interval); uart_puts("\n");
+    }
     __asm__ volatile("msr CNTV_TVAL_EL0, %0" :: "r"((uint64_t)interval));
-    __asm__ volatile("msr CNTV_CTL_EL0, %0" :: "r"((uint64_t)1)); /* ENABLE=1, IMASK=0 */
+    __asm__ volatile("msr CNTV_CTL_EL0, %0" :: "r"((uint64_t)1));
     __asm__ volatile("isb");
-
-    /* Physical timer (PPI 29): second source for dispatcher test. */
     __asm__ volatile("msr CNTP_TVAL_EL0, %0" :: "r"((uint64_t)interval));
     __asm__ volatile("msr CNTP_CTL_EL0, %0" :: "r"((uint64_t)1));
     __asm__ volatile("isb");
-
     uint64_t ctl;
     __asm__ volatile("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
     uart_puts("[house] timer: CNTV_CTL=0x"); puthex64(ctl); uart_puts("\n");
     __asm__ volatile("mrs %0, CNTP_CTL_EL0" : "=r"(ctl));
     uart_puts("[house] timer: CNTP_CTL=0x"); puthex64(ctl); uart_puts("\n");
-
-    /* From now on house_timerfd_due returns pending>0 instead of wall-clock. */
     house_isr_active = 1;
     __asm__ volatile("dsb sy; isb");
-    uart_puts("[house] timer ok (isr_active=1)\n");
+    uart_puts("[house] timer ok (isr_active=1) core "); uart_putc('0'+core); uart_puts("\n");
+}
+
+void house_timer_init(void) {
+    house_timer_init_for_core(0);
+}
+
+void house_timer_init_secondary(uint32_t core) {
+    house_timer_init_for_core(core);
 }
 
 void house_timer_rearm_virt(void) {

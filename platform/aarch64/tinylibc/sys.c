@@ -343,21 +343,25 @@ int timerfd_gettime(int fd, struct itimerspec *v)
 }
 
 extern volatile int house_isr_active;
-extern volatile uint64_t house_isr_pending;
+extern volatile uint64_t house_isr_pending[];
+static inline uint32_t house_cpu_id_sys(void){ uint64_t mpidr; __asm__ volatile("mrs %0, mpidr_el1":"=r"(mpidr)); return (uint32_t)(mpidr & 0xFF); }
 
 /* Timerfd pacing: the fd reads as due once tick_interval_ns has elapsed
    since its previous delivered tick; before that read() answers EAGAIN
    and poll() reports it not-ready, so the RTS ticker paces instead of
    spinning on an always-ready fd.
-   When ISR ticks are active (house_isr_active), readiness is driven by
-   the hardware pending counter fed by the generic-timer ISR (see timer.c)
-   instead of wall-clock. */
+   When ISR ticks are active (house_isr_active), readiness is driven per-core
+   pending counter (see timer.c) instead of wall-clock. */
 int house_timerfd_due(int fd)
 {
     int s = fd_slot(fd);
     if (s < 0 || fdt[s].kind != FD_TIMER)
         return 0;
-    if (house_isr_active) return house_isr_pending > 0;
+    if (house_isr_active) {
+        uint32_t core = house_cpu_id_sys();
+        if (core < 8) return house_isr_pending[core] > 0;
+        return house_isr_pending[0] > 0;
+    }
     if (!tick_interval_ns)
         return 1;
     return house_uptime_ns() - fdt[s].last_ns >= tick_interval_ns;
@@ -413,10 +417,9 @@ ssize_t read(int fd, void *buf, size_t n)
             return -1;
         }
         if (house_isr_active) {
-            /* Hardware tick: consume one pending ISR tick at a time.
-               Returning 1 per read keeps the RTS ticker in lockstep with
-               the ARM generic timer (PPI 27) without depending on SIGVTALRM. */
-            house_isr_pending--;
+            uint32_t core = house_cpu_id_sys();
+            if (core < 8 && house_isr_pending[core] > 0) house_isr_pending[core]--;
+            else if (house_isr_pending[0] > 0) house_isr_pending[0]--;
             ++fdt[s].ticks;
             *(uint64_t *)buf = 1;
             return 8;
@@ -638,6 +641,7 @@ uid_t geteuid(void) { return 0; }
 gid_t getgid(void) { return 0; }
 gid_t getegid(void) { return 0; }
 
+extern volatile int house_smp_n;
 long sysconf(int name)
 {
     switch (name) {
@@ -645,7 +649,7 @@ long sysconf(int name)
         return 4096;
     case _SC_NPROCESSORS_ONLN:
     case _SC_NPROCESSORS_CONF:
-        return 1;
+        return house_smp_n ? house_smp_n : 1;
     case _SC_PHYS_PAGES:
         return 131072;          /* 512 MiB / 4K: keeps the RTS heap
                                    reservation inside our bump region */

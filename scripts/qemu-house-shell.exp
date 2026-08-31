@@ -6,11 +6,13 @@ set kernel [lindex $argv 0]
 set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 30}]
 set accel [lindex $argv 2]
 set mem [lindex $argv 3]
+set smp [lindex $argv 4]
 if {$accel eq ""} { set accel hvf }
 if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
 log_user 1
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
-    -m $mem -nographic -kernel $kernel
+    -smp $smp -m $mem -nographic -kernel $kernel
 expect {
     -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }

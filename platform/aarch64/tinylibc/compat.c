@@ -91,12 +91,7 @@ long syscall(long num, ...)
     return -1;
 }
 
-int sched_setaffinity(pid_t pid, size_t sz, const void *mask)
-{
-    (void)pid; (void)sz; (void)mask;
-    *__errno_location() = ENOENT_;
-    return -1;
-}
+/* sched_setaffinity is provided by threads.c (SMP-aware); old stub removed */
 
 /* ---- filesystem/process syscalls nothing here can honour ---- */
 

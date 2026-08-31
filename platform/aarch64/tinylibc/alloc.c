@@ -14,8 +14,17 @@ extern char __heap_base[];
 #ifndef HOUSE_STACK_TOP
 #define HOUSE_STACK_TOP (0x40000000ULL + HOUSE_RAM_BYTES - 0x200000ULL)
 #endif
+#ifndef HOUSE_SMP_N
+#define HOUSE_SMP_N 2
+#endif
 
 #define RAM_LIMIT (0x40000000ULL + HOUSE_RAM_BYTES)
+
+// Per-core boot stacks (16K each) sit below HOUSE_STACK_TOP; with caches ON
+// they are Normal WB Inner-shareable, so no DCCMVAC needed per 4K commit.
+// GIC/PL011 remain Device in block 0 (mmu.c).
+_Static_assert(HOUSE_RAM_BYTES > 0x200000ULL + (HOUSE_SMP_N * 16384ULL),
+               "HOUSE_RAM_BYTES too small for SMP boot stacks");
 
 /* The RTS heap arena lives at GHC's working aarch64 base (VA
    0x4200000000, aliased onto upper-half guest RAM by mmu.c's L2 tier);
@@ -46,9 +55,13 @@ static int committable(char *lo, size_t n)
     if (in_ram(lo, n))
         return 1;
     /* RTS alias window (see mmu.c): VA 0x4200000000+ backed by the
-       upper half of guest RAM, capped at 2GB. */
+       upper half of guest RAM, capped at 2GB, excluding the top
+       BOOT_STACK area (2M + SMP_N*16K) so heap never overwrites
+       per-core boot stacks that live at the very top of RAM. */
     {
-        uint64_t span = HOUSE_RAM_BYTES >> 1;
+        uint64_t stack_reserve = 0x200000ULL + (uint64_t)HOUSE_SMP_N * 16384ULL;
+        uint64_t half = HOUSE_RAM_BYTES >> 1;
+        uint64_t span = half > stack_reserve ? half - stack_reserve : 0;
         if (span > (2UL << 30))
             span = 2UL << 30;
         return (char *)RTS_ALIAS_BASE <= lo &&

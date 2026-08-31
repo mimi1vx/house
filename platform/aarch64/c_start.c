@@ -2,6 +2,13 @@
 #include "HsFFI.h"
 #include "uart.h"
 #include "irq.h"
+#include "psci.h"
+char *getenv(const char *n);
+void hs_init(int *argc, char ***argv);
+
+#ifndef HOUSE_SMP_N
+#define HOUSE_SMP_N 2
+#endif
 
 extern void house_spike_main(void);
 
@@ -14,63 +21,30 @@ static void uart_puthex(uint64_t v)
         uart_putc(digits[(v >> i) & 0xf]);
 }
 
-/* Single-core exclusive emulation. Apple HVF exits guest LL/SC ops as
-   ISV=0 data aborts (IMPDEF DFSC=0x35) that QEMU forwards into the guest,
-   independent of the mapping's attributes; the same class arises on Device
-   memory with the MMU off. With one CPU an always-succeeding STXR is
-   architecturally sound, so replay the op with ordinary loads/stores.
-   Returns 1 if the faulting instruction was an exclusive op we handled. */
-static int emu_exclusive(uint32_t w, uint64_t *gpr)
-{
-    uint32_t op = w & 0xFFE0FC00u;
-    int rn = (int)((w >> 5) & 0x1f);
-    int rt = (int)(w & 0x1f);
-    int rs = (int)((w >> 16) & 0x1f);
-    static const int szb[4] = { 1, 2, 4, 8 };
-    volatile uint8_t *m = (volatile uint8_t *)gpr[rn];
-    int n = szb[(w >> 30) & 3], i;
-    uint64_t v;
+volatile uint32_t house_smp_online_mask = 1u; // core 0 online
+volatile int house_smp_n = HOUSE_SMP_N;
 
-    switch (op) {
-    case 0x08407C00u: case 0x0840FC00u:     /* ldxrb / ldaxrb */
-    case 0x48407C00u: case 0x4840FC00u:     /* ldxrh / ldaxrh */
-    case 0x88407C00u: case 0x8840FC00u:     /* ldxr w / ldaxr w */
-    case 0xC8407C00u: case 0xC840FC00u:     /* ldxr x / ldaxr x */
-        v = 0;
-        for (i = 0; i < n; i++)
-            v |= (uint64_t)m[i] << (8 * i);
-        if (rt != 31)
-            gpr[rt] = v;                    /* narrow loads zero-extend */
-        return 1;
-    case 0x08007C00u: case 0x0800FC00u:     /* stxrb / stlxrb */
-    case 0x48007C00u: case 0x4800FC00u:     /* stxrh / stlxrh */
-    case 0x88007C00u: case 0x8800FC00u:     /* stxr w / stlxr w */
-    case 0xC8007C00u: case 0xC800FC00u:     /* stxr x / stlxr x */
-        v = rt != 31 ? gpr[rt] : 0;         /* Rt==31 stores XZR */
-        for (i = 0; i < n; i++)
-            m[i] = (uint8_t)(v >> (8 * i));
-        if (rs != 31)
-            gpr[rs] = 0;                    /* report exclusive success */
-        return 1;
-    }
-    return 0;
+static inline uint32_t house_cpu_id(void) {
+    uint64_t mpidr;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+    return (uint32_t)(mpidr & 0xFF);
 }
 
-/* Vector table landing for synchronous exceptions. Phase-3 alignment
-   emulation (DFSC=0x21) has been trimmed: Normal non-cacheable RAM plus
-   SCTLR.A=0 never faults on the GHC code paths and house-check proved no
-   remaining source. Only the single-core exclusive emulation (DFSC=0x35)
-   remains; everything else is fatal. */
+extern void secondary_entry(void);
+extern void house_gic_init_secondary(uint32_t core);
+extern void house_timer_init_secondary(uint32_t core);
+extern void house_threads_init_secondary(uint32_t core);
+void c_start_secondary(uint64_t core_id);
+
+/* Synchronous exceptions: with I+D caches ON real LDXR/STXR are coherent
+   across Inner-shareable Normal WB; the single-core exclusive emulation is
+   removed. DFSC 0x35 is now fatal, as are all other sync faults. */
 uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr,
                        uint64_t *gpr, void *fpi)
 {
     (void)fpi;
     int ec = (int)((esr >> 26) & 0x3f);
-    int dfsc = (int)(esr & 0x3f);
-
-    if (ec == 0x25 && dfsc == 0x35 &&
-        emu_exclusive(*(volatile uint32_t *)elr, gpr))
-        return elr + 4;
+    (void)ec;
 
     uart_puts("\n[house] fatal sync exception ESR=");
     uart_puthex(esr);
@@ -104,13 +78,22 @@ void c_handle_irq(uint64_t *gpr, void *fpi)
     __asm__ volatile("mrs %0, ICC_IAR1_EL1" : "=r"(iar));
     uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
     if (intid == 1023) return; /* spurious */
+    if (intid == 0) {
+        // SGI IPI 0: scheduler kick
+        extern void house_sched_ipi_handler(void);
+        house_sched_ipi_handler();
+        __asm__ volatile("msr ICC_EOIR1_EL1, %0" :: "r"(iar));
+        __asm__ volatile("dsb sy; isb");
+        return;
+    }
     if (intid == 27) {
         /* rearm virtual timer and feed tick to RTS via timerfd seam */
-        extern volatile uint64_t house_isr_pending;
+        extern volatile uint64_t house_isr_pending[];
         extern volatile int house_isr_active;
+        uint32_t core = house_cpu_id();
         __asm__ volatile("msr CNTV_TVAL_EL0, %0" :: "r"((uint64_t)house_timer_interval));
         __asm__ volatile("isb");
-        if (house_isr_active) house_isr_pending++;
+        if (house_isr_active) house_isr_pending[core]++;
         house_irq_push(intid);
         extern void house_sched_maybe_preempt_from_isr(void);
         house_sched_maybe_preempt_from_isr();
@@ -147,6 +130,31 @@ __attribute__((weak)) void house_irqcheck_main(void);
 __attribute__((weak)) void house_main(void);
 
 void house_thread_init_main(void);
+extern void house_mmu_early(void);
+
+void c_start_secondary(uint64_t core_id)
+{
+    uint32_t core = (uint32_t)core_id;
+    // Secondary cores: init GIC redistributor + timers + thread idle
+    uart_puts("[house] c_start_secondary core "); uart_putc('0'+core); uart_puts("\n");
+    house_gic_init_secondary(core);
+    house_timer_init_secondary(core);
+    house_threads_init_secondary(core);
+    // Signal online: set bit and DSB
+    house_smp_online_mask |= (1u << core);
+    __asm__ volatile("dmb sy; dsb sy; sev");
+    uart_puts("[house] secondary core "); uart_putc('0'+core); uart_puts(" online\n");
+    // Idle loop: wait for work via IPI/wfi, handle irq via vectors
+    house_irq_enable();
+    for (;;) {
+        __asm__ volatile("wfi");
+        // IPI handler will have enqueued work; scheduler will switch via house_sched_yield
+        // For now, just yield if runnable
+        extern void house_sched_yield(void);
+        house_sched_yield();
+    }
+}
+
 void c_start(void)
 {
     static int argc = 1;
@@ -157,6 +165,47 @@ void c_start(void)
     uart_puts("[house] c_start: irq_init\n");
     house_irq_init();
     house_thread_init_main();
+    // SMP bring-up: PSCI CPU_ON for cores 1..N-1
+    if (house_smp_n > 1) {
+        uart_puts("[house] smp: bringing up "); uart_putc('0'+house_smp_n); uart_puts(" cores\n");
+        for (int i = 1; i < house_smp_n; i++) {
+            uint64_t entry = (uint64_t)(uintptr_t)secondary_entry;
+            int64_t r = psci_cpu_on((uint64_t)i, entry, (uint64_t)i);
+            uart_puts("[house] psci_cpu_on "); uart_putc('0'+i); uart_puts(" -> "); uart_puthex((uint64_t)r); uart_puts("\n");
+        }
+        // Wait for online mask (timeout ~1s)
+        uint64_t start_ns;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(start_ns));
+        uint64_t freq; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+        uint32_t want = (house_smp_n >= 32) ? 0xFFFFFFFFu : ((1u << house_smp_n)-1);
+        while ((house_smp_online_mask & want) != want) {
+            __asm__ volatile("wfe");
+            uint64_t now; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+            if (freq && (now - start_ns) > freq) break; // 1s timeout
+        }
+        uart_puts("[house] smp: "); uart_puthex(house_smp_online_mask); uart_puts(" online mask (want "); uart_puthex(want); uart_puts(")\n");
+        int online = 0;
+        for (int i=0;i<32;i++) if (house_smp_online_mask & (1u<<i)) online++;
+        uart_puts("[house] smp: "); uart_putc('0'+online); uart_puts(" cores online\n");
+    }
+    // RTS -N injection: default to -N = SMP_N if not already specified
+    if (house_smp_n > 1) {
+        int has_N = 0;
+        for (int i=0;i<argc;i++) if (argv[i] && argv[i][0]=='-' && argv[i][1]=='N') has_N=1;
+        char *ghcrts = getenv("GHCRTS");
+        if (ghcrts) for (char *p=ghcrts; *p; p++) if (p[0]=='-' && p[1]=='N') has_N=1;
+        if (!has_N) {
+            static char nb[8];
+            nb[0]='-'; nb[1]='N';
+            int n=house_smp_n;
+            if (n >= 10) { nb[2]='0'+(n/10)%10; nb[3]='0'+n%10; nb[4]=0; }
+            else { nb[2]='0'+n; nb[3]=0; }
+            static char *nargv[5];
+            nargv[0]="house"; nargv[1]="+RTS"; nargv[2]=nb; nargv[3]="-RTS"; nargv[4]=0;
+            argc=4; argv=nargv;
+            uart_puts("[house] RTS "); uart_puts(nb); uart_puts(" injected\n");
+        }
+    }
     uart_puts("[house] c_start: hs_init\n");
     hs_init(&argc, &argv);
     if (house_main)

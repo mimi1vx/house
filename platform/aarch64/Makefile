@@ -8,9 +8,10 @@ CC      := gcc
 LD      := ld
 DEFS_C  ?=
 DEFS_S  ?=
+SMP_N   ?= 2
 CFLAGS  := -O2 -ffreestanding -fno-builtin -fno-pic -fno-pie \
            -fno-stack-protector -Wall -Werror -I. -I$(HSINC) $(DEFS_C)
-ASFLAGS := -I. $(DEFS_S)
+ASFLAGS := -I. $(DEFS_S) -DHOUSE_SMP_N=$(SMP_N)
 HS_GHCFLAGS := -package mtl -package array -i../../kernel -ibuild -outputdir build
 
 UNITDIR_base := $(shell ghc-pkg field base import-dirs --simple-output | awk '{print $$1}')
@@ -84,12 +85,15 @@ house: build/house.elf
 house-hs:
 	$(MAKE) -C ../../kernel
 
-build/house.elf: house-hs $(OBJS_HOUSE_DEPS) aarch64.ld
-	$(LD) --build-id=none --gc-sections -T aarch64.ld -o $@ \
+build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
+	$(LD) --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
 	  $(OBJS_HOUSE_DEPS) $$(find ../../kernel/build -name '*.o') \
 	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
+
+build/aarch64.ld: aarch64.ld | build
+	$(CC) -E -P -x c -DHOUSE_SMP_N=$(SMP_N) -o $@ $<
 
 build:
 	mkdir -p build build/H build/Kernel/Types build/Util build/Kernel
@@ -125,14 +129,14 @@ build/%.o: ../../kernel/%.hs | build
 build/IrqCheck.o: IrqCheck.hs build/H/Interrupts.o build/H/Monad.o $(VM_OBJS) | build
 	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
 
-build/spike.elf: $(OBJS) aarch64.ld
-	$(LD) --build-id=none --gc-sections -T aarch64.ld -o $@ $(OBJS) \
+build/spike.elf: $(OBJS) build/aarch64.ld
+	$(LD) --build-id=none --gc-sections -T build/aarch64.ld -o $@ $(OBJS) \
 	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
 
-build/irq.elf: $(OBJS_IRQ) aarch64.ld
-	$(LD) --build-id=none --gc-sections -T aarch64.ld -o $@ $(OBJS_IRQ) \
+build/irq.elf: $(OBJS_IRQ) build/aarch64.ld
+	$(LD) --build-id=none --gc-sections -T build/aarch64.ld -o $@ $(OBJS_IRQ) \
 	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)

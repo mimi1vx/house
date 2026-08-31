@@ -24,8 +24,10 @@ house_thread_switch:
     ldr x2, [x1]
     mov sp, x2
     ldr x2, [x1, #8]
+    dsb sy
     msr tpidr_el0, x2
     isb
+    dsb sy
     // restore regs
     ldp d14, d15, [sp], #16
     ldp d12, d13, [sp], #16

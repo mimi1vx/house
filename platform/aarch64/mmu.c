@@ -1,11 +1,11 @@
 /* Guest RAM discovery + early identity page tables.
 
-   With the MMU disabled every data access is Device-nGnRnE: unaligned
-   pairs fault regardless of SCTLR.A, and exclusive ops abort outright.
+   With the MMU disabled every data access is Device-nGnRnE.
    Two levels, 1GB blocks: TTBR0 -> L0 -> one populated L1 covering the
    first 512GB of VA. Block 0 keeps peripheral attributes (PL011/GIC),
-   the guest RAM blocks become Normal; every other entry stays invalid
-   so wild pointers fault loudly instead of silently reading zeros.
+   the guest RAM blocks become Normal WBWA with I+D caches ON (SCTLR.C/I=1);
+   real LDXR/STXR are coherent across cores on Inner-shareable Normal WB.
+   Every other entry stays invalid so wild pointers fault loudly.
    48-bit VA because the stock RTS reserves terabyte-scale address-space
    arenas (NORESERVE promises — only committed chunks, backed by real
    RAM, are ever touched).
@@ -15,9 +15,7 @@
    commits can never reach past real RAM even for small guests.
 
    RAM extent comes from HOUSE_RAM_BYTES (from the top-level Makefile,
-   paired with the -m flag of the QEMU invocation).
-   Caches stay off (SCTLR.C/I=0): Normal non-cacheable already carries
-   full access semantics, without cache-maintenance hazards. */
+   paired with the -m flag of the QEMU invocation). */
 
 #include <stdint.h>
 
@@ -25,6 +23,9 @@
 
 #ifndef HOUSE_RAM_BYTES
 #define HOUSE_RAM_BYTES 0x100000000ULL   /* 4G */
+#endif
+#ifndef HOUSE_SMP_N
+#define HOUSE_SMP_N 2
 #endif
 #define RAM_BASE 0x40000000ULL   /* QEMU virt RAM start */
 
@@ -51,6 +52,13 @@ static void map_block(int idx, int attr)
                   PTE_ATTR(attr) | ((uint64_t)idx << 30);
 }
 
+static void dcache_clean_invalidate_all(void)
+{
+    // Minimal: QEMU virt has no real D-cache levels that need cleaning;
+    // a full DCISW loop can fault on some TCG configurations. Just DSB.
+    __asm__ volatile("dsb sy");
+}
+
 /* Called from start.S once BSS is clear and SP is live; DAIF masked. */
 void house_mmu_early(void)
 {
@@ -65,14 +73,13 @@ void house_mmu_early(void)
     for (i = 1; i <= blocks && i < 256; i++)     /* identity RAM */
         map_block(i, ATTR_NORMAL);
 
-    /* RTS working window: VA 0x4200000000+k*2MB -> upper-half RAM.
-       2MB granularity keeps the committable span exact even for small
-       guests; commits walk upward from the base and never reach past
-       the aliased span. */
+    /* RTS working window: VA 0x4200000000+k*2MB -> upper-half RAM,
+       excluding the top BOOT_STACK area so heap commits never stomp
+       per-core stacks. */
     {
-        /* 32-bit int would truncate a 2GB-span intermediate below: keep
-           the arithmetic in u64 and bound before narrowing. */
-        uint64_t vspan64 = half > (2UL << 30) ? (2UL << 30) : half;
+        uint64_t stack_reserve = 0x200000ULL + (uint64_t)HOUSE_SMP_N * 16384ULL;
+        uint64_t usable_half = half > stack_reserve ? half - stack_reserve : 0;
+        uint64_t vspan64 = usable_half > (2UL << 30) ? (2UL << 30) : usable_half;
         int n_l2 = (int)((vspan64 + (1UL << 30) - 1) >> 30);
         uint64_t off;
         uint64_t pa = RAM_BASE + half;
@@ -105,9 +112,33 @@ void house_mmu_early(void)
         | ((uint64_t)1 << 23)    /* EPD1: never walk TTBR1 */
         | ((uint64_t)2 << 32))); /* IPS: 40-bit PA */
     __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)l0_table));
-    __asm__ volatile("isb; dsb sy; tlbi vmalle1; dsb sy");
+    // Caches ON: clean D$, invalidate I$, TLB flush before enabling
+    __asm__ volatile("dsb sy");
+    __asm__ volatile("tlbi vmalle1");
+    __asm__ volatile("ic iallu");
+    __asm__ volatile("dsb sy; isb");
+    dcache_clean_invalidate_all();
+    __asm__ volatile("dsb sy; isb");
 
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
-    __asm__ volatile("msr sctlr_el1, %0" :: "r"(sctlr | 1UL)); /* M=1 */
+    __asm__ volatile("msr sctlr_el1, %0" :: "r"(sctlr | (1UL<<0) | (1UL<<2) | (1UL<<12)));
+    __asm__ volatile("isb");
+}
+
+void house_mmu_enable_secondary(void)
+{
+    uint64_t sctlr;
+    __asm__ volatile("msr mair_el1, %0" :: "r"((uint64_t)0xFF | ((uint64_t)0x04 << 8)));
+    __asm__ volatile("msr tcr_el1, %0" :: "r"(
+        (uint64_t)16
+        | ((uint64_t)1 << 8)
+        | ((uint64_t)1 << 10)
+        | ((uint64_t)3 << 12)
+        | ((uint64_t)1 << 23)
+        | ((uint64_t)2 << 32)));
+    __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)l0_table));
+    __asm__ volatile("dsb sy; tlbi vmalle1; ic iallu; dsb sy; isb");
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    __asm__ volatile("msr sctlr_el1, %0" :: "r"(sctlr | (1UL<<0) | (1UL<<2) | (1UL<<12)));
     __asm__ volatile("isb");
 }
