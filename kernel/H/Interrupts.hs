@@ -1,45 +1,56 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 -- | GIC-native interrupts (aarch64). Replaces the i8259 PIC programming
 -- via H.IOPorts and C-side setIRQTable.
 module H.Interrupts
-  ( IntId(..)
-  , ppiVirtTimer, ppiPhysTimer
-  , spi
-  , enableInt, disableInt, eoi
-  , installHandler
-  , enableInterrupts, disableInterrupts
-  ) where
+  ( IntId (..),
+    ppiVirtTimer,
+    ppiPhysTimer,
+    spi,
+    enableInt,
+    disableInt,
+    eoi,
+    installHandler,
+    enableInterrupts,
+    disableInterrupts,
+  )
+where
 
-import Data.Word (Word32)
-import Data.Ix (Ix)
-import Data.Array.IO (IOArray, newArray, readArray, writeArray)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
-import System.IO.Unsafe (unsafePerformIO)
-import Foreign.StablePtr (StablePtr, newStablePtr, deRefStablePtr)
 import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, catch)
+import Data.Array.IO (IOArray, newArray, readArray, writeArray)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Ix (Ix)
+import Data.Word (Word32)
+import Foreign.StablePtr (StablePtr, deRefStablePtr, newStablePtr)
 import GHC.Conc (threadDelay)
-import H.Monad (H, runH, liftIO)
+import H.Monad (H, liftIO, runH)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | GIC INTID (interrupt identifier). PPIs 16-31, SPIs 32+.
 newtype IntId = IntId Word32
   deriving (Eq, Ord, Ix, Enum, Show)
 
 ppiVirtTimer, ppiPhysTimer :: IntId
-ppiVirtTimer = IntId 27  -- CNTV (virtual timer), confirmed on QEMU virt
-ppiPhysTimer = IntId 30  -- CNTP (non-secure physical timer) — QEMU virt reports 30; 29 is secure alias
+ppiVirtTimer = IntId 27 -- CNTV (virtual timer), confirmed on QEMU virt
+ppiPhysTimer = IntId 30 -- CNTP (non-secure physical timer) — QEMU virt reports 30; 29 is secure alias
 
 spi :: Word32 -> IntId
 spi n = IntId (32 + n)
 
 -- FFI to GIC/irq helpers (see kernel/platform/aarch64/irq.h)
-foreign import ccall unsafe "house_gic_enable_int"  c_enableInt  :: Word32 -> IO ()
+foreign import ccall unsafe "house_gic_enable_int" c_enableInt :: Word32 -> IO ()
+
 foreign import ccall unsafe "house_gic_disable_int" c_disableInt :: Word32 -> IO ()
-foreign import ccall unsafe "house_irq_enable"      c_irqEnable  :: IO ()
-foreign import ccall unsafe "house_irq_disable"     c_irqDisable :: IO ()
-foreign import ccall unsafe "house_irq_pop"         c_irqPop     :: IO Int
-foreign import ccall unsafe "house_irq_pipe_drain"  c_irqPipeDrain :: IO ()
+
+foreign import ccall unsafe "house_irq_enable" c_irqEnable :: IO ()
+
+foreign import ccall unsafe "house_irq_disable" c_irqDisable :: IO ()
+
+foreign import ccall unsafe "house_irq_pop" c_irqPop :: IO Int
+
+foreign import ccall unsafe "house_irq_pipe_drain" c_irqPipeDrain :: IO ()
 
 enableInt :: IntId -> H ()
 enableInt (IntId n) = liftIO $ c_enableInt n
@@ -73,7 +84,7 @@ dispatcherStarted = unsafePerformIO $ newIORef False
 -- on first call. The dispatcher blocks in threadWaitRead on the IRQ pipe fd
 -- (poll shim proven by phase-2 timerfd) and drains the SPSC ring.
 installHandler :: IntId -> H () -> H ()
-installHandler intid@(IntId n) handler = liftIO $ do
+installHandler (IntId n) handler = liftIO $ do
   sptr <- newStablePtr handler
   let idx = fromIntegral n
   if idx >= 0 && idx < 1024
@@ -81,12 +92,14 @@ installHandler intid@(IntId n) handler = liftIO $ do
     else return ()
   -- start dispatcher once
   started <- readIORef dispatcherStarted
-  if started then return () else do
-    writeIORef dispatcherStarted True
-    -- fork dispatcher; exceptions inside handler are caught so one bad handler
-    -- cannot kill the dispatcher
-    _ <- forkIO dispatcherLoop
-    return ()
+  if started
+    then return ()
+    else do
+      writeIORef dispatcherStarted True
+      -- fork dispatcher; exceptions inside handler are caught so one bad handler
+      -- cannot kill the dispatcher
+      _ <- forkIO dispatcherLoop
+      return ()
   return ()
 
 -- Dispatcher: drains the SPSC ring the ISR fills and runs the matching handler.
@@ -100,7 +113,7 @@ dispatcherLoop = loop
     loop = do
       threadDelay 20000
       c_irqPipeDrain
-      drainBounded 64
+      drainBounded (64 :: Int)
       loop
 
     -- Drain at most n entries per wakeup so the dispatcher always yields back
@@ -113,9 +126,10 @@ dispatcherLoop = loop
       if intid == -1
         then return ()
         else do
-          mh <- if intid >= 0 && intid < 1024
-                  then readArray handlerTable intid
-                  else return Nothing
+          mh <-
+            if intid >= 0 && intid < 1024
+              then readArray handlerTable intid
+              else return Nothing
           case mh of
             Nothing -> drainBounded (n - 1)
             Just sptr -> do

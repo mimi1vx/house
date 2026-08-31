@@ -3,11 +3,10 @@
 module IrqCheck where
 
 import Control.Monad (forM_, unless, when)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import GHC.Conc (threadDelay)
 import H.Interrupts
 import H.Monad (H, liftIO, runH)
-import qualified H.Pages as P
 import H.PhysicalMemory
 import H.VirtualMemory
 

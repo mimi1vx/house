@@ -2,7 +2,6 @@
 
 module HouseA64 where
 
-import Control.Monad (when)
 import H.Concurrency
 import H.Interrupts (enableInterrupts)
 import H.Monad (H, runH)
@@ -39,6 +38,7 @@ welcome = "Welcome to the House shell! Enter help to see a list of commands."
 idle :: H ()
 idle = idle' 0
   where
+    idle' :: Int -> H ()
     idle' n = do
       yield
       if n >= 100000
@@ -49,15 +49,14 @@ idle = idle' 0
 textShell :: Console -> Chan KeyPress -> H ()
 textShell console chan = do
   editor <- newEditor chan console
-  let loop = do
+  let shellLoop = do
         line <- getLine editor "> "
         putStringLn console ""
         execute (words line)
-        loop
-  loop
+        shellLoop
+  shellLoop
   where
     putStrLn' s = putStringLn console s
-    putStr' s = putString console s
     print' x = putStrLn' (show x)
 
     execute :: [String] -> H ()

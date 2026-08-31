@@ -31,7 +31,7 @@ validPage :: Page a -> Bool
 ------------PRIVATE IMPLEMENTATION FOLLOWS---------------
 
 allocPage = do cleanRegisteredPages
-	       allocPageFromList
+               allocPageFromList
 
 freePage a  = freePageToList a
 
@@ -54,7 +54,7 @@ freeList  = unsafePerformH $ newRef allPages
 
     enumPages a = if a<maxAddr
                   then a:enumPages (a `plusPtr` pageSize)
-		  else []
+                  else []
 
 {-# NOINLINE pageSem #-}
 pageSem :: QSem
@@ -68,7 +68,7 @@ allocPageFromList =
            [] ->          return Nothing
            (page:rest) -> do writeRef freeList rest
                              -- putStrLn ("newPage:" ++ (show page))
-			     return (Just page)
+                             return (Just page)
 
 --freePageToList :: Ptr a -> H ()
 freePageToList page = 
@@ -98,9 +98,9 @@ cleanRegisteredPages =
      mapM_ clean cs
   where check (_,w,_) =
            do s <- deRefWeak w
-	      return (s /= Nothing)
+              return (s /= Nothing)
         clean (p,_,f) = f p   
-	spanM q [] = return ([],[])
+        spanM q [] = return ([],[])
         spanM q (x:xs) =
            do (ys,zs) <- spanM q xs
               keep <- q x 

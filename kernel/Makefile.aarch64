@@ -17,14 +17,13 @@ PKGS := -package mtl -package array -package containers -package pretty
 
 # Seed default-extensions replacing -fglasgow-exts -fallow-undecidable-instances
 # -fallow-overlapping-instances. Final set is pinned here and in porting-log.
-# OverlappingInstances is deprecated in 9.14; if rejected, switch to per-instance
-# OVERLAPPING pragmas and drop the flag.
+# OverlappingInstances now handled via per-instance OVERLAPPABLE/OVERLAPPING
+# pragmas instead of the deprecated global flag.
 EXTS := -XMultiParamTypeClasses \
         -XFunctionalDependencies \
         -XFlexibleInstances \
         -XFlexibleContexts \
         -XUndecidableInstances \
-        -XOverlappingInstances \
         -XImplicitParams \
         -XExistentialQuantification \
         -XScopedTypeVariables \
@@ -34,7 +33,7 @@ EXTS := -XMultiParamTypeClasses \
         -XForeignFunctionInterface \
         -XGeneralizedNewtypeDeriving
 
-GHCFLAGS := -O1 -outputdir $(BUILD) -i. $(PKGS) $(EXTS) -Wall -Wno-tabs -Wno-noncanonical-monad-instances
+GHCFLAGS := -O1 -outputdir $(BUILD) -i. $(PKGS) $(EXTS) -Wall
 
 # Default: compile-only check (no link). Mirrors platform Makefile idiom for
 # verifying the closure compiles under stock GHC 9.14.

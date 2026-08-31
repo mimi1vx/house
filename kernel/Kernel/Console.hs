@@ -10,7 +10,6 @@ module Kernel.Console
   )
 where
 
-import Control.Monad (when)
 import H.Concurrency
 {-P:
 import Prelude hiding (putChar)
@@ -26,6 +25,7 @@ putString (Console vConsole) str =
   withMVar vConsole $ \console ->
     writeList2Chan (consoleChan console) $ map putc str
 
+putc :: Char -> ConsoleCommand
 putc '\n' = NewLine
 putc c = PutChar defaultAttrs c
 
@@ -60,15 +60,3 @@ clearEOL :: Console -> H ()
 clearEOL (Console vConsole) =
   withMVar vConsole $ \console ->
     writeChan (consoleChan console) ClearEOL
-
-isValidPosition :: ConsoleData -> Row -> Col -> H Bool
-isValidPosition con row col =
-  let height = consoleHeight con
-      width = consoleWidth con
-   in return (row < 0 || col < 0 || row >= height || col >= width)
-
-checkPosition :: ConsoleData -> Row -> Col -> H ()
-checkPosition console row col =
-  do
-    valid <- isValidPosition console row col
-    when (not valid) $ error "Invalid position"

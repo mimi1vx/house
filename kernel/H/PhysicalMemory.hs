@@ -1,9 +1,9 @@
 -- | Physical Pages and Addresses (section 3.1 in the paper)
 module H.PhysicalMemory(PAddr, PhysPage, POffset, 
-       		        pageSize,getPAddr,setPAddr,
-		        allocPhysPage,freePhysPage,
-			toPhysPage,fromPhysPage -- not for public use 
-       		       ) where
+                        pageSize,getPAddr,setPAddr,
+                        allocPhysPage,freePhysPage,
+                        toPhysPage,fromPhysPage -- not for public use 
+                       ) where
 
 import Data.Word(Word8,Word32)
 import Util.Word12

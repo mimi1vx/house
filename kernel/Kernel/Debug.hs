@@ -30,6 +30,6 @@ wrap :: (Console -> String -> H ()) -> String -> H ()
 wrap f str =
     do empty <- isEmptyMVar v_defaultConsole
        if empty
-	  then return ()
-	  else do chan <- readMVar v_defaultConsole
-	          f chan str
+          then return ()
+          else do chan <- readMVar v_defaultConsole
+                  f chan str
