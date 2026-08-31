@@ -5,6 +5,7 @@ module HouseA64 where
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM_)
+import Data.Bits (shiftL)
 import Data.Word (Word64)
 import Foreign.C.String (peekCString, withCString)
 import Foreign.C.Types (CChar (..), CInt (..))
@@ -65,10 +66,14 @@ house_main = do
       ["wastemem", nStr] -> case reads nStr of
         [(n, "")] -> withCString (show (sum [1 .. n :: Integer]) ++ "\n") c_uart_puts
         _ -> withCString "usage: wastemem <number>\n" c_uart_puts
-      ["smp"] -> do caps <- getNumCapabilities; procs <- getNumProcessors; withCString ("smp: " ++ show caps ++ " cores online caps=" ++ show caps ++ " procs=" ++ show procs ++ " timers=PPI27+30 ipi=SGI0 caches=WB onlineMask=0x" ++ showHex procs ++ "\n") c_uart_puts
+      ["smp"] -> do
+        caps <- getNumCapabilities
+        procs <- getNumProcessors
+        let mask = (1 `shiftL` procs) - 1
+        withCString ("smp: " ++ show procs ++ " cores online caps=" ++ show caps ++ " procs=" ++ show procs ++ " timers=PPI27+30 ipi=SGI0 caches=WB onlineMask=0x" ++ showHex mask ++ "\n") c_uart_puts
       ["caps"] -> do caps <- getNumCapabilities; procs <- getNumProcessors; withCString ("caps " ++ show caps ++ " procs " ++ show procs ++ "\n") c_uart_puts
       ["parfib", nStr] -> case reads nStr of
-        [(n, "")] -> withCString ("parfib " ++ show n ++ " = " ++ show (parFib n) ++ "\n") c_uart_puts
+        [(n, "")] -> do v <- parFibIO n; withCString ("parfib " ++ show n ++ " = " ++ show v ++ "\n") c_uart_puts
         _ -> withCString "usage: parfib <n>\n" c_uart_puts
       ["mvar", nStr] -> case reads nStr of
         [(n, "")] -> do ok <- mvarTest n; withCString (if ok then "mvar ok\n" else "mvar fail\n") c_uart_puts
@@ -85,10 +90,21 @@ house_main = do
           "       parfib <n> -- parallel fib",
           "       mvar <n> -- MVar ping-pong test"
         ]
-    parFib :: Int -> Int
-    parFib n
+    seqFib :: Int -> Int
+    seqFib n
       | n <= 1 = n
-      | otherwise = parFib (n - 1) + parFib (n - 2)
+      | otherwise = seqFib (n - 1) + seqFib (n - 2)
+    parFib :: Int -> Int
+    parFib = seqFib
+    parFibIO :: Int -> IO Int
+    parFibIO n
+      | n < 24 = return (parFib n)
+      | otherwise = do
+          mv <- newEmptyMVar
+          _ <- forkIO $ putMVar mv (parFib (n - 1))
+          let b = parFib (n - 2)
+          a <- takeMVar mv
+          return (a + b)
     mvarTest :: Int -> IO Bool
     mvarTest n = do
       m <- newEmptyMVar

@@ -57,8 +57,9 @@ SECTIONS
   } :data
 
   /* Per-core early stacks: SMP_N * 16K, 16-byte aligned.
-     Primary uses top of first 16K (__early_stack_top / core0), secondaries
-     compute base + (core+1)*16K in start.S. Keep old names as aliases. */
+      Primary uses top of first 16K (__early_stack_top / core0), secondaries
+      compute base + (core+1)*16K in start.S. Keep old names as aliases.
+      SMP>2 working set is 4G RAM; 512M stays valid for N=2 regression only. */
 #ifndef HOUSE_SMP_N
 #define HOUSE_SMP_N 2
 #endif

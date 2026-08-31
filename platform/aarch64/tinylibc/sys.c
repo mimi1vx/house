@@ -342,6 +342,9 @@ int timerfd_gettime(int fd, struct itimerspec *v)
     return 0;
 }
 
+#ifndef HOUSE_MAX_SMP
+#define HOUSE_MAX_SMP 16
+#endif
 extern volatile int house_isr_active;
 extern volatile uint64_t house_isr_pending[];
 static inline uint32_t house_cpu_id_sys(void){ uint64_t mpidr; __asm__ volatile("mrs %0, mpidr_el1":"=r"(mpidr)); return (uint32_t)(mpidr & 0xFF); }
@@ -359,7 +362,7 @@ int house_timerfd_due(int fd)
         return 0;
     if (house_isr_active) {
         uint32_t core = house_cpu_id_sys();
-        if (core < 8) return house_isr_pending[core] > 0;
+        if (core < HOUSE_MAX_SMP) return house_isr_pending[core] > 0;
         return house_isr_pending[0] > 0;
     }
     if (!tick_interval_ns)
@@ -418,7 +421,7 @@ ssize_t read(int fd, void *buf, size_t n)
         }
         if (house_isr_active) {
             uint32_t core = house_cpu_id_sys();
-            if (core < 8 && house_isr_pending[core] > 0) house_isr_pending[core]--;
+            if (core < HOUSE_MAX_SMP && house_isr_pending[core] > 0) house_isr_pending[core]--;
             else if (house_isr_pending[0] > 0) house_isr_pending[0]--;
             ++fdt[s].ticks;
             *(uint64_t *)buf = 1;

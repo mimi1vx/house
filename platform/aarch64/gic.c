@@ -93,6 +93,7 @@ void house_gic_init_secondary(uint32_t core) {
     uint32_t w = mmio_r32(waker_addr);
     w &= ~(1u << 1);
     mmio_w32(waker_addr, w);
+    __asm__ volatile("dsb sy; isb");
     for (int i = 0; i < 1000000; i++) {
         w = mmio_r32(waker_addr);
         if ((w & (1u << 2)) == 0) break;
@@ -101,9 +102,12 @@ void house_gic_init_secondary(uint32_t core) {
     uint32_t gr = mmio_r32(igroup_addr);
     gr |= (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI);
     mmio_w32(igroup_addr, gr);
+    __asm__ volatile("dsb sy; isb");
     uint64_t isen_addr = gicr_base(core) + GICR_ISENABLER0;
     mmio_w32(isen_addr, (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI));
+    __asm__ volatile("dsb sy; isb");
     gic_enable_sre();
+    __asm__ volatile("dsb sy; isb");
     uart_puts("[house] gic secondary "); uart_putc('0'+core); uart_puts(" ok\n");
 }
 
@@ -136,11 +140,39 @@ void house_gic_disable_int(uint32_t intid) {
     __asm__ volatile("isb; dsb sy");
 }
 
-void house_gic_send_sgi(uint32_t sgi_id, uint32_t aff0_mask) {
-    // ICC_SGI1R_EL1: [27:24]=sgi_id, [15:0]=aff0 mask, IRM=0, Aff1/Aff2=0
-    uint64_t v = ((uint64_t)(sgi_id & 0xf) << 24) | (aff0_mask & 0xffff);
+void house_gic_send_sgi_to_core(uint32_t sgi_id, uint32_t core) {
+    // ICC_SGI1R_EL1 unicast: Aff3[55:48] Aff2[39:32] Aff1[23:16] RS[47:44] TargetList[15:0]
+    // For N<=16 with Aff1=Aff2=Aff3=0 this reduces to old mask (1<<core).
+    // RS selects 16-core slice, TargetList bit is core%16.
+    uint64_t aff3 = (core >> 24) & 0xff;
+    uint64_t aff2 = (core >> 16) & 0xff;
+    uint64_t aff1 = (core >> 8) & 0xff;
+    uint64_t rs = (core >> 4) & 0xf;
+    uint64_t bit = 1ULL << (core & 0xf);
+    uint64_t v = (aff3 << 48) | (rs << 44) | (aff2 << 32) |
+                 ((uint64_t)(sgi_id & 0xf) << 24) | (aff1 << 16) | bit;
     __asm__ volatile("msr ICC_SGI1R_EL1, %0" :: "r"(v));
     __asm__ volatile("isb; dsb sy");
+}
+
+void house_gic_send_sgi(uint32_t sgi_id, uint32_t aff0_mask) {
+    // Mask variant (single-cluster broadcast). For correctness across
+    // clusters, iterate and use unicast helper per bit.
+    if ((aff0_mask & 0xffff) == 0) return;
+    // Fast path: if all targets share Aff1/Aff2/Aff3==0 and mask fits 16 bits,
+    // we can use the direct encoding; otherwise unicast loop.
+    // For now, always loop via unicast to stay correct for any Aff topology.
+    for (int core = 0; core < 16; core++) {
+        if (aff0_mask & (1u << core)) {
+            house_gic_send_sgi_to_core(sgi_id, (uint32_t)core);
+        }
+    }
+    // Handle bits beyond 15 via RS>0 (cores 16..)
+    for (int core = 16; core < 32; core++) {
+        if (aff0_mask & (1u << core)) { // overflow bit, but caller should use unicast for >15
+            house_gic_send_sgi_to_core(sgi_id, (uint32_t)core);
+        }
+    }
 }
 
 void house_gic_enable_sgi(uint32_t id) {

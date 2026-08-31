@@ -40,10 +40,11 @@
 
 static uint64_t l0_table[512] __attribute__((aligned(4096)));
 static uint64_t l1_low[512] __attribute__((aligned(4096)));
-/* RTS arena alias tier: two level-2 tables of 2MB blocks cover up to
-   2GB of VA 0x4200000000+ mapped onto upper-half guest RAM. */
+/* RTS arena alias tier: eight level-2 tables of 2MB blocks cover up to
+    8GB of VA 0x4200000000+ mapped onto upper-half guest RAM (4G working
+    set uses 2GB, 8G/16G hosts use more). */
 static uint64_t l1_rts[512] __attribute__((aligned(4096)));
-static uint64_t l2_rts[2][512] __attribute__((aligned(4096)));
+static uint64_t l2_rts[8][512] __attribute__((aligned(4096)));
 
 /* Global 1GB block index within the first 512GB of VA (l1_low slot). */
 static void map_block(int idx, int attr)
@@ -74,17 +75,18 @@ void house_mmu_early(void)
         map_block(i, ATTR_NORMAL);
 
     /* RTS working window: VA 0x4200000000+k*2MB -> upper-half RAM,
-       excluding the top BOOT_STACK area so heap commits never stomp
-       per-core stacks. */
+        excluding the top BOOT_STACK area (2M + SMP_N*16K) so heap commits
+        never stomp per-core stacks. 4G is the SMP>2 working RAM; larger
+        hosts use more of the upper half. */
     {
         uint64_t stack_reserve = 0x200000ULL + (uint64_t)HOUSE_SMP_N * 16384ULL;
         uint64_t usable_half = half > stack_reserve ? half - stack_reserve : 0;
-        uint64_t vspan64 = usable_half > (2UL << 30) ? (2UL << 30) : usable_half;
+        uint64_t vspan64 = usable_half > (8UL << 30) ? (8UL << 30) : usable_half;
         int n_l2 = (int)((vspan64 + (1UL << 30) - 1) >> 30);
         uint64_t off;
         uint64_t pa = RAM_BASE + half;
-        if (n_l2 > 2)
-            n_l2 = 2;
+        if (n_l2 > 8)
+            n_l2 = 8;
         for (i = 0; i < n_l2; i++) {
             l1_rts[i] = PTE_VALID | PTE_TABLE |
                         (uint64_t)(uintptr_t)l2_rts[i];

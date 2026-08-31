@@ -8,7 +8,7 @@ CC      := gcc
 LD      := ld
 DEFS_C  ?=
 DEFS_S  ?=
-SMP_N   ?= 2
+SMP_N   ?= 2  # generalizes to N ≤ HOUSE_MAX_SMP (16, tested to 8)
 CFLAGS  := -O2 -ffreestanding -fno-builtin -fno-pic -fno-pie \
            -fno-stack-protector -Wall -Werror -I. -I$(HSINC) $(DEFS_C)
 ASFLAGS := -I. $(DEFS_S) -DHOUSE_SMP_N=$(SMP_N)

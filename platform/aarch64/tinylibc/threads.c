@@ -19,6 +19,7 @@ int raise(int sig);
 void uart_puts(const char *s);
 void uart_putc(char c);
 extern void house_gic_send_sgi(uint32_t sgi_id, uint32_t aff0_mask);
+extern void house_gic_send_sgi_to_core(uint32_t sgi_id, uint32_t core);
 
 house_spinlock_t sched_lock = {0};
 volatile int house_sched_deferred[HOUSE_MAX_SMP] = {0};
@@ -172,8 +173,9 @@ void house_sched_ipi_handler(void) {
 
 void house_sched_kick(int core) {
     if (core < 0 || core >= house_smp_n) return;
+    if (core >= 32) return;
     if (!(house_smp_online_mask & (1u << core))) return;
-    house_gic_send_sgi(SGI_IPI, 1u << core);
+    house_gic_send_sgi_to_core(SGI_IPI, (uint32_t)core);
 }
 
 void house_sched_block(void) {
@@ -600,13 +602,14 @@ int pthread_setname_np(unsigned long t, const char *n) { (void)t; (void)n; retur
 
 int pthread_create(unsigned long *thr, const void *a, void *(*fn)(void *), void *arg) {
     (void)a;
+    // Allocate stack/tcb outside sched_lock to avoid holding two locks (sched->alloc)
+    void *stack = malloc(HOUSE_THREAD_STACK_BYTES);
+    if (!stack) return ENOMEM;
+    void *tcb = house_tls_alloc();
+    if (!tcb) { free(stack); return ENOMEM; }
     house_spin_lock(&sched_lock);
     house_thread_t *t = alloc_thread();
-    if (!t) { house_spin_unlock(&sched_lock); return EAGAIN; }
-    void *stack = malloc(HOUSE_THREAD_STACK_BYTES);
-    if (!stack) { t->state = HOUSE_THR_UNUSED; house_spin_unlock(&sched_lock); return ENOMEM; }
-    void *tcb = house_tls_alloc();
-    if (!tcb) { free(stack); t->state = HOUSE_THR_UNUSED; house_spin_unlock(&sched_lock); return ENOMEM; }
+    if (!t) { house_spin_unlock(&sched_lock); free(stack); free(tcb); return EAGAIN; }
     t->tid = next_tid++;
     t->start = fn;
     t->arg = arg;
@@ -619,9 +622,15 @@ int pthread_create(unsigned long *thr, const void *a, void *(*fn)(void *), void 
     t->tpidr = (uint64_t)tcb;
     t->errno_val = 0;
     t->wake_ns = 0;
-    // For SMP bring-up debugging, pin all new threads to core 0
-    // TODO: restore round-robin (t->tid % house_smp_n) for true parallelism
-    int target = 0;
+    // Early boot: keep initial RTS threads on core 0 to avoid SMP race during hs_init;
+    // after tid >= 10, distribute via round-robin for true parallelism.
+    int target;
+    if (t->tid < 10) target = 0;
+    else {
+        target = house_smp_n > 0 ? (t->tid % house_smp_n) : 0;
+        if (target < 0) target = 0;
+        if (target >= house_smp_n) target = 0;
+    }
     t->affinity = 1u << target;
     memset(&t->sigmask, 0, sizeof(t->sigmask));
     uintptr_t top = (uintptr_t)stack + HOUSE_THREAD_STACK_BYTES;
@@ -639,6 +648,7 @@ int pthread_create(unsigned long *thr, const void *a, void *(*fn)(void *), void 
     *thr = (unsigned long)t->tid;
     uint32_t cur = house_cpu_id();
     int need_kick = (target != (int)cur);
+    // uart_puts("[house] pthread_create tid "); uart_putc('0'+ (t->tid%10)); uart_puts(" target "); uart_putc('0'+target); uart_puts(" cur "); uart_putc('0'+cur); uart_puts(need_kick ? " kick\n" : " no-kick\n");
     house_spin_unlock(&sched_lock);
     if (need_kick) house_sched_kick(target);
     return 0;
@@ -690,9 +700,36 @@ int sched_setaffinity(pid_t pid, size_t sz, const void *mask) {
     return 0;
 }
 int pthread_setaffinity_np(unsigned long tid, size_t sz, const void *mask) {
-    (void)sz;
+    if (!mask || sz < sizeof(uint32_t)) return 0;
+    uint32_t new_aff = *(const uint32_t*)mask;
+    int new_core = __builtin_ctz(new_aff);
+    if (new_core < 0 || new_core >= house_smp_n) return 0;
     house_spin_lock(&sched_lock);
-    for (int i=0;i<HOUSE_MAX_THREADS;i++) if (threads[i].tid == (int)tid) { threads[i].affinity = *(const uint32_t*)mask; break; }
+    for (int i=0;i<HOUSE_MAX_THREADS;i++) if (threads[i].tid == (int)tid) {
+        threads[i].affinity = new_aff;
+        if (threads[i].state == HOUSE_THR_RUNNABLE) {
+            // Move between per-core run queues if enqueued
+            for (int c=0;c<house_smp_n;c++) {
+                house_thread_t *prev = NULL;
+                house_thread_t *cur = run_head[c];
+                while (cur) {
+                    if (cur == &threads[i]) {
+                        if (prev) prev->next = cur->next;
+                        else run_head[c] = cur->next;
+                        if (run_tail[c]==cur) run_tail[c]=prev;
+                        cur->next = NULL;
+                        enqueue_run_core(new_core, cur);
+                        uint32_t me = house_cpu_id();
+                        if ((uint32_t)new_core != me) house_sched_kick(new_core);
+                        goto found;
+                    }
+                    prev = cur; cur = cur->next;
+                }
+            }
+        }
+found:
+        break;
+    }
     house_spin_unlock(&sched_lock);
     return 0;
 }

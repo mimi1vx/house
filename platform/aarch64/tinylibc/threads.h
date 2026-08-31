@@ -6,10 +6,10 @@
 #include "../spinlock.h"
 
 #ifndef HOUSE_MAX_SMP
-#define HOUSE_MAX_SMP 8
+#define HOUSE_MAX_SMP 16
 #endif
 
-#define HOUSE_THREAD_STACK_BYTES (256UL * 1024UL)
+#define HOUSE_THREAD_STACK_BYTES (512UL * 1024UL)
 #define HOUSE_MAX_THREADS 64
 
 typedef struct house_thread house_thread_t;

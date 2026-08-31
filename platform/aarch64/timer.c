@@ -38,9 +38,11 @@ static void puthex64(uint64_t v) {
 }
 
 static void house_timer_init_for_core(uint32_t core) {
+    // Guard against out-of-range core index (HOUSE_MAX_SMP=16)
+    if (core >= HOUSE_MAX_SMP) return;
     uint64_t now;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
-    if (core < HOUSE_MAX_SMP) house_boot_ticks[core] = now;
+    house_boot_ticks[core] = now;
     uint64_t freq = cntfrq();
     uint32_t interval = house_timer_interval;
     if (interval == 0) {

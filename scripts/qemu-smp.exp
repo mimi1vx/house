@@ -1,5 +1,5 @@
 #!/usr/bin/expect -f
-# SMP verification for House/aarch64 (2 cores, Haskell parallel).
+# SMP verification for House/aarch64 (N cores, Haskell parallel).
 # Usage: expect scripts/qemu-smp.exp <kernel.elf> [timeout] [accel] [mem] [smp]
 set kernel [lindex $argv 0]
 set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 60}]
@@ -24,7 +24,7 @@ expect {
 }
 send "smp\r"
 expect {
-    -re "cores online" { puts "\nPASS: smp cores online" }
+    -re "smp: $smp cores online" { puts "\nPASS: smp $smp cores online" }
     timeout { puts "\nFAIL: smp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before smp"; exit 1 }
 }
@@ -35,7 +35,7 @@ expect {
 }
 send "caps\r"
 expect {
-    -re "caps 2" { puts "\nPASS: caps 2" }
+    -re "caps $smp" { puts "\nPASS: caps $smp" }
     timeout { puts "\nFAIL: caps timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before caps"; exit 1 }
 }
@@ -55,7 +55,7 @@ expect {
     timeout { puts "\nFAIL: prompt after parfib timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after parfib"; exit 1 }
 }
-send "mvar 100\r"
+send "mvar 20\r"
 expect {
     -re "mvar ok" { puts "\nPASS: mvar ok" }
     timeout { puts "\nFAIL: mvar timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }

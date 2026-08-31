@@ -198,8 +198,11 @@ void c_start(void)
             static char nb[8];
             nb[0]='-'; nb[1]='N';
             int n=house_smp_n;
-            if (n >= 10) { nb[2]='0'+(n/10)%10; nb[3]='0'+n%10; nb[4]=0; }
-            else { nb[2]='0'+n; nb[3]=0; }
+            int pos=2;
+            if (n >= 100) nb[pos++]='0'+(n/100)%10;
+            if (n >= 10) nb[pos++]='0'+(n/10)%10;
+            nb[pos++]='0'+n%10;
+            nb[pos]=0;
             static char *nargv[5];
             nargv[0]="house"; nargv[1]="+RTS"; nargv[2]=nb; nargv[3]="-RTS"; nargv[4]=0;
             argc=4; argv=nargv;

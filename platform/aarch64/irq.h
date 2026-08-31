@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-#define HOUSE_MAX_SMP 8
+#define HOUSE_MAX_SMP 16
 #define SGI_IPI 0
 
 /* GICv3 + timer + IRQ ring API. */
@@ -12,6 +12,7 @@ void house_gic_enable_int(uint32_t intid);
 void house_gic_disable_int(uint32_t intid);
 void house_gic_eoi(uint32_t intid_raw); /* raw IAR value */
 void house_gic_send_sgi(uint32_t sgi_id, uint32_t aff0_mask);
+void house_gic_send_sgi_to_core(uint32_t sgi_id, uint32_t core);
 void house_gic_enable_sgi(uint32_t id);
 
 void house_timer_init(void);

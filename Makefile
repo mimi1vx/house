@@ -20,7 +20,8 @@ container-shell:
 # time via SPIKE_DEFS), so SPIKE_MEM and QEMU -m can never disagree.
 # Small values are first-class: SPIKE_MEM=512M make spike-check works.
 # SMP_N: number of vCPUs for QEMU -smp and compiled-in early stacks.
-# Default 2 (generalizes to 4); single-core via SMP_N=1 keeps old path.
+# Default 2 (generalizes to N ≤ HOUSE_MAX_SMP=16, tested to 8); single-core via SMP_N=1 keeps old path.
+# 4G RAM is the working set for SMP>2; 512M remains valid for N=2 regression only.
 SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
 SMP_N ?= 2
@@ -114,11 +115,12 @@ house-posix-check:
 	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) $(SMP_N)
 
-# SMP check (phase 9): 2 cores online + Haskell parallel
+# SMP check (phase 9): N cores online + Haskell parallel (parametrised by SMP_N, default 2)
+# Use SMP_N=4 make smp-check for the >2 gate (4G working RAM, tested to 8, ceiling 16).
 smp-check:
-	$(MAKE) house-build SMP_N=2
-	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) 2
-	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) 2
+	$(MAKE) house-build SMP_N=$(SMP_N)
+	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:

@@ -1,9 +1,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <errno.h>
+#include "../spinlock.h"
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
+
+static house_spinlock_t alloc_lock = {0};
 
 extern char __heap_base[];
 
@@ -22,7 +25,8 @@ extern char __heap_base[];
 
 // Per-core boot stacks (16K each) sit below HOUSE_STACK_TOP; with caches ON
 // they are Normal WB Inner-shareable, so no DCCMVAC needed per 4K commit.
-// GIC/PL011 remain Device in block 0 (mmu.c).
+// GIC/PL011 remain Device in block 0 (mmu.c). 4G is the SMP>2 working set;
+// 512M stays valid for N=2 regression only.
 _Static_assert(HOUSE_RAM_BYTES > 0x200000ULL + (HOUSE_SMP_N * 16384ULL),
                "HOUSE_RAM_BYTES too small for SMP boot stacks");
 
@@ -62,8 +66,8 @@ static int committable(char *lo, size_t n)
         uint64_t stack_reserve = 0x200000ULL + (uint64_t)HOUSE_SMP_N * 16384ULL;
         uint64_t half = HOUSE_RAM_BYTES >> 1;
         uint64_t span = half > stack_reserve ? half - stack_reserve : 0;
-        if (span > (2UL << 30))
-            span = 2UL << 30;
+        if (span > (8UL << 30))
+            span = 8UL << 30;
         return (char *)RTS_ALIAS_BASE <= lo &&
                lo + n <= (char *)RTS_ALIAS_BASE + span;
     }
@@ -116,23 +120,28 @@ static char *pool_top(void)
 }
 
 /* Every object carries its size at p-16 (realloc needs it). The 16-byte
-   header slot is carved out BEFORE the object so a following allocation's
-   header can never stomp the previous one's tail — packing them flush
-   corrupted RTS structs (gc_thread) and crashed GarbageCollect. */
+    header slot is carved out BEFORE the object so a following allocation's
+    header can never stomp the previous one's tail — packing them flush
+    corrupted RTS structs (gc_thread) and crashed GarbageCollect. */
 static void *pool_alloc(size_t n, size_t align)
 {
     char *h, *p;
+    void *ret;
+    house_spin_lock(&alloc_lock);
     if (!malloc_cur)
         malloc_cur = __heap_base;
     h = (char *)(((uintptr_t)malloc_cur + 7) & ~(uintptr_t)7);
     p = (char *)(((uintptr_t)h + 16 + align - 1) & ~(uintptr_t)(align - 1));
     if (p + n > pool_top()) {
         *__errno_location() = ENOMEM_;
-        return 0;
+        ret = 0;
+    } else {
+        *(uint64_t *)h = (uint64_t)n;
+        malloc_cur = p + n;
+        ret = p;
     }
-    *(uint64_t *)h = (uint64_t)n;
-    malloc_cur = p + n;
-    return p;
+    house_spin_unlock(&alloc_lock);
+    return ret;
 }
 
 void *malloc(size_t n)
@@ -187,17 +196,23 @@ int posix_memalign(void **out, size_t align, size_t n)
 void *mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
     char *lo, *hi;
+    void *ret;
     (void)prot; (void)fd; (void)off;
+    house_spin_lock(&alloc_lock);
     if (!len) {
         *__errno_location() = EINVAL;
-        return (void *)-1;
+        ret = (void *)-1;
+        house_spin_unlock(&alloc_lock);
+        return ret;
     }
     lo = addr;
     hi = lo ? lo + ((len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1)) : 0;
 
     if ((flags & MAP_FIXED) && lo) {
-        if (committable(lo, len))
+        if (committable(lo, len)) {
+            house_spin_unlock(&alloc_lock);
             return addr;
+        }
         { /* TEMP */
             extern void uart_puts(const char *);
             extern long write(int, const void *, unsigned long);
@@ -212,7 +227,9 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
             uart_puts("\n");
         }
         *__errno_location() = ENOMEM_;
-        return (void *)-1;
+        ret = (void *)-1;
+        house_spin_unlock(&alloc_lock);
+        return ret;
     }
 
     if (lo) {
@@ -220,25 +237,32 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
            candidates, committing to whichever survives; rejects unmap) */
         if ((uintptr_t)hi <= 0x1000000000000ULL && !va_overlap(lo, hi)) {
             va_record(lo, hi);
+            house_spin_unlock(&alloc_lock);
             return addr;
         }
         *__errno_location() = ENOMEM_;
-        return (void *)-1;
+        ret = (void *)-1;
+        house_spin_unlock(&alloc_lock);
+        return ret;
     }
 
     /* no hint: bump through real RAM */
     {
         char *p = mmap_cur ? (char *)(((uintptr_t)mmap_cur + (MBLOCK - 1)) &
-                                      ~(uintptr_t)(MBLOCK - 1))
-                           : pool_top();
+                                       ~(uintptr_t)(MBLOCK - 1))
+                            : pool_top();
         size_t rounded = (len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1);
         if (p + rounded > (char *)RAM_LIMIT || va_overlap(p, p + rounded)) {
             *__errno_location() = ENOMEM_;
-            return (void *)-1;
+            ret = (void *)-1;
+            house_spin_unlock(&alloc_lock);
+            return ret;
         }
         mmap_cur = p + rounded;
         va_record(p, p + rounded);
-        return p;
+        ret = p;
+        house_spin_unlock(&alloc_lock);
+        return ret;
     }
 }
 
@@ -246,8 +270,10 @@ int munmap(void *a, size_t len)
 {
     /* GHC unmaps rejected arena candidates; release their records so the
        next candidate can be promised. */
+    house_spin_lock(&alloc_lock);
     if (a)
         va_release(a, (char *)a + ((len + MBLOCK - 1) & ~(size_t)(MBLOCK - 1)));
+    house_spin_unlock(&alloc_lock);
     return 0;
 }
 
