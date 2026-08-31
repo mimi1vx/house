@@ -255,3 +255,93 @@ Main.hs   | Start a console driver which handles a basic x86 text console
           | Bind the keyboard and console driver to a simple Readline clone
           |     which allows shell-like interaction with the system
 
+
+aarch64 Port (GHC 9.14, QEMU virt) — stock RTS, no GHC patches
+===============================================================
+
+This branch adds an aarch64-first freestanding build that runs under
+QEMU `virt` (`-M virt,gic-version=3`) on Apple silicon.  The i386
+GRUB/floppy path is left dormant (additive-only diff).
+
+Toolchain
+---------
+* Build container `house-port:latest` (Debian 12, GHC 9.14.1 aarch64 bindist
+  via ghcup, binutils/gcc).  All Haskell/C compilation runs
+  `container run --platform linux/arm64 ...` (see `Containerfile`);
+  `CONTAINER_DEFAULT_PLATFORM` is not set globally — every invocation pins
+  `--platform linux/arm64` and `container image inspect` asserts `arm64` only.
+* QEMU on the macOS host (`brew install qemu expect`, HVF accel).  The
+  container is build-only; QEMU never runs inside it.
+* Guest RAM is one knob: `SPIKE_MEM ?= 4G` compiles `HOUSE_RAM_BYTES` /
+  `BOOT_STACK_TOP` into the kernel and drives QEMU `-m` (512M/1G/2G/4G
+  all verified, hvf+tcg).
+
+What boots
+----------
+* `kernel/platform/aarch64/{start.S,c_start.c,mmu.c,gic.c,timer.c,irq.c,
+  userspace.c,uart.c,aarch64.ld}` + `tinylibc` shims for the stock non-threaded
+  RTS (bump mmap, faked ticker via ARM generic timer → timerfd shim, `c_print`
+  → PL011).
+* `H.Interrupts` is GIC-native (`IntId`, `ppiVirtTimer=27`, `ppiPhysTimer=30`,
+  `spi n = 32+n`, dispatcher `threadDelay 20ms` poll, `house_irq_push/pop`).
+* `H.VirtualMemory` is aarch64 4 KB-granule L0→L3 (`0x01000000..0x3fffffff` window).
+* Reduced Main `kernel/HouseA64.hs` + `Kernel/Driver/PL011.hs`
+  (Console `Chan ConsoleCommand → uart_putc`, RX `uart_getc_nonblock → Chan
+  KeyPress → LineEditor`).  Bare shell: `help`, `lambda`, `preempt`, `wastemem`.
+  Excluded (still in-tree, not built): IA32/VBE/Gadgets/Net/PCI/PS2/user-mode.
+
+Build & run (host)
+------------------
+```
+# one-time: build the linux/arm64 image (pinned arm64, no Rosetta)
+make container-image
+
+# spike: Haskell → PL011 → ticks-ok (threadDelay 500 ms ×4)
+make spike-build        # container: make -C kernel/platform/aarch64 DEFS_C/S
+make spike-run          # qemu hvf, -m 4G, -kernel spike.elf
+make spike-check        # clean + build + expect hvf
+
+# GIC + VM
+make irq-build / irq-run
+make irq-check          # → irq-ok + vm-ok, hvf and tcg
+
+# house: welcome banner + interactive shell
+make house-build / house-run
+make house-check        # → "Welcome to the House shell" banner, hvf+tcg
+make house-shell-check  # → prompt, echo, help→Usage, lambda, wastemem 10→55, hvf+tcg
+
+# all gates from clean (the CI gate)
+make check              # spike-check + irq-check + house-check + house-shell-check
+make run                # alias for house-run (hvf, $SPIKE_MEM)
+```
+
+Inside the container (if you `make container-shell`):
+```
+make -C kernel -f Makefile.aarch64            # ghc --make -no-link HouseA64.hs
+make -C kernel/platform/aarch64 house        # ld --build-id=none -T aarch64.ld
+```
+
+Expect scripts live in `scripts/` (`qemu-smoke.exp`, `qemu-irq.exp`,
+`qemu-house.exp`, `qemu-house-shell.exp`) — each `spawn qemu-system-aarch64
+-accel hvf|tcg -M virt,gic-version=3 -m $mem -nographic -kernel $elf` and
+asserts its marker (`ticks-ok`, `vm-ok`, welcome, or full prompt/echo).
+
+Closure & extensions
+--------------------
+`kernel/Makefile.aarch64` is the single source of truth:
+`ghc --make -no-link HouseA64.hs -i. -outputdir build-kernel -O1
+ -package mtl -package array -package containers -package pretty`
+with `EXTS = MultiParamTypeClasses FunctionalDependencies FlexibleInstances
+FlexibleContexts UndecidableInstances OverlappingInstances ImplicitParams
+ExistentialQuantification ScopedTypeVariables Rank2Types KindSignatures
+PatternGuards ForeignFunctionInterface GeneralizedNewtypeDeriving`
+(the `OverlappingInstances` flag is deprecated in 9.14 — fallback is per-instance
+`OVERLAPPING`).  `find build-kernel -name '*.o'` plus `start/mmu/c_start/uart`
+and `tinylibc` are linked `ld --build-id=none --gc-sections -T aarch64.ld`
+against `ghc-prim/bignum/ghc-internal/containers/pretty/mtl/array/transformers/
+deepseq/base/rts/Cffi + libgmp + libgcc`.  `readelf -h` gate checks
+`ENTRY(_start)` / `Machine: AArch64`.
+
+See `plans/ghc-9.14-aarch64-port.md` (master plan) and `plans/porting-log.md`
+(phases 1–4) for the full deviation log, excluded-modules justification, and the
+four-stacked-causes DFSC 0x35 debug story.

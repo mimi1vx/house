@@ -260,6 +260,21 @@ house-shell-check:
 	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM)
 	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM)
 
+# --- smoke-test automation + docs (phase 6) ---
+# `make run` is a convenience alias for the house shell (hvf, 4G default).
+# `make check` reproduces the full verification from a clean checkout:
+# spike ticks, GIC dispatch + VM, house banner, and interactive shell,
+# each under hvf and tcg where applicable. It is the gate used by CI
+# and by "from clean clone inside container" verification.
+run: house-run
+
+check:
+	$(MAKE) spike-check
+	$(MAKE) irq-check
+	$(MAKE) house-check
+	$(MAKE) house-shell-check
+	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell) =="
+
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check
+        house-build house-run house-check house-shell-check run check

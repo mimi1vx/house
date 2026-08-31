@@ -352,3 +352,38 @@ TCG re-verified at 4G. Legacy i386 flow untouched (additive diff only).
   minimal shell does not require VM allocation, so the actual closure is 15.
   The doc's `H.IOPorts` CPP-gating is correctly recorded as moot
   (already in the log). No other deviation.
+
+## Phase 5 — shell bring-up via PL011 RX (2026-08-31)
+
+- `Kernel.Driver.PL011` gains `launchPL011KeyboardDriver :: H (Chan KeyPress)`
+  polling `uart_getc_nonblock` (`uart.c:47`) with 10 ms `threadDelay` (cooperates
+  with the GIC dispatcher / ticker on the single-cap RTS) and mapping bytes to
+  minimal `KeyPress Set.empty` (`\r/\n→ReturnKey`, `\b/\DEL→BackspaceKey`,
+  `\t→TabKey`, printable `→Key c`) sufficient for `Kernel.LineEditor.getLine`.
+- `HouseA64.mainH` now does `kbd <- launchPL011KeyboardDriver` before
+  `putMVar v_defaultConsole` / welcome, so `textShell` blocks on real UART input
+  and echoes via the existing TX consumer (`PutChar` etc).  `enableInterrupts`
+  before launch ensures the 10 ms poll is paced by the generic-timer ISR tick.
+- `scripts/qemu-house-shell.exp` boots `house.elf`, expects welcome + `> `,
+  sends `help\r` → `Usage:`, `lambda\r` → `Too much to abstract!`,
+  `wastemem 10\r` → `55`, each re-prompting `> `.  Passes hvf and tcg (4 G,
+  `virt,gic-version=3`, 30 s timeout).  `make house-shell-check` runs both.
+
+## Phase 6 — smoke-test automation + docs (2026-08-31)
+
+- Top-level `Makefile` gains `run` (alias `house-run`, hvf) and `check` (spike-check
+  + irq-check + house-check + house-shell-check from clean; the CI gate).
+  Verified `make check` from a freshly cleaned tree passes end-to-end (hvf+tcg):
+  spike `ticks-ok` 500 ms ×4, irq `vm-ok` virt/phys >150, house welcome + interactive
+  three-command shell, all in one invocation.  `make house-check` already did
+  `build-kernel` clean; `check` chains without double-clean.
+- `README` gains an `aarch64 Port (GHC 9.14, QEMU virt)` section documenting
+  toolchain (pinned `linux/arm64` container, host QEMU+expect), one-knob
+  `SPIKE_MEM`, what boots (start/mmu/gic/timer/irq/uart/tinylibc, GIC-native
+  `H.Interrupts`, `HouseA64`+PL011), host `make` one-liners
+  (`container-image`, `spike-check`, `irq-check`, `house-check`,
+  `house-shell-check`, `check`/`run`), inside-container `make -C kernel -f
+  Makefile.aarch64`, expect scripts, closure/extensions/link line, and pointers
+  to `plans/ghc-9.14-aarch64-port.md` / `porting-log.md`.
+- No code churn; `check` reuses existing `SPIKE_DEFS_C/S` so RAM/stack cannot
+  disagree with QEMU `-m`.
