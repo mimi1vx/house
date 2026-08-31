@@ -9,6 +9,7 @@ void house_gic_disable_int(uint32_t intid);
 void house_gic_eoi(uint32_t intid_raw); /* raw IAR value */
 
 void house_timer_init(void);
+uint64_t house_uptime_secs(void);
 extern volatile int house_isr_active;
 extern volatile uint64_t house_isr_pending;
 extern uint32_t house_timer_interval;

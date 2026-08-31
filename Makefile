@@ -260,6 +260,12 @@ house-shell-check:
 	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM)
 	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM)
 
+# POSIX-ish shell + PSCI (phase 7): help descriptions, echo/clear/uname/uptime, shutdown -r/-h
+house-posix-check:
+	$(MAKE) house-build
+	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM)
+	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM)
+
 # --- smoke-test automation + docs (phase 6) ---
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
@@ -273,8 +279,9 @@ check:
 	$(MAKE) irq-check
 	$(MAKE) house-check
 	$(MAKE) house-shell-check
-	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell) =="
+	$(MAKE) house-posix-check
+	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix) =="
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check run check
+        house-build house-run house-check house-shell-check house-posix-check run check

@@ -387,3 +387,64 @@ TCG re-verified at 4G. Legacy i386 flow untouched (additive diff only).
   to `plans/ghc-9.14-aarch64-port.md` / `porting-log.md`.
 - No code churn; `check` reuses existing `SPIKE_DEFS_C/S` so RAM/stack cannot
   disagree with QEMU `-m`.
+
+## Phase 7 — POSIX-ish shell + PSCI shutdown (2026-08-31)
+
+- **PSCI shim `kernel/platform/aarch64/psci.c` (new):** `hvc #0` with fid in `x0`
+  (`"+r"` + `memory` clobber); `psci_system_off` (`0x84000008`) and
+  `psci_system_reset` (`0x84000009`) each end in a `wfi` loop so an
+  unsupported conduit parks visibly instead of falling through (success never
+  returns). Added to `PLATFORM_C`; `--gc-sections` drops unused objects in
+  spike/irq links. Verified: `nm build/house.elf | grep psci` shows both;
+  `build/spike.elf` unchanged size (GC'd).
+- **Uptime source `timer.c`/`irq.h`:** `static uint64_t house_boot_ticks`
+  captured from `CNTVCT_EL0` inside `house_timer_init`; `house_uptime_secs()`
+  returns `(CNTVCT_EL0 - house_boot_ticks) / cntfrq()` (fallback `cntfrq`
+  62.5 MHz). Declared in `irq.h` next to `house_timer_init`. `-Wall -Werror`
+  clean; symbol present in `house.elf`.
+- **Shell grammar expansion `kernel/HouseA64.hs` only:** every command now
+  carries a `(-:)` description so `help` (which prints `usage "" grammar`)
+  renders ` -- description` via `ppGrammar` `Alt`/`:---` cases — this *is*
+  the better-help improvement. New POSIX-starter set:
+  `echo <word>...` (`many (arg "<word>")` → `unwords`), `clear`
+  (`clearScreen console` → `ESC[2J ESC[H` via PL011), `uname` (fixed
+  `House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt`), `uptime` (FFI
+  `house_uptime_secs` → `up N seconds`), `shutdown` (`flag "-r"` /
+  `flag "-h"`; `-r` only → `psci_system_reset`, `-h` only →
+  `psci_system_off`, neither/both → `usage: shutdown [-h|-r]`). FFI bridges
+  use `liftIO` like `Kernel.Driver.PL011.cPutStr`. `lambda`/`preempt`/
+  `wastemem` kept with added descriptions. Descriptions kept short to avoid
+  `Text.PrettyPrint` line-wrap breaking expect greps. Verified:
+  `make -f Makefile.aarch64 force` zero warnings (post-177157b standard).
+- **Expect gate `scripts/qemu-house-posix.exp` (new):** mirrors
+  `qemu-house-shell.exp`; QEMU line `-M virt,gic-version=3`
+  (plan asked `psci-conduit=hvc` pin, but QEMU 11.1 removed that property —
+  `virt` with `virtualization=on` defaults to `hvc`, so HVC determinism is
+  retained; plain `gic-version=3` is the 11.1 spelling). Sequence (timeout
+  60 s): welcome + `> ` → `help` asserts `shutdown.*--` (better-help proof;
+  actual line is `shutdown [-r] [-h] -- ...`) → `echo hello posix world` →
+  `hello posix world` → `uname` → `House` → `uptime` → `up ` → `shutdown -r`
+  → **second** `Welcome to the House shell` in the same session (proves
+  `SYSTEM_RESET` re-runs `start.S` → BSS re-clear → RTS re-init) →
+  `shutdown -h` → `eof` (QEMU exits on `SYSTEM_OFF`) → PASS; `timeout` → FAIL.
+  EOF handling uses `catch` around kill (pid already dead). Verified:
+  `expect scripts/qemu-house-posix.exp build/house.elf 60 hvf 4G` and same with
+  `tcg` both exit 0.
+- **Gate wiring `Makefile`:** `house-posix-check` (house-build + expect hvf +
+  tcg, mirroring `house-shell-check`); appended to `check` chain (`check` now
+  five gates: spike, irq+vm, house banner, shell, posix); updated `.PHONY` and
+  summary echo. Verified: `make check` green under hvf+tcg.
+- **PSCI conduit findings:** QEMU `-M virt` defaults to `psci-conduit=hvc`
+  when `virtualization=on` (the `virt` default); QEMU 11.1 removed the explicit
+  `psci-conduit` machine property (`Property 'virt-11.1-machine.psci-conduit'
+  not found`), so the gate uses plain `-M virt,gic-version=3`. If defaulted to
+  `smc`, `hvc #0` would park in `wfi` → expect timeout, visible not silent.
+  `SYSTEM_RESET` under HVF on `-kernel` images re-executes the ELF entry
+  (`start.S` BSS clear) without needing a full machine reset — confirmed by
+  second welcome under both hvf and tcg.
+- **Deviation from phase-7 doc:** QEMU line drops `,psci-conduit=hvc` (property
+  gone in 11.1; `hvc` remains the default for `virt`); expect grep is
+  `shutdown.*--` not `shutdown --` to match `shutdown [-r] [-h] -- ...` (plan
+  left grep target illustrative). Otherwise `psci.c`, `timer.c`/`irq.h`,
+  `HouseA64.hs`, `qemu-house-posix.exp`, `Makefile` wiring and docs match the
+  plan; `clearScreen` uses the existing `Kernel.Console` export (no new driver).

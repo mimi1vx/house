@@ -1,0 +1,92 @@
+#!/usr/bin/expect -f
+# POSIX-ish shell + shutdown test for House/aarch64 (phase 7).
+# Mirrors qemu-house-shell.exp structure; QEMU line uses -M virt,gic-version=3
+# (QEMU 11.1 removed psci-conduit; virt with virtualization defaults to hvc,
+#  so HVC determinism is retained). Sequence: welcome → help descriptions → echo →
+# uname → uptime → shutdown -r (second welcome) → shutdown -h (eof).
+# Usage: expect scripts/qemu-house-posix.exp <kernel.elf> [timeout] [accel] [mem]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 60}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# help should list every command with a -- description (better-help proof)
+send "help\r"
+expect {
+    -re "shutdown.*--" { puts "\nPASS: help has shutdown description" }
+    timeout { puts "\nFAIL: help missing shutdown.*-- description"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before help output"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after help" }
+    timeout { puts "\nFAIL: prompt after help timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after help"; exit 1 }
+}
+send "echo hello posix world\r"
+expect {
+    -re "hello posix world" { puts "\nPASS: echo output" }
+    timeout { puts "\nFAIL: echo timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before echo"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after echo" }
+    timeout { puts "\nFAIL: prompt after echo timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after echo"; exit 1 }
+}
+send "uname\r"
+expect {
+    -re "House" { puts "\nPASS: uname output" }
+    timeout { puts "\nFAIL: uname timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before uname"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after uname" }
+    timeout { puts "\nFAIL: prompt after uname timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after uname"; exit 1 }
+}
+send "uptime\r"
+expect {
+    -re "up " { puts "\nPASS: uptime output" }
+    timeout { puts "\nFAIL: uptime timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before uptime"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after uptime" }
+    timeout { puts "\nFAIL: prompt after uptime timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after uptime"; exit 1 }
+}
+# shutdown -r should reboot: second welcome banner in same session
+send "shutdown -r\r"
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: shutdown -r rebooted" }
+    timeout { puts "\nFAIL: shutdown -r did not reboot (no second welcome)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before second welcome (shutdown -r)"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after reboot" }
+    timeout { puts "\nFAIL: prompt after reboot timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after reboot"; exit 1 }
+}
+# shutdown -h should power off: expect eof (QEMU exits on SYSTEM_OFF)
+send "shutdown -h\r"
+expect {
+    eof { puts "\nPASS: shutdown -h halted (eof)"; }
+    timeout { puts "\nFAIL: shutdown -h did not halt (timeout, expected eof)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+puts "\nPASS: posix shell ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

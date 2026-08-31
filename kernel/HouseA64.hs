@@ -2,9 +2,10 @@
 
 module HouseA64 where
 
+import Data.Word (Word64)
 import H.Concurrency
 import H.Interrupts (enableInterrupts)
-import H.Monad (H, runH)
+import H.Monad (H, liftIO, runH)
 import Kernel.Console
 import Kernel.Debug (v_defaultConsole)
 import Kernel.Driver.Keyboard (KeyPress)
@@ -14,6 +15,12 @@ import Monad.Util
 import Util.CmdLineParser hiding ((!))
 import qualified Util.CmdLineParser as P
 import Prelude hiding (getLine)
+
+foreign import ccall unsafe "psci_system_off" c_psci_off :: IO ()
+
+foreign import ccall unsafe "psci_system_reset" c_psci_reset :: IO ()
+
+foreign import ccall unsafe "house_uptime_secs" c_uptime :: IO Word64
 
 -- Re-exported entry point mirrors Spike/IrqCheck convention
 foreign export ccall house_main :: IO ()
@@ -45,7 +52,7 @@ idle = idle' 0
         then idle' 0
         else idle' (n + 1)
 
--- Text shell with bare-minimum command set: help, lambda, preempt, wastemem
+-- Text shell with POSIX-ish command set
 textShell :: Console -> Chan KeyPress -> H ()
 textShell console chan = do
   editor <- newEditor chan console
@@ -80,17 +87,33 @@ textShell console chan = do
 
     commands =
       oneof
-        [ cmd "help" (putStrLn' $ usage "" grammar)
+        [ cmd "help" (putStrLn' $ usage "" grammar) -: "show help",
+          cmd "echo" echoImpl P.<@ many (arg "<word>") -: "print arguments",
+          cmd "clear" (clearScreen console) -: "clear screen",
+          cmd "uname" (putStrLn' "House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt") -: "print system info",
+          cmd "uptime" uptimeImpl -: "show uptime",
+          cmd "shutdown" shutdownImpl P.<@ flag "-r" P.<@ flag "-h" -: "halt or reboot the machine"
         ]
 
     debugcommands =
       oneof
-        [ cmd "lambda" (putStrLn' "Too much to abstract!"),
-          cmd "preempt" preempt,
-          cmd "wastemem" wasteMem P.<@ number
+        [ cmd "lambda" (putStrLn' "Too much to abstract!") -: "lambda demo",
+          cmd "preempt" preempt -: "preemption demo",
+          cmd "wastemem" wasteMem P.<@ number -: "allocate memory"
         ]
       where
         preempt = do
           _ <- forkH (putStrLn' (repeat 'a'))
           putStrLn' (repeat 'b')
         wasteMem n = print' $ sum (reverse [1 .. n :: Integer])
+
+    echoImpl ws = putStrLn' (unwords ws)
+
+    uptimeImpl = do
+      secs <- liftIO c_uptime
+      putStrLn' ("up " ++ show secs ++ " seconds")
+
+    shutdownImpl r h
+      | r && not h = liftIO c_psci_reset
+      | h && not r = liftIO c_psci_off
+      | otherwise = putStrLn' "usage: shutdown [-h|-r]"

@@ -42,7 +42,7 @@ TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
          tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
          tinylibc/mathmin.c tinylibc/c_print.c
 
-PLATFORM_C := gic.c timer.c irq.c userspace.c
+PLATFORM_C := gic.c timer.c irq.c userspace.c psci.c
 
 OBJS := build/start.o build/mmu.o build/c_start.o build/uart.o \
         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \

@@ -10,11 +10,20 @@
 volatile int house_isr_active = 0;
 volatile uint64_t house_isr_pending = 0;
 uint32_t house_timer_interval = 0;
+static uint64_t house_boot_ticks = 0;
 
 static uint64_t cntfrq(void) {
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     return f ? f : 62500000ULL;
+}
+
+uint64_t house_uptime_secs(void) {
+    uint64_t now;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+    uint64_t freq = cntfrq();
+    if (freq == 0) return 0;
+    return (now - house_boot_ticks) / freq;
 }
 
 static void puthex64(uint64_t v) {
@@ -23,6 +32,7 @@ static void puthex64(uint64_t v) {
 }
 
 void house_timer_init(void) {
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(house_boot_ticks));
     uint64_t freq = cntfrq();
     /* 10ms tick — cntfrq/100 */
     uint32_t interval = (uint32_t)(freq / 100);

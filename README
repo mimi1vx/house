@@ -1,4 +1,4 @@
-hOp -- S�bastien Carlier and J�r�my Bobbio
+hOp -- S�bastien Carlier and J�r�my Bobbio
 
 What is hOp ?
 =============
@@ -285,9 +285,17 @@ What boots
 * `H.Interrupts` is GIC-native (`IntId`, `ppiVirtTimer=27`, `ppiPhysTimer=30`,
   `spi n = 32+n`, dispatcher `threadDelay 20ms` poll, `house_irq_push/pop`).
 * `H.VirtualMemory` is aarch64 4 KB-granule L0→L3 (`0x01000000..0x3fffffff` window).
-* Reduced Main `kernel/HouseA64.hs` + `Kernel/Driver/PL011.hs`
+* Reduced Main `kernel/HouseA64.hs` + `Kernel.Driver.PL011.hs`
   (Console `Chan ConsoleCommand → uart_putc`, RX `uart_getc_nonblock → Chan
-  KeyPress → LineEditor`).  Bare shell: `help`, `lambda`, `preempt`, `wastemem`.
+   KeyPress → LineEditor`).  POSIX-ish shell: `help` (every command carries
+  a `-- description`), `echo <word>...`, `clear` (`ESC[2J ESC[H`),
+  `uname` (`House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt`), `uptime`
+  (`house_uptime_secs` via `CNTVCT_EL0`), `shutdown [-h|-r]` (PSCI
+  `SYSTEM_OFF`/`SYSTEM_RESET` via `hvc #0`; `-r` only → reboot, `-h` only →
+  halt, neither/both → `usage: shutdown [-h|-r]`), plus `lambda`,
+  `preempt`, `wastemem` (all with descriptions).  `psci.c` parks in `wfi` on
+  failure; QEMU `virt` pins `psci-conduit=hvc`.  `timer.c` records
+  `CNTVCT_EL0` at boot for `house_uptime_secs()`.
   Excluded (still in-tree, not built): IA32/VBE/Gadgets/Net/PCI/PS2/user-mode.
 
 Build & run (host)
@@ -305,13 +313,14 @@ make spike-check        # clean + build + expect hvf
 make irq-build / irq-run
 make irq-check          # → irq-ok + vm-ok, hvf and tcg
 
-# house: welcome banner + interactive shell
+# house: welcome banner + interactive + POSIX shell + PSCI
 make house-build / house-run
 make house-check        # → "Welcome to the House shell" banner, hvf+tcg
-make house-shell-check  # → prompt, echo, help→Usage, lambda, wastemem 10→55, hvf+tcg
+make house-shell-check  # → prompt, help→Usage, lambda, wastemem 10→55, hvf+tcg
+make house-posix-check  # → help descriptions (-- ), echo, uname, uptime, shutdown -r (reboot) / -h (halt), hvf+tcg
 
 # all gates from clean (the CI gate)
-make check              # spike-check + irq-check + house-check + house-shell-check
+make check              # spike-check + irq-check + house-check + house-shell-check + house-posix-check
 make run                # alias for house-run (hvf, $SPIKE_MEM)
 ```
 
@@ -322,9 +331,10 @@ make -C kernel/platform/aarch64 house        # ld --build-id=none -T aarch64.ld
 ```
 
 Expect scripts live in `scripts/` (`qemu-smoke.exp`, `qemu-irq.exp`,
-`qemu-house.exp`, `qemu-house-shell.exp`) — each `spawn qemu-system-aarch64
--accel hvf|tcg -M virt,gic-version=3 -m $mem -nographic -kernel $elf` and
-asserts its marker (`ticks-ok`, `vm-ok`, welcome, or full prompt/echo).
+`qemu-house.exp`, `qemu-house-shell.exp`, `qemu-house-posix.exp`) — each
+`spawn qemu-system-aarch64 -accel hvf|tcg -M virt,gic-version=3[,psci-conduit=hvc]
+-m $mem -nographic -kernel $elf` and asserts its marker (`ticks-ok`, `vm-ok`,
+welcome, prompt/echo, or `shutdown --` + reboot/halt).
 
 Closure & extensions
 --------------------
@@ -343,5 +353,5 @@ deepseq/base/rts/Cffi + libgmp + libgcc`.  `readelf -h` gate checks
 `ENTRY(_start)` / `Machine: AArch64`.
 
 See `plans/ghc-9.14-aarch64-port.md` (master plan) and `plans/porting-log.md`
-(phases 1–4) for the full deviation log, excluded-modules justification, and the
+(phases 1–7) for the full deviation log, excluded-modules justification, and the
 four-stacked-causes DFSC 0x35 debug story.

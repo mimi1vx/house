@@ -90,6 +90,15 @@ the only official 9.14.1 aarch64 bindist is `deb10`; no musl build exists)
    wrapping the QEMU script; README section describing the new build. —
    verify: `make check` passes end-to-end from clean clone inside container.
 
+7. **[small] POSIX-ish shell expansion + shutdown** (post-parity, 2026-08-31)
+   — better `help` (per-command descriptions), starter POSIX commands
+   (`echo`, `clear`, `uname`, `uptime`), `shutdown -r/-h` via PSCI 0.2 HVC;
+   no Grub ever (user decision); virtio is the approved future device/IO
+   direction. Details: `plans/phase-7-shell-posix.md`.
+   — verify: `make check` green with the added `house-posix-check` gate
+   (expect script: rich help, echo/uname/uptime, second welcome after
+   `shutdown -r`, QEMU exit on `shutdown -h`; hvf+tcg).
+
 ## Files
 
 - Create: `Containerfile`, `kernel/platform/aarch64/{start.S,c_start.c,gic.c,timer.c,uart.c,tinylibc/*,aarch64.ld}`, rewritten `kernel/H/Interrupts.hs`, `Makefile` (new targets; old ones retained), `scripts/qemu-smoke.exp`, `plans/porting-log.md`.
@@ -125,3 +134,4 @@ the only official 9.14.1 aarch64 bindist is `deb10`; no musl build exists)
 - [x] Reduced-module kernel links; `readelf -h` shows correct entry/load addr (step 4 — `make house-check` green hvf+tcg, 15-module closure via `kernel/Makefile.aarch64`, see `plans/phase-4-module-port.md` + porting-log phase 4)
 - [x] Scripted QEMU session reaches shell prompt and executes a command (step 5 — `make house-shell-check` hvf+tcg: welcome → `> ` → `help`→Usage → `lambda` → `wastemem 10`→55 via PL011 RX→KeyPress, see `scripts/qemu-house-shell.exp`)
 - [x] `make check` reproduces the above from clean state (step 6 — `make check` = spike-check + irq-check + house-check + house-shell-check from clean, hvf+tcg, `make run` alias; README aarch64 section)
+- [ ] Rich `help` + POSIX-starter commands (`echo`/`clear`/`uname`/`uptime`) + `shutdown -r/-h` via PSCI (step 7 — `make check` with `house-posix-check`: expect-verified, hvf+tcg; see `plans/phase-7-shell-posix.md`)
