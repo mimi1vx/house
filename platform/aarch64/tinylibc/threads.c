@@ -189,73 +189,15 @@ void house_sched_yield(void) {
 }
 
 void house_sched_maybe_preempt_from_isr(void) {
-    if (house_sched_lock > 0) {
-        house_sched_deferred = 1;
-        return;
-    }
-    // simple round-robin preemption each tick
-    if (!house_current_thr) return;
-    if (!run_head) return;
-    // preempt current
-    __asm__ volatile("msr daifset, #2" ::: "memory");
-    house_thread_t *old = house_current_thr;
-    old->state = HOUSE_THR_RUNNABLE;
-    enqueue_run(old);
-    house_thread_t *next = dequeue_run();
-    if (!next || next == old) {
-        if (next) {
-            // only old
-            old->state = HOUSE_THR_RUNNING;
-            __asm__ volatile("msr daifclr, #2" ::: "memory");
-            return;
-        }
-        old->state = HOUSE_THR_RUNNING;
-        __asm__ volatile("msr daifclr, #2" ::: "memory");
-        return;
-    }
-    next->state = HOUSE_THR_RUNNING;
-    house_current_thr = next;
-    // Need to switch stacks while still in ISR context.
-    // The ISR's stack is the interrupted thread's stack; switching sp there
-    // will make eret resume the next thread. We use the same switch routine
-    // but we are inside IRQ handler with its own saved frame above.
-    // Instead of direct switch, we do deferred switch via handler return?
-    // For now, do direct switch; the IRQ handler's frame stays on old stack,
-    // new thread's eret will use its own saved IRQ frame? This is subtle.
-    // Simpler: just set deferred and let thread yield at next poll.
-    // To avoid complexity, we defer preemption to thread context by setting flag.
-    // Undo enqueue and mark deferred.
-    // Instead of switching in ISR, defer.
-    // Remove old from queue and keep it running, set deferred
-    // (we already enqueued old, need to rollback)
-    // For correctness, just mark deferred and revert.
-    // Pull old back from queue if it was enqueued at tail
-    // Actually we enqueued old, dequeued next, so old is in queue tail.
-    // Let's revert: put next back to head, remove old from tail.
-    // Simpler: just keep deferred flag and revert state.
-    // For now, revert:
-    // remove old from tail (it is at tail)
-    if (run_tail == old) {
-        // find previous
-        house_thread_t *prev = run_head;
-        if (prev == old) {
-            run_head = run_tail = NULL;
-        } else {
-            while (prev && prev->next != old) prev = prev->next;
-            if (prev) {
-                prev->next = NULL;
-                run_tail = prev;
-            }
-        }
-    }
-    // put next back to head
-    next->next = run_head;
-    run_head = next;
-    if (!run_tail) run_tail = next;
-    old->state = HOUSE_THR_RUNNING;
-    house_current_thr = old;
-    house_sched_deferred = 1;
-    __asm__ volatile("msr daifclr, #2" ::: "memory");
+    // Timer-driven preemption disabled. Previously this set
+    // house_sched_deferred and yielded via house_sched_lock_release
+    // → house_sched_yield, racing the RTS scheduler's post-StgRun
+    // fixup (schedule+0x448 ldr w1,[x26] where x26 is per-thread errno).
+    // Under tcg the 10ms PPI 27 tick corrupted callee-saved x26 to 2
+    // (ESR 0x96000021 DFSC 0x21 FAR 0x2), triggering the fatal sync
+    // exception. Cooperative yields at poll/nanosleep/sched_yield are
+    // sufficient for -N1; quantum preemption is not required.
+    (void)house_sched_deferred;
 }
 
 /* ---- TLS ---- */
