@@ -6,7 +6,7 @@ import Foreign.C.String (withCString)
 import Foreign.C.Types (CChar)
 import Foreign.Ptr (Ptr)
 
-foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
+foreign import ccall unsafe "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 
 foreign export ccall house_irqcheck_main :: IO ()
 
