@@ -13,23 +13,13 @@ BUILD    := build
 # Packages needed by the closure (H layer + console + parsers + Set)
 PKGS := -package mtl -package array -package containers -package pretty
 
-# Seed default-extensions replacing -fglasgow-exts -fallow-undecidable-instances
-# -fallow-overlapping-instances. Final set is pinned here and in porting-log.
-# OverlappingInstances now handled via per-instance OVERLAPPABLE/OVERLAPPING
-# pragmas instead of the deprecated global flag.
-EXTS := -XMultiParamTypeClasses \
-        -XFunctionalDependencies \
-        -XFlexibleInstances \
-        -XFlexibleContexts \
-        -XUndecidableInstances \
-        -XImplicitParams \
-        -XExistentialQuantification \
-        -XScopedTypeVariables \
-        -XRank2Types \
-        -XKindSignatures \
-        -XPatternGuards \
-        -XForeignFunctionInterface \
-        -XGeneralizedNewtypeDeriving
+# GHC2024 language standard; replaces the legacy
+# -fglasgow-exts -fallow-undecidable-instances set. Verified that the closure
+# compiles with -XGHC2024 alone (FlexibleContexts/FlexibleInstances/
+# ScopedTypeVariables/KindSignatures/GeneralisedNewtypeDeriving rankNTypes are
+# covered; MultiParam/FunctionalDependencies/Undecidable/ImplicitParams/
+# ExistentialQuantification/PatternGuards are unused; FFI is default-on).
+EXTS := -XGHC2024
 
 GHCFLAGS := -O1 -outputdir $(BUILD) -i. $(PKGS) $(EXTS) -Wall
 

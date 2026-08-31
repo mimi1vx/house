@@ -12,7 +12,7 @@ SMP_N   ?= 2  # generalizes to N ≤ HOUSE_MAX_SMP (16, tested to 8)
 CFLAGS  := -O2 -ffreestanding -fno-builtin -fno-pic -fno-pie \
            -fno-stack-protector -Wall -Werror -I. -I$(HSINC) $(DEFS_C)
 ASFLAGS := -I. $(DEFS_S) -DHOUSE_SMP_N=$(SMP_N)
-HS_GHCFLAGS := -package mtl -package array -i../../kernel -ibuild -outputdir build
+HS_GHCFLAGS := -XGHC2024 -package mtl -package array -i../../kernel -ibuild -outputdir build
 
 UNITDIR_base := $(shell ghc-pkg field base import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_prim := $(shell ghc-pkg field ghc-prim import-dirs --simple-output | awk '{print $$1}')
@@ -113,7 +113,7 @@ build/%.o: %.c | build
 # GHC 9.x emits the foreign-export wrapper (house_spike_main) directly
 # into the module object.
 build/Spike.o: Spike.hs | build
-	ghc -O1 -c Spike.hs -outputdir build
+	ghc -XGHC2024 -O1 -c Spike.hs -outputdir build
 
 # H-layer modules for IrqCheck (compiled individually; IrqCheck depends on them)
 build/H/Monad.o: ../../kernel/H/Monad.hs | build
