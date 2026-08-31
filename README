@@ -1,12 +1,11 @@
-hOp -- S�bastien Carlier and J�r�my Bobbio
+hOp -- Sebastien Carlier and Jeremy Bobbio
 
 What is hOp ?
 =============
 
 hOp is a micro-kernel based on the RTS of GHC, the Glasgow Haskell
 Compiler.  It is meant to enable people to experiment with writing
-device drivers in Haskell.  Currently, hOp is still very hackish, and
-IA32-specific.  Contributions are welcome!
+device drivers in Haskell.
 
 The RTS of GHC is truly an amazing piece of software.  By removing the
 system-specific bits, and just adding a few lines of C and assembly
@@ -18,258 +17,23 @@ module is available.  This includes threads, communication primitives
 and the foreign interface, which means that experimenting with writing
 drivers in Haskell should be reasonably easy.
 
-Building
-========
+History: the original i386/GRUB implementation (GHC 6.8.2,
+32 MB flat memory model) is preserved in git history.
 
-In order to build hOp, you need every software package required to
-build GHC, autoconf, and also "genext2fs", which is available as a
-package in Debian GNU/Linux, but can also be compiled from source:
-http://uclibc.org/downloads/buildroot-sources/genext2fs_1.3.orig.tar.gz
-
-Build steps are as follows:
-
-1. Enter "make boot" to download and extract the source code of GHC.
-
-2. Either enter "make floppy" to build a 2.88 MB floppy image named
-   hOp.flp, or enter "make iso" to build a bootable CDROM image.
-
-Starting hOp
-============
-
-hOp runs on real hardware, but 2.88MB floppy drives are rare, and
-burning the CDROM image wastes a blank CD.
-
-It is usually more convenient to use an IA32 emulator such as Bochs
-(http://bochs.sourceforge.net/), which can read 2.88MB floppy disks
-and CDROM images.
-
-Here is a minimal configuration file (.bochsrc) for Bochs:
-
---- 8< --- cut here --- 8< ---------------------------------------------
-config_interface: x
-display_library: term
-romimage: file=/usr/share/bochs/BIOS-bochs-latest, address=0xf0000
-megs: 32
-vgaromimage: /usr/share/vgabios/vgabios.bin
-floppya: 2_88=hOp.flp, status=inserted
-ata0: enabled=0, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
-ata1: enabled=0, ioaddr1=0x170, ioaddr2=0x370, irq=15
-ata2: enabled=0, ioaddr1=0x1e8, ioaddr2=0x3e0, irq=11
-ata3: enabled=0, ioaddr1=0x168, ioaddr2=0x360, irq=9
-boot: floppy
-ips: 1000000
-floppy_bootsig_check: disabled=0
-log: /tmp/bochsout.txt
-panic: action=ask
-error: action=report
-info: action=report
-debug: action=ignore
-debugger_log: -
-vga_update_interval: 300000
-keyboard_serial_delay: 250
-keyboard_paste_delay: 100000
-floppy_command_delay: 500
-mouse: enabled=0
-private_colormap: enabled=0
---- 8< --- cut here --- 8< ---------------------------------------------
-
-
-Enabling Debugging
-------------------
-
-Debugging can be enabled by doing the following changes:
-
-* build.mk
-  
-  To compile the RTS with debugging enabled, you need to change the
-  compilation options in build.mk:
-  
-      GhcRtsHcOpts = -optc-DSTANDALONE -optc-DDEBUG -optc-UPROFILING
-      GhcRtsCcOpts = -O -DSTANDALONE -DDEBUG -UPROFILING
-
-* kernel/Makefile
-
-  RTS debug messages are printed using a simple compatibility layer to
-  functions like fprintf.  These messages can currently be either
-  displayed directly on screen (which trash what was displayed by
-  Haskell code) or using the "console output" feature of Bochs.
-
-  To enable video printing, add in kernel/Makefile:
-
-     OBJS += cbits/video.o 
-
-  To enable Bochs output, add in kernel/Makefile:
-
-     CFLAGS += -DBOCHS_VIDEO
-
-* kernel/cbits/c_start.c
-
-  When booting, hOp launches the usual main() function of the RTS.
-  The same debug flags as on the command line are thus available;
-  they can be set by modifying argc and argv at the start of c_start()
-  in kernel/cbits/c_start.c.
-
-Implentation details
-====================
-
-Making a standalone RTS
------------------------
-
-The Run-Time System (RTS) of GHC handles memory management, thread
-scheduling and inter-thread communication, so it can be thought of as
-a micro-kernel.  Making a standalone RTS - removing all dependencies
-on an operating system - is in fact fairly straightforward.
-
-The RTS is written in portable C code, and therefore requires a C
-execution environment to run.  Our goal to remove dependencies on an
-operating system precludes the use of a full featured C library, so
-only a handful of functions are included to provide a very minimal
-C environment.  It is composed of the following components:
-
-* a tiny libc with these functions:
-  - abs, isdigit, memcpy, memmove, memset, strcmp, strnlen
-  - iswalnum, iswalpha, iswcntrl, iswdigit, iswlower, iswpunct, iswupper,
-    iswblank
-    These functions are generacted from the character database named
-    UnicodeData.txt available at www.unicode.org
-  - malloc/free/realloc from Doug Lea's implementation
-
-* a minimal libgcc with
-  __divdi3, __moddi3, __udivdi3, __umoddi3
-  extracted from libgcc on the build system
-
-* several functions from libgmp, extracted from libgmp.a of the build
-  system; ad-hoc replacements are provided for assert.o and memory.o
-  to remove some dependencies.
-
-* math functions from Sun Microsystems' public domain math library
-
-We also provide simple wrappers for
-fprintf, stderr, stdout, fflush, fprintf, fwrite, fputc, fputs, fopen
-in order to build RTS with debugging option enabled.
-
-We say that C code (including the RTS, boot code, and parts of the
-interrupt handling code) is executed in the "C land", which has its
-own explicitly managed heap (malloc/free), and uses conventions
-defined by the C compiler for function calls, etc.
-
-We say that Haskell code is executed in the "Haskell land", with its
-heap being managed by the RTS, and using the execution model of the
-RTS (STG).
-
-Although our goal is to minimize the amount of code running in C land,
-favoring Haskell code, data can be exchanged between this two worlds
-using primitive operations of the Haskell compiler or the Foreign
-Function Interface (FFI).
-
-Memory model
-------------
-
-hOp only supports IA32 (i.e., Intel's x86 family of processors), but
-is meant to eventually run of multiple architectures.  The remaining
-subsections of this section give IA32 specific details.
-
-hOp currently operates in protected mode with a flat address space
-(paging is disabled), and is limited to use only 32MB of memory (it
-will crash miserably if you have less memory; adding code to detect
-the amount of available memory is future work).
-
------------- 0x00000000 0
- Interrupt
-  vectors
------------- 0x00000400 1kB
-  C stack
------------- 0x000A0000 640kB
- Video RAM
- and BIOS
------------- 0x00100000 1MB
- hOp kernel
------------- 0x00400000 4MB
-  C heap
------------- 0x00800000 8MB
-Haskell heap
------------- 0x02000000 32MB
-
-The low level interface to the C heap is a trivial implementation of
-the standard Unix system call sbrk(2).  The high level interface uses
-Doug Lea's malloc.
-
-The Haskell heap is divided in 1MB blocks, which are handed out as
-needed to the RTS to be managed by the garbage collector.  The C
-land functions MBlock_init() and getMBlocks() manage a static
-variable pointing to the next 1MB block start address.
-
-Interrupt handling
-------------------
-
-* Each interrupt handler runs in its own Haskell thread.
-* These threads, wrapped in StablePtrs, are registered in a global
-  array "irqHandlerThreads" which resides in C land.
-* A new blocked state "BlockedWaitingInterrupts" was added.
-* In order to register a thread as an handler for a given IRQ,
-  a new PrimOp, registerForIRQ#, was added.  It creates a new StablePtr
-  for the current thread, update the global array, enable the IRQ and
-  put the thread in blocked state, waiting for interrupts.
-* Another new PrimOp, waitNextInterrupt#, is used after handling an
-  interrupt to sends a specific End Of Interrupt to the controller and
-  block the thread again until the next IRQ. 
-* When an interrupt occurs, the C handler examines the irqHandlerThreads
-  array; if a thread was registered, it is unblocked and a context switch
-  is requested (and will occur when control is next passed to the Haskell
-  scheduler).
-
-This interrupt handling model was the easiest to implement but it has
-some major drawbacks:
-
-* The current garbage collector is neither concurrent nor incremental,
-  which could lead to severe loss of interrupt during a long garbage
-  collection.
-* It relies on the ability of the i8259A programmable interrupt
-  controller (PIC) to accept Specific End Of Interrupt signals.
-  This feature may not be available on other PICs.
-* The current Haskell scheduler does not support multiple priority
-  levels; many threads running concurrently could delay handling an
-  interrupt for a long time.
-
-We plan to improve this aspect in future versions.
-
-Boot process
-------------
-
-GRUB already takes care of setting up x86 protected mode, which makes
-the boot process easier.
-
-------- C land
-start.S   | Load static, flat-memory GDT (segment descriptors)
-          | Initialize the memory to 0xCC (IA32 breakpoint instruction)
-          | Initialize the C stack
-          | Jump to c_start
-c_start.c | Initialize PIC (IRQs 0-15 mapped to interrupts 0x20-0x2F)
-          | Initialize IDT (interrupt vectors)
-          | Initialize Haskell block allocator (MBlock_init)
-          | Pass control to the RTS
-------- Haskell land
-Main.hs   | Start a console driver which handles a basic x86 text console
-          | Start a keyboard controller
-          | Start an idle thread
-          | Bind the keyboard and console driver to a simple Readline clone
-          |     which allows shell-like interaction with the system
-
-
-aarch64 Port (GHC 9.14, QEMU virt) — stock RTS, no GHC patches
+aarch64 Port (GHC 9.14, QEMU virt) -- stock RTS, no GHC patches
 ===============================================================
 
-This branch adds an aarch64-first freestanding build that runs under
-QEMU `virt` (`-M virt,gic-version=3`) on Apple silicon.  The i386
-GRUB/floppy path is left dormant (additive-only diff).
+This is an aarch64-first freestanding build that runs under QEMU
+`virt` (`-M virt,gic-version=3`) on Apple silicon.
 
 Toolchain
 ---------
-* Build container `house-port:latest` (Debian 12, GHC 9.14.1 aarch64 bindist
-  via ghcup, binutils/gcc).  All Haskell/C compilation runs
+* Build container `house-port:latest` (Debian 12, GHC 9.14.1 aarch64
+  bindist via ghcup, binutils/gcc).  All Haskell/C compilation runs
   `container run --platform linux/arm64 ...` (see `Containerfile`);
-  `CONTAINER_DEFAULT_PLATFORM` is not set globally — every invocation pins
-  `--platform linux/arm64` and `container image inspect` asserts `arm64` only.
+  `CONTAINER_DEFAULT_PLATFORM` is not set globally -- every invocation
+  pins `--platform linux/arm64` and `container image inspect` asserts
+  `arm64` only.
 * QEMU on the macOS host (`brew install qemu expect`, HVF accel).  The
   container is build-only; QEMU never runs inside it.
 * Guest RAM is one knob: `SPIKE_MEM ?= 4G` compiles `HOUSE_RAM_BYTES` /
@@ -278,25 +42,27 @@ Toolchain
 
 What boots
 ----------
-* `kernel/platform/aarch64/{start.S,c_start.c,mmu.c,gic.c,timer.c,irq.c,
-  userspace.c,uart.c,aarch64.ld}` + `tinylibc` shims for the stock non-threaded
-  RTS (bump mmap, faked ticker via ARM generic timer → timerfd shim, `c_print`
-  → PL011).
-* `H.Interrupts` is GIC-native (`IntId`, `ppiVirtTimer=27`, `ppiPhysTimer=30`,
-  `spi n = 32+n`, dispatcher `threadDelay 20ms` poll, `house_irq_push/pop`).
-* `H.VirtualMemory` is aarch64 4 KB-granule L0→L3 (`0x01000000..0x3fffffff` window).
+* `platform/aarch64/{start.S,c_start.c,mmu.c,gic.c,timer.c,irq.c,
+  userspace.c,uart.c,psci.c,aarch64.ld}` + `tinylibc` shims for the
+  stock non-threaded RTS (bump mmap, faked ticker via ARM generic
+  timer -> timerfd shim, `c_print` -> PL011).
+* `H.Interrupts` is GIC-native (`IntId`, `ppiVirtTimer=27`,
+  `ppiPhysTimer=30`, `spi n = 32+n`, dispatcher `threadDelay 20ms` poll,
+  `house_irq_push/pop`).
+* `H.VirtualMemory` is aarch64 4 KB-granule L0->L3
+  (`0x01000000..0x3fffffff` window).
 * Reduced Main `kernel/HouseA64.hs` + `Kernel.Driver.PL011.hs`
-  (Console `Chan ConsoleCommand → uart_putc`, RX `uart_getc_nonblock → Chan
-   KeyPress → LineEditor`).  POSIX-ish shell: `help` (every command carries
-  a `-- description`), `echo <word>...`, `clear` (`ESC[2J ESC[H`),
-  `uname` (`House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt`), `uptime`
+  (Console `Chan ConsoleCommand -> uart_putc`, RX
+  `uart_getc_nonblock -> Chan KeyPress -> LineEditor`).  POSIX-ish
+  shell: `help` (every command carries a `-- description`),
+  `echo <word>...`, `clear` (`ESC[2J ESC[H`), `uname`
+  (`House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt`), `uptime`
   (`house_uptime_secs` via `CNTVCT_EL0`), `shutdown [-h|-r]` (PSCI
-  `SYSTEM_OFF`/`SYSTEM_RESET` via `hvc #0`; `-r` only → reboot, `-h` only →
-  halt, neither/both → `usage: shutdown [-h|-r]`), plus `lambda`,
-  `preempt`, `wastemem` (all with descriptions).  `psci.c` parks in `wfi` on
-  failure; QEMU `virt` pins `psci-conduit=hvc`.  `timer.c` records
-  `CNTVCT_EL0` at boot for `house_uptime_secs()`.
-  Excluded (still in-tree, not built): IA32/VBE/Gadgets/Net/PCI/PS2/user-mode.
+  `SYSTEM_OFF`/`SYSTEM_RESET` via `hvc #0`; `-r` only -> reboot, `-h`
+  only -> halt, neither/both -> `usage: shutdown [-h|-r]`), plus
+  `lambda`, `preempt`, `wastemem` (all with descriptions).  `psci.c`
+  parks in `wfi` on failure; QEMU `virt` pins `psci-conduit=hvc`.
+  `timer.c` records `CNTVCT_EL0` at boot for `house_uptime_secs()`.
 
 Build & run (host)
 ------------------
@@ -304,20 +70,20 @@ Build & run (host)
 # one-time: build the linux/arm64 image (pinned arm64, no Rosetta)
 make container-image
 
-# spike: Haskell → PL011 → ticks-ok (threadDelay 500 ms ×4)
-make spike-build        # container: make -C kernel/platform/aarch64 DEFS_C/S
-make spike-run          # qemu hvf, -m 4G, -kernel spike.elf
+# spike: Haskell -> PL011 -> ticks-ok (threadDelay 500 ms x4)
+make spike-build        # container: make -C platform/aarch64 DEFS_C/S
+make spike-run          # qemu hvf, -m 4G, -kernel platform/aarch64/build/spike.elf
 make spike-check        # clean + build + expect hvf
 
 # GIC + VM
 make irq-build / irq-run
-make irq-check          # → irq-ok + vm-ok, hvf and tcg
+make irq-check          # -> irq-ok + vm-ok, hvf and tcg
 
 # house: welcome banner + interactive + POSIX shell + PSCI
 make house-build / house-run
-make house-check        # → "Welcome to the House shell" banner, hvf+tcg
-make house-shell-check  # → prompt, help→Usage, lambda, wastemem 10→55, hvf+tcg
-make house-posix-check  # → help descriptions (-- ), echo, uname, uptime, shutdown -r (reboot) / -h (halt), hvf+tcg
+make house-check        # -> "Welcome to the House shell" banner, hvf+tcg
+make house-shell-check  # -> prompt, help->Usage, lambda, wastemem 10->55, hvf+tcg
+make house-posix-check  # -> help descriptions (-- ), echo, uname, uptime, shutdown -r (reboot) / -h (halt), hvf+tcg
 
 # all gates from clean (the CI gate)
 make check              # spike-check + irq-check + house-check + house-shell-check + house-posix-check
@@ -326,32 +92,54 @@ make run                # alias for house-run (hvf, $SPIKE_MEM)
 
 Inside the container (if you `make container-shell`):
 ```
-make -C kernel -f Makefile.aarch64            # ghc --make -no-link HouseA64.hs
-make -C kernel/platform/aarch64 house        # ld --build-id=none -T aarch64.ld
+make -C kernel                            # ghc --make -no-link HouseA64.hs
+make -C platform/aarch64 house            # ld --build-id=none -T aarch64.ld
 ```
 
 Expect scripts live in `scripts/` (`qemu-smoke.exp`, `qemu-irq.exp`,
-`qemu-house.exp`, `qemu-house-shell.exp`, `qemu-house-posix.exp`) — each
+`qemu-house.exp`, `qemu-house-shell.exp`, `qemu-house-posix.exp`) -- each
 `spawn qemu-system-aarch64 -accel hvf|tcg -M virt,gic-version=3[,psci-conduit=hvc]
 -m $mem -nographic -kernel $elf` and asserts its marker (`ticks-ok`, `vm-ok`,
 welcome, prompt/echo, or `shutdown --` + reboot/halt).
 
 Closure & extensions
 --------------------
-`kernel/Makefile.aarch64` is the single source of truth:
-`ghc --make -no-link HouseA64.hs -i. -outputdir build-kernel -O1
+`kernel/Makefile` is the single source of truth:
+`ghc --make -no-link HouseA64.hs -i. -outputdir build -O1
  -package mtl -package array -package containers -package pretty`
 with `EXTS = MultiParamTypeClasses FunctionalDependencies FlexibleInstances
 FlexibleContexts UndecidableInstances OverlappingInstances ImplicitParams
 ExistentialQuantification ScopedTypeVariables Rank2Types KindSignatures
 PatternGuards ForeignFunctionInterface GeneralizedNewtypeDeriving`
-(the `OverlappingInstances` flag is deprecated in 9.14 — fallback is per-instance
-`OVERLAPPING`).  `find build-kernel -name '*.o'` plus `start/mmu/c_start/uart`
-and `tinylibc` are linked `ld --build-id=none --gc-sections -T aarch64.ld`
-against `ghc-prim/bignum/ghc-internal/containers/pretty/mtl/array/transformers/
+(the `OverlappingInstances` flag is deprecated in 9.14 -- fallback is
+per-instance `OVERLAPPING`).  `find kernel/build -name '*.o'` plus
+`start/mmu/c_start/uart` and `tinylibc` are linked
+`ld --build-id=none --gc-sections -T aarch64.ld` against
+`ghc-prim/bignum/ghc-internal/containers/pretty/mtl/array/transformers/
 deepseq/base/rts/Cffi + libgmp + libgcc`.  `readelf -h` gate checks
 `ENTRY(_start)` / `Machine: AArch64`.
 
-See `plans/ghc-9.14-aarch64-port.md` (master plan) and `plans/porting-log.md`
-(phases 1–7) for the full deviation log, excluded-modules justification, and the
-four-stacked-causes DFSC 0x35 debug story.
+Repository layout
+-----------------
+```
+/
+|-- README
+|-- LICENSE
+|-- Makefile            aarch64-only orchestration (container, spike, irq, house)
+|-- Containerfile
+|-- .gitignore          kernel/build/, platform/aarch64/build/
+|-- kernel/             Haskell kernel (GHC import roots H./Kernel./Monad./Util. preserved)
+|   |-- Makefile        BUILD := build
+|   |-- HouseA64.hs
+|   |-- H/  Kernel/  Monad/  Util/    (closure only)
+|   `-- build/          (gitignored)
+|-- platform/aarch64/   C/asm, tinylibc, aarch64.ld, Spike.hs, IrqCheck.hs, Makefile
+|   `-- build/          (gitignored)
+|-- scripts/            5 expect scripts (ELF path is argv)
+`-- plans/              untracked, left on disk (local dev help)
+```
+
+`plans/` is intentionally untracked (not gitignored) -- local development
+notes kept on disk for contributors but not committed.  See
+`plans/porting-log.md` for the full deviation log and the DFSC 0x35 debug
+story.

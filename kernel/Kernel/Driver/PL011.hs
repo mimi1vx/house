@@ -13,7 +13,7 @@ import H.Monad (H, liftIO)
 import Kernel.Driver.Keyboard (Key (..), KeyPress (..))
 import Kernel.Types.Console
 
--- Provided by kernel/platform/aarch64/uart.c (freestanding, no base)
+-- Provided by platform/aarch64/uart.c (freestanding, no base)
 foreign import ccall unsafe "uart_putc" c_uart_putc :: CChar -> IO ()
 
 foreign import ccall unsafe "uart_puts" c_uart_puts_raw :: CString -> IO ()

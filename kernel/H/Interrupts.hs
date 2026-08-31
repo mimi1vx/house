@@ -39,7 +39,7 @@ ppiPhysTimer = IntId 30 -- CNTP (non-secure physical timer) — QEMU virt report
 spi :: Word32 -> IntId
 spi n = IntId (32 + n)
 
--- FFI to GIC/irq helpers (see kernel/platform/aarch64/irq.h)
+-- FFI to GIC/irq helpers (see platform/aarch64/irq.h)
 foreign import ccall unsafe "house_gic_enable_int" c_enableInt :: Word32 -> IO ()
 
 foreign import ccall unsafe "house_gic_disable_int" c_disableInt :: Word32 -> IO ()

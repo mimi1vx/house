@@ -1,1 +1,2 @@
-kernel/platform/aarch64/build/
+kernel/build/
+platform/aarch64/build/
