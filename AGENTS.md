@@ -1,6 +1,6 @@
 # AGENTS.md — house/hOp aarch64 OS / microkernel
 
-GHC RTS-based operating system and microkernel (Haskell + tinylibc C wrapper), aarch64-only, runs freestanding under QEMU `virt` on Apple silicon. No GHC patches — stock non-threaded RTS.
+GHC RTS-based operating system and microkernel (Haskell + tinylibc C wrapper), aarch64-only, runs freestanding under QEMU `virt` on Apple silicon. No GHC patches — stock threaded RTS (-N1, cooperative green threads via tinylibc/threads.c); freestanding constraint "unsafe FFI only" (safe ccall would need scheduler-backed worker threads).
 
 ## Layout
 
@@ -41,7 +41,7 @@ make -C platform/aarch64 house DEFS_C='...' DEFS_S='...'   # ld --build-id=none
 - **Stock RTS seam:** `platform/aarch64/tinylibc/sys.c` fakes `timerfd`/`signal`/`pipe`/`mmap`; `tick.h` + `timer.c` feeds `house_rts_tick()` from the ARM generic timer (PPI 27/30) — not wall-clock. `house_isr_active` switches `house_timerfd_due` to `house_isr_pending` counter.
 - **Boot:** `platform/aarch64/start.S` handles EL3→EL2→EL1 drop, enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocs, clears BSS, installs VBAR, calls `house_mmu_early` (identity-maps RAM `0x40000000` + `HOUSE_RAM_BYTES`) before `c_start`. Guest entry `_start` at `0x40080000` (`aarch64.ld:12`).
 - **GICv3** (`gic.c`): `GICD 0x08000000`, `GICR 0x080A0000`; wake `GICR_WAKER`, mark PPIs 27/29/30 Group1, enable via `ICC_PMR/IGRPEN1/BPR1`. `H.Interrupts` maps `ppiVirtTimer=27`, `ppiPhysTimer=30`, `spi n = 32+n`.
-- **Link:** `platform/aarch64/Makefile:28-39` locates `HsFFI.h` + `libHS{rts,base,ghc-prim,ghc-bignum,ghc-internal,containers,pretty,mtl,array,transformers,deepseq,Cffi}.a` via `ghc --print-libdir`/`ghc-pkg field`; `rts` is non-threaded (`grep -v thr`); archives + `libgmp.a` + `libgcc` linked `--start-group/--end-group`. `readelf -h` gate checks `ENTRY(_start)` / `Machine: AArch64`.
+- **Link:** `platform/aarch64/Makefile:28-39` locates `HsFFI.h` + `libHS{rts,base,ghc-prim,ghc-bignum,ghc-internal,containers,pretty,mtl,array,transformers,deepseq,Cffi}.a` via `ghc --print-libdir`/`ghc-pkg field`; `rts` is threaded (`grep thr`); archives + `libgmp.a` + `libgcc` linked `--start-group/--end-group`. `readelf -h` gate checks `ENTRY(_start)` / `Machine: AArch64`.
 - **Haskell exts** pinned in `kernel/Makefile:20-32`: `MultiParamTypeClasses FunctionalDependencies FlexibleInstances FlexibleContexts UndecidableInstances ImplicitParams ExistentialQuantification ScopedTypeVariables Rank2Types KindSignatures PatternGuards ForeignFunctionInterface GeneralizedNewtypeDeriving` (`-O1 -Wall`; `OverlappingInstances` is per-instance `OVERLAPPING`, not global).
 - **PSCI:** `psci.c` via `hvc #0` (`SYSTEM_OFF`/`SYSTEM_RESET`); QEMU `virt` pins `psci-conduit=hvc`. `timer.c` records `CNTVCT_EL0` at boot for `house_uptime_secs`.
 - **Shell:** `HouseA64.hs:88-119` — `help`/`echo`/`clear`/`uname` (`House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt`)/`uptime`/`shutdown [-h|-r]` (xor semantics; both/neither → `usage: shutdown [-h|-r]`) + `lambda`/`preempt`/`wastemem`. UART via `Kernel.Driver.PL011` (`Chan ConsoleCommand -> uart_putc`, `uart_getc_nonblock -> Chan KeyPress -> LineEditor`).

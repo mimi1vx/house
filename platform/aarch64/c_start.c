@@ -112,6 +112,8 @@ void c_handle_irq(uint64_t *gpr, void *fpi)
         __asm__ volatile("isb");
         if (house_isr_active) house_isr_pending++;
         house_irq_push(intid);
+        extern void house_sched_maybe_preempt_from_isr(void);
+        house_sched_maybe_preempt_from_isr();
     } else if (intid == 29 || intid == 30) {
         __asm__ volatile("msr CNTP_TVAL_EL0, %0" :: "r"((uint64_t)house_timer_interval));
         __asm__ volatile("isb");
@@ -144,6 +146,7 @@ __attribute__((weak)) void house_spike_main(void);
 __attribute__((weak)) void house_irqcheck_main(void);
 __attribute__((weak)) void house_main(void);
 
+void house_thread_init_main(void);
 void c_start(void)
 {
     static int argc = 1;
@@ -153,9 +156,9 @@ void c_start(void)
     uart_init();
     uart_puts("[house] c_start: irq_init\n");
     house_irq_init();
+    house_thread_init_main();
     uart_puts("[house] c_start: hs_init\n");
     hs_init(&argc, &argv);
-    uart_puts("[house] c_start: calling exported main\n");
     if (house_main)
         house_main();
     else if (house_irqcheck_main)

@@ -35,19 +35,23 @@ MTL_A  := $(shell ls $(UNITDIR_mtl)/libHSmtl-*.a 2>/dev/null | head -1)
 ARRAY_A:= $(shell ls $(UNITDIR_arr)/libHSarray-*.a | head -1)
 TRANS_A:= $(shell ls $(UNITDIR_trans)/libHStransformers-*.a | head -1)
 DEEP_A := $(shell ls $(UNITDIR_deep)/libHSdeepseq-*.a | head -1)
-RTS_A  := $(shell ls $(UNITDIR_rts)/libHSrts-*.a | grep -v thr | grep -v debug | grep -v eventlog | head -1)
+RTS_A  := $(shell ls $(UNITDIR_rts)/libHSrts-*.a | grep thr | grep -v debug | grep -v eventlog | head -1)
 FFI_A  := $(UNITDIR_rts)/libCffi.a
 
 TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
-         tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
-         tinylibc/mathmin.c tinylibc/c_print.c
+          tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
+          tinylibc/mathmin.c tinylibc/c_print.c \
+          tinylibc/threads.c tinylibc/tls.c
+
+TINY_ASM := tinylibc/switch.S tinylibc/tls_desc.S
 
 PLATFORM_C := gic.c timer.c irq.c userspace.c psci.c
 
 OBJS := build/start.o build/mmu.o build/c_start.o build/uart.o \
-        $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
-        $(addprefix build/,$(PLATFORM_C:.c=.o)) \
-        build/Spike.o
+         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
+         $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
+         $(addprefix build/,$(PLATFORM_C:.c=.o)) \
+         build/Spike.o
 
 VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Concurrency Kernel/Types/Console Kernel/Console Kernel/Debug \
@@ -55,16 +59,18 @@ VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
 OBJS_IRQ := build/start.o build/mmu.o build/c_start.o build/uart.o \
-        $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
-        $(addprefix build/,$(PLATFORM_C:.c=.o)) \
-        build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
+         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
+         $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
+         $(addprefix build/,$(PLATFORM_C:.c=.o)) \
+         build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
 
 # House kernel (phase 4): boot → PL011 welcome banner, blocks on empty input.
 # Haskell objects are produced by kernel/Makefile (build/**.o)
 # and collected via find; C/platform objects are rebuilt here.
 OBJS_HOUSE_DEPS := build/start.o build/mmu.o build/c_start.o build/uart.o \
-        $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
-        $(addprefix build/,$(PLATFORM_C:.c=.o))
+         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
+         $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
+         $(addprefix build/,$(PLATFORM_C:.c=.o))
 
 all: build/spike.elf
 	@readelf -h build/spike.elf | grep -E 'Entry|Machine'
@@ -93,6 +99,9 @@ build/start.o: start.S | build
 
 build/tiny-%.o: tinylibc/%.c | build
 	$(CC) -c $(CFLAGS) -o $@ $<
+
+build/tiny-%.o: tinylibc/%.S | build
+	$(CC) -c $(ASFLAGS) -o $@ $<
 
 build/%.o: %.c | build
 	$(CC) -c $(CFLAGS) -o $@ $<

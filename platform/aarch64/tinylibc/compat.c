@@ -28,50 +28,7 @@ char *strncpy(char *dst, const char *src, size_t n);
 #define ENOTTY_ 25
 #define FAKE_EPOCH_ 1785000000ULL
 
-/* ---- pthreads: single capability, every op trivially succeeds ---- */
-
-int pthread_mutex_init(void *m, void *a) { (void)m; (void)a; return 0; }
-int pthread_mutex_destroy(void *m) { (void)m; return 0; }
-int pthread_mutex_lock(void *m) { (void)m; return 0; }
-int pthread_mutex_trylock(void *m) { (void)m; return 0; }
-int pthread_mutex_unlock(void *m) { (void)m; return 0; }
-
-int pthread_cond_init(void *c, void *a) { (void)c; (void)a; return 0; }
-int pthread_cond_destroy(void *c) { (void)c; return 0; }
-int pthread_cond_signal(void *c) { (void)c; return 0; }
-int pthread_cond_broadcast(void *c) { (void)c; return 0; }
-int pthread_cond_wait(void *c, void *m)
-{
-    (void)c; (void)m;
-    *__errno_location() = EINVAL;
-    return EINVAL;              /* never legitimately reached */
-}
-int pthread_cond_timedwait(void *c, void *m, const struct timespec *t)
-{
-    (void)c; (void)m; (void)t;
-    *__errno_location() = ETIMEDOUT;
-    return ETIMEDOUT;
-}
-
-int pthread_condattr_init(void *a) { (void)a; return 0; }
-int pthread_condattr_destroy(void *a) { (void)a; return 0; }
-int pthread_condattr_setclock(void *a, int clk) { (void)a; (void)clk; return 0; }
-
-int pthread_attr_init(void *a) { (void)a; return 0; }
-int pthread_attr_destroy(void *a) { (void)a; return 0; }
-int pthread_attr_getstacksize(void *a, size_t *s)
-{
-    (void)a;
-    *s = 8 << 20;
-    return 0;
-}
-
-unsigned long pthread_self(void) { return 1; }
-int pthread_join(unsigned long t, void **r) { (void)t; (void)r; return 0; }
-int pthread_detach(unsigned long t) { (void)t; return 0; }
-__attribute__((noreturn)) void pthread_exit(void *r) { (void)r; exit(0); }
-int pthread_kill(unsigned long t, int s) { (void)t; extern int raise(int); return raise(s); }
-int pthread_setname_np(unsigned long t, const char *n) { (void)t; (void)n; return 0; }
+/* ---- pthreads: now provided by tinylibc/threads.c (cooperative green threads) ---- */
 
 /* ---- stdio FILE-based: report failure so callers skip dead features ---- */
 
@@ -134,7 +91,6 @@ long syscall(long num, ...)
     return -1;
 }
 
-int sched_yield(void) { return 0; }
 int sched_setaffinity(pid_t pid, size_t sz, const void *mask)
 {
     (void)pid; (void)sz; (void)mask;
@@ -196,44 +152,7 @@ size_t iconv(void *cd, char **in, size_t *il, char **out, size_t *ol)
 
 int iconv_close(void *cd) { (void)cd; return 0; }
 
-/* ---- eventfd / epoll: no IO manager in this kernel ---- */
-
-int eventfd(unsigned initval, int flags)
-{
-    (void)initval; (void)flags;
-    *__errno_location() = ENOSYS;
-    return -1;
-}
-int eventfd_write(int fd, unsigned long value)
-{
-    (void)fd; (void)value;
-    *__errno_location() = ENOSYS;
-    return -1;
-}
-int epoll_create(int size)
-{
-    (void)size;
-    *__errno_location() = ENOSYS;
-    return -1;
-}
-int epoll_create1(int flags)
-{
-    (void)flags;
-    *__errno_location() = ENOSYS;
-    return -1;
-}
-int epoll_ctl(int ep, int op, int fd, void *ev)
-{
-    (void)ep; (void)op; (void)fd; (void)ev;
-    *__errno_location() = ENOSYS;
-    return -1;
-}
-int epoll_wait(int ep, void *events, int maxev, int timeout)
-{
-    (void)ep; (void)events; (void)maxev; (void)timeout;
-    *__errno_location() = ENOSYS;
-    return -1;
-}
+/* eventfd/epoll provided by threads.c for threaded RTS */
 
 static int house_strerror_r(int errnum, char *buf, size_t buflen)
 {
@@ -310,17 +229,6 @@ static int digit_val_local(char c)
     return -1;
 }
 
-/* Ticker thread: accepted on paper, never scheduled. Ticks are delivered
-   synchronously from the ARM timer ISR instead (house_rts_tick). */
-int pthread_create(unsigned long *t, const void *a,
-                   void *(*fn)(void *), void *arg)
-{
-    static unsigned long fake_tid = 100;
-    (void)a; (void)fn; (void)arg;
-    *t = ++fake_tid;
-    return 0;
-}
-
 /* ---- FORTIFY_SOURCE forwards from the Debian-built RTS/libffi ---- */
 
 int fprintf(FILE *, const char *, ...);
@@ -372,48 +280,6 @@ void __assert_fail(const char *assertion, const char *file, unsigned line,
     abort();
 }
 
-/* ---- blocking primitives: nothing should reach these ---- */
-
-int nanosleep(const struct timespec *rq, struct timespec *rm)
-{
-    (void)rq; (void)rm;
-    return 0;
-}
-int pause(void) { *__errno_location() = EINTR; return -1; }
-struct pollfd {
-    int fd;
-    short events;
-    short revents;
-};
-int house_timerfd_due(int fd);
-int house_fd_pipe_readable(int fd);
-int poll(struct pollfd *fds, unsigned long nfds, int timeout)
-{
-    /* Minimal readiness for the ticker loop: timerfds due on their paced
-       interval (and pipe read ends with data) report POLLIN immediately;
-       everything else reports nothing. timeout is not simulated — the
-       RTS treats 0 as "poll again", which the scheduler interleaves. */
-    unsigned long i;
-    int ready = 0;
-    (void)timeout;
-    for (i = 0; i < nfds; i++) {
-        fds[i].revents = 0;
-        if ((fds[i].events & 0x0001) &&
-            (house_timerfd_due(fds[i].fd) ||
-             house_fd_pipe_readable(fds[i].fd))) {
-            fds[i].revents |= 0x0001;   /* POLLIN */
-            ready++;
-        }
-    }
-    return ready;
-}
-int select(int nfds, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv)
-{
-    (void)nfds; (void)r; (void)w; (void)e;
-    if (tv)
-        tv->tv_sec = tv->tv_usec = 0;
-    return 0;
-}
 /* timerfd_* live in sys.c (ticker seam) */
 
 /* ---- termios: pretend not-a-tty so Handle layer skips raw-mode paths ---- */

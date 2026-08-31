@@ -18,8 +18,14 @@
 #include "uart.h"
 #include "tick.h"
 
+#include "threads.h"
+extern int house_thr_mode;
 int *__errno_location(void)
 {
+    if (house_thr_mode) {
+        house_thread_t *cur = house_thread_current();
+        if (cur) return &cur->errno_val;
+    }
     static int e;
     return &e;
 }
@@ -28,13 +34,13 @@ void *memset(void *dst, int c, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);
 void *memmove(void *dst, const void *src, size_t n);
 
-/* ---- fake fd table: timerfds + pipes backed by tiny ring buffers ---- */
+/* ---- fake fd table: timerfds + pipes + eventfd + epoll ---- */
 
 #define FAKE_FD_BASE 3
-#define FAKE_FD_N 16
+#define FAKE_FD_N 32
 #define PIPE_CAP 1024
 
-enum { FD_FREE = 0, FD_TIMER, FD_PIPE_R, FD_PIPE_W };
+enum { FD_FREE = 0, FD_TIMER, FD_PIPE_R, FD_PIPE_W, FD_EVENT, FD_EPOLL };
 
 static struct {
     int kind;
@@ -43,6 +49,11 @@ static struct {
     uint64_t last_ns;           /* timerfd pacing anchor */
     char buf[PIPE_CAP];
     size_t len;
+    uint64_t ev_cnt;            /* eventfd */
+    int ep_n;
+    int ep_fd[16];
+    uint32_t ep_events[16];
+    uint64_t ep_data[16];
 } fdt[FAKE_FD_N];
 
 static int fd_slot(int fd)
@@ -181,17 +192,30 @@ static void deliver(int sig)
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *old)
 {
+    if (house_thr_mode) {
+        house_thread_t *cur = house_thread_current();
+        if (cur) {
+            if (old) *old = cur->sigmask;
+            if (set) {
+                if (how == SIG_BLOCK) {
+                    unsigned long *d = (unsigned long *)&cur->sigmask;
+                    const unsigned long *s = (const unsigned long *)set;
+                    for (size_t i = 0; i < sizeof(sigset_t)/sizeof(unsigned long); i++) d[i] |= s[i];
+                } else if (how == SIG_UNBLOCK) {
+                    unsigned long *d = (unsigned long *)&cur->sigmask;
+                    const unsigned long *s = (const unsigned long *)set;
+                    for (size_t i = 0; i < sizeof(sigset_t)/sizeof(unsigned long); i++) d[i] &= ~s[i];
+                } else if (how == SIG_SETMASK) cur->sigmask = *set;
+            }
+            return 0;
+        }
+    }
     (void)how;
     if (old)
         *old = curmask;
     if (set)
         curmask = *set;
     return 0;
-}
-
-int pthread_sigmask(int how, const sigset_t *set, sigset_t *old)
-{
-    return sigprocmask(how, set, old);
 }
 
 int raise(int sig)
@@ -208,9 +232,12 @@ int kill(pid_t pid, int sig)
 }
 
 /* Called from the ARM generic-timer ISR (phase 3): synchronous replay of
-   whatever the RTS installed for SIGVTALRM. */
+   whatever the RTS installed for SIGVTALRM. In threaded mode the ticker
+   thread paces via timerfd poll, so suppress the double tick. */
 void house_rts_tick(void)
 {
+    extern int house_thr_mode;
+    if (house_thr_mode) return;
     deliver(SIGVTALRM);
 }
 
@@ -361,6 +388,11 @@ ssize_t write(int fd, const void *buf, size_t n)
         fdt[p].len += k;
         return (ssize_t)k;
     }
+    if (s >= 0 && fdt[s].kind == FD_EVENT && n >= 8) {
+        uint64_t v = *(const uint64_t *)buf;
+        fdt[s].ev_cnt += v;
+        return 8;
+    }
     if (fd != 1 && fd != 2) {
         *__errno_location() = EBADF;
         return -1;
@@ -399,6 +431,10 @@ ssize_t read(int fd, void *buf, size_t n)
         memmove(fdt[s].buf, fdt[s].buf + k, fdt[s].len - k);
         fdt[s].len -= k;
         return (ssize_t)k;
+    }
+    if (fdt[s].kind == FD_EVENT && buf && n >= 8) {
+        if (fdt[s].ev_cnt == 0) { *__errno_location() = EAGAIN; return -1; }
+        *(uint64_t *)buf = fdt[s].ev_cnt; fdt[s].ev_cnt = 0; return 8;
     }
     return 0;
 }
@@ -499,6 +535,101 @@ int pipe(int fds[2])
     fds[1] = FAKE_FD_BASE + w;
     return 0;
 }
+
+int eventfd(unsigned initval, int flags)
+{
+    (void)flags;
+    for (int i = 0; i < FAKE_FD_N; i++) if (fdt[i].kind == FD_FREE) { fdt[i].kind = FD_EVENT; fdt[i].ev_cnt = initval; fdt[i].len = 0; return FAKE_FD_BASE + i; }
+    *__errno_location() = ENFILE; return -1;
+}
+int eventfd_write(int fd, unsigned long value)
+{
+    int s = fd_slot(fd); if (s<0||fdt[s].kind!=FD_EVENT) { *__errno_location()=EBADF; return -1; } fdt[s].ev_cnt += value; return 0;
+}
+int eventfd_read(int fd, unsigned long *value)
+{
+    int s = fd_slot(fd); if (s<0||fdt[s].kind!=FD_EVENT) { *__errno_location()=EBADF; return -1; } if (fdt[s].ev_cnt==0) { *__errno_location()=EAGAIN; return -1; } *value = fdt[s].ev_cnt; fdt[s].ev_cnt=0; return 0;
+}
+
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
+#define EPOLLIN 0x001
+struct house_epoll_event { uint32_t events; uint64_t data; };
+int epoll_create(int size) { (void)size; for(int i=0;i<FAKE_FD_N;i++) if(fdt[i].kind==FD_FREE){fdt[i].kind=FD_EPOLL;fdt[i].ep_n=0;return FAKE_FD_BASE+i;} *__errno_location()=ENFILE;return -1; }
+int epoll_create1(int flags){(void)flags;return epoll_create(1);}
+int epoll_ctl(int epfd, int op, int fd, void *ev)
+{
+    int s=fd_slot(epfd); if(s<0||fdt[s].kind!=FD_EPOLL){*__errno_location()=EBADF;return -1;}
+    struct house_epoll_event *e=(struct house_epoll_event*)ev;
+    if(op==EPOLL_CTL_ADD){
+        if(fdt[s].ep_n>=16){*__errno_location()=ENOSPC;return -1;}
+        for(int i=0;i<fdt[s].ep_n;i++) if(fdt[s].ep_fd[i]==fd){*__errno_location()=EEXIST;return -1;}
+        fdt[s].ep_fd[fdt[s].ep_n]=fd; fdt[s].ep_events[fdt[s].ep_n]=e?e->events:0; fdt[s].ep_data[fdt[s].ep_n]=e?e->data:0; fdt[s].ep_n++;
+    } else if(op==EPOLL_CTL_DEL){
+        for(int i=0;i<fdt[s].ep_n;i++) if(fdt[s].ep_fd[i]==fd){fdt[s].ep_fd[i]=fdt[s].ep_fd[fdt[s].ep_n-1];fdt[s].ep_events[i]=fdt[s].ep_events[fdt[s].ep_n-1];fdt[s].ep_data[i]=fdt[s].ep_data[fdt[s].ep_n-1];fdt[s].ep_n--;return 0;}
+        *__errno_location()=ENOENT;return -1;
+    } else if(op==EPOLL_CTL_MOD){
+        for(int i=0;i<fdt[s].ep_n;i++) if(fdt[s].ep_fd[i]==fd){fdt[s].ep_events[i]=e?e->events:0;fdt[s].ep_data[i]=e?e->data:0;return 0;}
+        *__errno_location()=ENOENT;return -1;
+    }
+    return 0;
+}
+extern int house_timerfd_due(int fd);
+extern int house_fd_pipe_readable(int fd);
+static int fd_ready(int fd){
+    int s=fd_slot(fd);
+    if(s>=0){
+        if(fdt[s].kind==FD_TIMER) return house_timerfd_due(fd);
+        if(fdt[s].kind==FD_PIPE_R) return fdt[s].len>0;
+        if(fdt[s].kind==FD_EVENT) return fdt[s].ev_cnt>0;
+    }
+    return 0;
+}
+int epoll_wait(int epfd, void *events, int maxevents, int timeout)
+{
+    int s=fd_slot(epfd); if(s<0||fdt[s].kind!=FD_EPOLL){*__errno_location()=EBADF;return -1;}
+    // quick check
+    for(;;){
+        int n=0;
+        struct house_epoll_event *evs=(struct house_epoll_event*)events;
+        for(int i=0;i<fdt[s].ep_n && n<maxevents;i++){
+            int fd=fdt[s].ep_fd[i];
+            int ready=0;
+            if(fdt[s].ep_events[i]&EPOLLIN) ready=fd_ready(fd);
+            if(ready){evs[n].events=EPOLLIN; evs[n].data=fdt[s].ep_data[i]; n++;}
+        }
+        if(n) return n;
+        if(timeout==0) return 0;
+        // block: yield or wfi
+        if(timeout<0){
+            // infinite: yield
+            extern void house_sched_yield(void);
+            extern int house_thr_mode;
+            if(house_thr_mode){ house_sched_yield(); } else { __asm__ volatile("wfi"); }
+        } else {
+            // timed: check timeout, yield
+            extern void house_sched_yield(void);
+            extern uint64_t house_uptime_ns(void);
+            uint64_t start=house_uptime_ns();
+            uint64_t to_ns=(uint64_t)timeout*1000000ULL;
+            while(house_uptime_ns()-start < to_ns){
+                house_sched_yield();
+                n=0;
+                for(int i=0;i<fdt[s].ep_n && n<maxevents;i++){
+                    int fd=fdt[s].ep_fd[i];
+                    int ready=0;
+                    if(fdt[s].ep_events[i]&EPOLLIN) ready=fd_ready(fd);
+                    if(ready){evs[n].events=EPOLLIN; evs[n].data=fdt[s].ep_data[i]; n++;}
+                }
+                if(n) return n;
+            }
+            return 0;
+        }
+    }
+}
+int epoll_pwait(int epfd, void *events, int maxevents, int timeout, const void *sigmask){(void)sigmask;return epoll_wait(epfd,events,maxevents,timeout);}
+int epoll_pwait2(int epfd, void *events, int maxevents, const struct timespec *ts, const void *sigmask){int to=-1;if(ts) to=(int)(ts->tv_sec*1000+ts->tv_nsec/1000000);return epoll_pwait(epfd,events,maxevents,to,sigmask);}
 int dup(int fd) { (void)fd; *__errno_location() = EBADF; return -1; }
 int dup2(int oldfd, int newfd) { (void)oldfd; return newfd; }
 pid_t getpid(void) { return 42; }

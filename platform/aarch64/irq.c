@@ -37,6 +37,7 @@ void house_irq_init(void) {
     uart_puts("[house] irq ok\n");
 }
 
+void house_sched_maybe_preempt_from_isr(void);
 void house_irq_push(uint32_t intid) {
     uint32_t h = ring_head;
     uint32_t t = ring_tail;
