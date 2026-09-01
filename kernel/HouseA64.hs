@@ -1,11 +1,12 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# OPTIONS_GHC -Wno-unused-imports -Wno-incomplete-uni-patterns #-}
 
 module HouseA64 where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM_)
-import Data.Bits (shiftL)
+import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.List (isPrefixOf, nub)
 import Data.Word (Word64)
 import Foreign.C.String (peekCString, withCString)
@@ -24,6 +25,8 @@ import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (showDriverInfo)
 import qualified Kernel.Driver.Virtio.Blk as Blk
 import qualified Kernel.Driver.Virtio.Blk.Types as BlkTypes
+import qualified Kernel.Driver.Virtio.Net as Net
+import qualified Kernel.Driver.Virtio.Net.Types as NetTypes
 import qualified Kernel.Driver.Virtio.Queue as VQueue
 import qualified Kernel.Driver.Virtio.Transport as VTrans
 import qualified Kernel.Driver.Virtio.Types as VTypes
@@ -139,6 +142,16 @@ house_main = do
       ["blk", "write", s, lba] -> handleBlkWrite s lba ""
       ["blk", "teardown", s] -> handleBlkTeardown s
       ["blk"] -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot>\n" c_uart_puts
+      ["net", "init", s] -> handleNetInit s
+      ["net", "status", s] -> handleNetStatus s
+      ["net", "teardown", s] -> handleNetTeardown s
+      ["ifconfig"] -> handleIfConfig
+      ["ping", ip] -> handlePing ip
+      ["udpecho", ip, port, txt] -> handleUdpEcho ip port txt
+      ["udpecho", ip, port] -> handleUdpEcho ip port ""
+      ["arp", "ls"] -> handleArpLs
+      ["net", "dhcp"] -> handleNetDhcp
+      ["net"] -> withCString "usage: net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -334,6 +347,81 @@ house_main = do
           Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
           Right () -> withCString "teardown ok\n" c_uart_puts
       _ -> withCString "usage: blk teardown <slot>\n" c_uart_puts
+    handleNetInit s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Net.netServerInit n)
+        case r of
+          Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+          Right dev -> withCString ("ok mac=" ++ NetTypes.showMac (NetTypes.netMac dev) ++ " ip=10.0.2.15 gw=10.0.2.2 qsize0=" ++ show (maybe 0 VQueue.queueSize (Just (NetTypes.netRxQueue dev))) ++ " qsize1=" ++ show (maybe 0 VQueue.queueSize (Just (NetTypes.netTxQueue dev))) ++ "\n") c_uart_puts
+      _ -> withCString "usage: net init <slot>\n" c_uart_puts
+    handleNetStatus s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Net.netGetMac n)
+        case r of
+          Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+          Right mac -> do
+            xs <- runH NS.nsList
+            let hasNs = ("virtio-net" ++ show n) `elem` xs
+            withCString ("net slot " ++ show n ++ " mac=" ++ NetTypes.showMac mac ++ " ns=" ++ show hasNs ++ " status ok\n") c_uart_puts
+      _ -> withCString "usage: net status <slot>\n" c_uart_puts
+    handleNetTeardown s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Net.netServerTeardown n)
+        case r of
+          Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "teardown ok\n" c_uart_puts
+      _ -> withCString "usage: net teardown <slot>\n" c_uart_puts
+    handleIfConfig = do
+      xs <- runH NS.nsList
+      let slot = findNetSlot xs
+      r <- runH (Net.netIfConfig slot)
+      case r of
+        Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+        Right s -> withCString (s ++ "\n") c_uart_puts
+    handlePing ipStr = case parseIpv4 ipStr of
+      Nothing -> withCString "EINVAL: bad ip\n" c_uart_puts
+      Just ip -> do
+        xs <- runH NS.nsList
+        let slot = findNetSlot xs
+        r <- runH (Net.netPing slot ip)
+        case r of
+          Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+          Right s -> withCString (s ++ "\n") c_uart_puts
+    handleUdpEcho ipStr portStr txt = case (parseIpv4 ipStr, reads portStr) of
+      (Just ip, [(p, "")]) -> do
+        xs <- runH NS.nsList
+        let slot = findNetSlot xs
+        r <- runH (Net.netUdpSend slot ip p txt)
+        case r of
+          Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+          Right s -> withCString (s ++ "\n") c_uart_puts
+      _ -> withCString "usage: udpecho <ip> <port> <text>\n" c_uart_puts
+    findNetSlot xs = case filter ("virtio-net" `isPrefixOf`) xs of
+      (s : _) -> case reads (drop (length "virtio-net") s) of [(n, "")] -> n; _ -> 0
+      [] -> 0
+    handleArpLs = do
+      xs <- runH Net.netArpLs
+      let showIpv4' (NetTypes.Ipv4 a b c d) = show a ++ "." ++ show b ++ "." ++ show c ++ "." ++ show d
+          showMac' (NetTypes.Mac a b c d e f) = let h = "0123456789abcdef"; hex2 w = [h !! fromIntegral (w `shiftR` 4), h !! fromIntegral (w .&. 0xF)] in hex2 a ++ ":" ++ hex2 b ++ ":" ++ hex2 c ++ ":" ++ hex2 d ++ ":" ++ hex2 e ++ ":" ++ hex2 f
+      if null xs
+        then withCString "(empty)\n" c_uart_puts
+        else withCString (unlines (map (\(ip, mac) -> showIpv4' ip ++ " -> " ++ showMac' mac) xs)) c_uart_puts
+    handleNetDhcp = do
+      xs <- runH NS.nsList
+      let slot = findNetSlot xs
+      r <- runH (Net.netDhcp slot)
+      case r of
+        Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+        Right s -> withCString (s ++ "\n") c_uart_puts
+    parseIpv4 s = case splitDot s of
+      [a, b, c, d] -> case (reads a, reads b, reads c, reads d) of
+        ([(av, "")], [(bv, "")], [(cv, "")], [(dv, "")]) -> Just (NetTypes.Ipv4 av bv cv dv)
+        _ -> Nothing
+      _ -> Nothing
+    splitDot str = splitOn '.' str
+      where
+        splitOn _ [] = [""]
+        splitOn c (x : xs) = if x == c then "" : splitOn c xs else let (h : t) = splitOn c xs in (x : h) : t
     handleUname args = do
       let sysname = "House"
           nodename = "house"
@@ -435,7 +523,8 @@ house_main = do
           "       ipc grant -- alloc one page and send to pl011",
           "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)",
           "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)",
-          "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B)"
+          "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B)",
+          "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)"
         ]
     seqFib :: Int -> Int
     seqFib n

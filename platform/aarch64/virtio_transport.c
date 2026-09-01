@@ -111,18 +111,24 @@ int virtio_transport_set_features(int slot, uint64_t wanted) {
     return VIRTIO_OK;
 }
 
-int virtio_transport_queue_max(int slot, uint32_t *max) {
+int virtio_transport_queue_max_q(int slot, int qidx, uint32_t *max) {
     if (!slot_valid(slot)) return VIRTIO_ERR_BAD_SLOT;
+    if (qidx < 0 || qidx > 7) return VIRTIO_ERR_INVAL;
     if (!max) return VIRTIO_ERR_INVAL;
     uint64_t base = slot_base(slot);
-    mmio_w32(base + VIRTIO_MMIO_OFF_QUEUE_SEL, 0);
+    mmio_w32(base + VIRTIO_MMIO_OFF_QUEUE_SEL, (uint32_t)qidx);
     __asm__ volatile("dsb sy; isb" ::: "memory");
     *max = mmio_r32(base + VIRTIO_MMIO_OFF_QUEUE_NUM_MAX);
     return VIRTIO_OK;
 }
 
-int virtio_transport_queue_setup(int slot, uint64_t desc_pa, uint64_t avail_pa, uint64_t used_pa, uint32_t qsize) {
+int virtio_transport_queue_max(int slot, uint32_t *max) {
+    return virtio_transport_queue_max_q(slot, 0, max);
+}
+
+int virtio_transport_queue_setup_q(int slot, int qidx, uint64_t desc_pa, uint64_t avail_pa, uint64_t used_pa, uint32_t qsize) {
     if (!slot_valid(slot)) return VIRTIO_ERR_BAD_SLOT;
+    if (qidx < 0 || qidx > 7) return VIRTIO_ERR_INVAL;
     if (qsize == 0) return VIRTIO_ERR_INVAL;
     if ((desc_pa & 0xfffULL) || (avail_pa & 0xfffULL) || (used_pa & 0xfffULL)) return VIRTIO_ERR_INVAL;
     uint64_t base = slot_base(slot);
@@ -131,7 +137,7 @@ int virtio_transport_queue_setup(int slot, uint64_t desc_pa, uint64_t avail_pa, 
     uint32_t ver = mmio_r32(base + VIRTIO_MMIO_OFF_VERSION);
     if (magic != VIRTIO_MMIO_MAGIC_H) return VIRTIO_ERR_BAD_VERSION;
     if (ver != 1 && ver != 2) return VIRTIO_ERR_BAD_VERSION;
-    mmio_w32(base + VIRTIO_MMIO_OFF_QUEUE_SEL, 0);
+    mmio_w32(base + VIRTIO_MMIO_OFF_QUEUE_SEL, (uint32_t)qidx);
     __asm__ volatile("dsb sy; isb" ::: "memory");
     uint32_t qmax = mmio_r32(base + VIRTIO_MMIO_OFF_QUEUE_NUM_MAX);
     if (qsize > qmax) return VIRTIO_ERR_NOSPC;
@@ -183,6 +189,10 @@ int virtio_transport_queue_setup(int slot, uint64_t desc_pa, uint64_t avail_pa, 
     }
     (void)st2;
     return VIRTIO_OK;
+}
+
+int virtio_transport_queue_setup(int slot, uint64_t desc_pa, uint64_t avail_pa, uint64_t used_pa, uint32_t qsize) {
+    return virtio_transport_queue_setup_q(slot, 0, desc_pa, avail_pa, used_pa, qsize);
 }
 
 int virtio_transport_notify(int slot, uint32_t qidx) {

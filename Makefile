@@ -154,6 +154,10 @@ house-virtio-blk-check: house-build
 	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.elf 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.elf 45 tcg $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 
+# Virtio-net (Track 5): virtio-net server, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user netdev 10.0.2.0/24
+house-virtio-net-check: house-build
+	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.elf 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
+
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
 # spike ticks, GIC dispatch + VM, house banner, and interactive shell,
@@ -171,4 +175,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check run check
