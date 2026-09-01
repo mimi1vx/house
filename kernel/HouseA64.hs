@@ -68,7 +68,10 @@ house_main = do
                 else
                   if c == 127 || c == 8
                     then if n == 0 then go b n else do c_putc 8; c_putc 32; c_putc 8; go b (n - 1)
-                    else do c_putc (fromIntegral c); poke (b `plusPtr` n) (fromIntegral c :: CChar); go b (n + 1)
+                    else
+                      if n >= 255
+                        then go b n
+                        else do c_putc (fromIntegral c); poke (b `plusPtr` n) (fromIntegral c :: CChar); go b (n + 1)
     handle line = case words line of
       [] -> return ()
       ("help" : _) -> withCString usage c_uart_puts
@@ -76,9 +79,10 @@ house_main = do
       ["clear"] -> withCString "\ESC[2J\ESC[H" c_uart_puts
       ["uname"] -> withCString "House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt\n" c_uart_puts
       ["uptime"] -> do s <- c_uptime; withCString ("up " ++ show s ++ " seconds\n") c_uart_puts
-      ["shutdown", "-r"] -> c_reset
-      ["shutdown", "-h"] -> c_off
-      ["shutdown"] -> withCString "usage: shutdown [-h|-r]\n" c_uart_puts
+      ("shutdown" : args) -> case args of
+        ["-r"] -> c_reset
+        ["-h"] -> c_off
+        _ -> withCString "usage: shutdown [-h|-r]\n" c_uart_puts
       ["lambda"] -> withCString "Too much to abstract!\n" c_uart_puts
       ["preempt"] -> do withCString (replicate 100 'a' ++ "\n") c_uart_puts; withCString (replicate 100 'b' ++ "\n") c_uart_puts
       ["wastemem", nStr] -> case reads nStr of
@@ -163,10 +167,13 @@ house_main = do
       r <- runH $ do
         -- special-case pl011 launches the server demo
         if name == "pl011"
-          then do PL011S.launchPL011Server; return (Right ())
+          then PL011S.launchPL011Server
           else do
             ep <- IPC.newEndpoint
-            NS.nsRegister name ep
+            res <- NS.nsRegister name ep
+            case res of
+              Left _ -> IPC.freeEndpoint ep >> return res
+              Right () -> return res
       case r of
         Left e -> withCString (show e ++ "\n") c_uart_puts
         Right () -> withCString ("registered " ++ name ++ "\n") c_uart_puts
@@ -201,7 +208,12 @@ house_main = do
                 res <- IPC.call ep msg
                 case res of
                   Left e -> do G.grantFree g; return (Left (show e))
-                  Right _ -> return (Right "ok")
+                  Right replyMsg -> do
+                    -- grant echo: server returns grant, reclaim or free it
+                    case G.grantRecv replyMsg of
+                      Just g' -> G.grantFree g'
+                      Nothing -> return ()
+                    return (Right "ok")
       case r of
         Left e -> withCString ("grant failed: " ++ e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts

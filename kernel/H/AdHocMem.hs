@@ -91,7 +91,7 @@ peekArray p n =
     let t = id :: IOUArray Int a -> IOUArray Int a
     sequence_
       [ liftIO . writeArray (t ma) i
-          =<< peekByteOff p (fromIntegral i)
+          =<< peekElemOff p i
       | i <- range b
       ]
     liftIO $ freeze ma

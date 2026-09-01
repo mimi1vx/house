@@ -158,7 +158,7 @@ void house_gic_send_sgi_to_core(uint32_t sgi_id, uint32_t core) {
 void house_gic_send_sgi(uint32_t sgi_id, uint32_t aff0_mask) {
     // Mask variant (single-cluster broadcast). For correctness across
     // clusters, iterate and use unicast helper per bit.
-    if ((aff0_mask & 0xffff) == 0) return;
+    if (aff0_mask == 0) return;
     // Fast path: if all targets share Aff1/Aff2/Aff3==0 and mask fits 16 bits,
     // we can use the direct encoding; otherwise unicast loop.
     // For now, always loop via unicast to stay correct for any Aff topology.

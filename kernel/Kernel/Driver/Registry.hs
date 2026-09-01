@@ -1,5 +1,5 @@
 -- | Driver registry wrapping 'Kernel.IPC.Nameservice'.
--- Lock order: @nsSem@ (from 'NS') outermost, @drvSem@ inner — never invert.
+-- Lock order: @drvSem@ outermost, @nsSem@ inner — never invert.
 -- Endpoint table's @endpointSem@ only around queue splice, never across registry calls.
 module Kernel.Driver.Registry
   ( registerDriver,

@@ -38,7 +38,7 @@ ptrFromWord :: Word64 -> Ptr a
 ptrFromWord = ptrFromWord64
 
 validPtr :: (Ptr a, Ptr a) -> Ptr a -> Bool
-validPtr (minAddr, maxAddr) p = p `minusPtr` minAddr >= 0 && maxAddr `minusPtr` p >= 0
+validPtr (minAddr, maxAddr) p = p `minusPtr` minAddr >= 0 && maxAddr `minusPtr` p > 0
 
 alignedPtr :: Int -> Ptr a -> Bool
 alignedPtr s p = p `alignPtr` s == p

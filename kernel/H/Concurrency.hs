@@ -3,6 +3,7 @@ module H.Concurrency (module H.Concurrency {- H,-}, Chan, MVar, QSem, ThreadId) 
 
 import Control.Concurrent (Chan, MVar, QSem, ThreadId)
 import qualified Control.Concurrent as IO
+import Control.Exception (bracket_)
 import H.Monad (H, liftIO, runH, trappedRunH)
 
 ------------------------ INTERFACE ---------------------------------------------
@@ -94,8 +95,4 @@ waitQSem sem = liftIO $ IO.waitQSem sem
 signalQSem sem = liftIO $ IO.signalQSem sem
 
 withQSem sem action =
-  do
-    waitQSem sem
-    x <- action
-    signalQSem sem
-    return x
+  liftIO $ bracket_ (runH $ waitQSem sem) (runH $ signalQSem sem) (runH action)

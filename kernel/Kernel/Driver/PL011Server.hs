@@ -9,20 +9,23 @@ where
 import Foreign.C.Types (CChar (..))
 import H.Concurrency (forkH)
 import H.Monad (H, liftIO)
-import Kernel.IPC.Endpoint (newEndpoint, recv, reply)
+import Kernel.IPC.Endpoint (freeEndpoint, newEndpoint, recv, reply)
 import Kernel.IPC.Nameservice (nsRegister)
-import Kernel.IPC.Types (Message (..))
+import Kernel.IPC.Types (IpcError, Message (..))
 
 foreign import ccall unsafe "uart_putc" c_uart_putc :: CChar -> IO ()
 
 -- | Launch PL011 server: new endpoint, register "pl011", loop on recv.
 -- Tag 0: putc each msgWords word (truncated to CChar); tag 1: grant echo; else error reply.
-launchPL011Server :: H ()
+launchPL011Server :: H (Either IpcError ())
 launchPL011Server = do
   ep <- newEndpoint
-  _ <- nsRegister "pl011" ep
-  _ <- forkH (loop ep)
-  return ()
+  r <- nsRegister "pl011" ep
+  case r of
+    Left e -> do freeEndpoint ep; return (Left e)
+    Right () -> do
+      _ <- forkH (loop ep)
+      return (Right ())
   where
     loop ep = do
       (msg, rv) <- recv ep

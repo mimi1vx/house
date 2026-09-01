@@ -27,7 +27,7 @@ uint64_t house_uptime_secs(void) {
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
     uint64_t freq = cntfrq();
     if (freq == 0) return 0;
-    uint64_t boot = house_boot_ticks[0] ? house_boot_ticks[0] : house_boot_ticks[0];
+    uint64_t boot = house_boot_ticks[0];
     // use current core's boot if available
     uint64_t mpidr; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     uint32_t core = (uint32_t)(mpidr & 0xFF);

@@ -438,7 +438,8 @@ ssize_t read(int fd, void *buf, size_t n)
             return 8;
         }
         fdt[s].last_ns = house_uptime_ns();
-        *(uint64_t *)buf = ++fdt[s].ticks;
+        ++fdt[s].ticks;
+        *(uint64_t *)buf = 1;
         return 8;
     }
     if (fdt[s].kind == FD_PIPE_R && fdt[s].len > 0 && buf) {

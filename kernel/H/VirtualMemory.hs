@@ -232,19 +232,19 @@ setPage (PageMap l0) vaddr (Just pinfo) | validVAddr vaddr =
       Just t -> return t
       Nothing -> error "L2 missing — allocPageMap should have created L1→L2"
     d2 <- peekElemOff l2 (l2Index vaddr)
-    l3 <- case tableFromDesc d2 of
-      Just t -> return t
+    ml3 <- case tableFromDesc d2 of
+      Just t -> return (Just t)
       Nothing -> do
         m <- P.allocPage
         case m of
-          Nothing -> return (nullPtr `plusPtr` (-4096)) -- sentinel for failure
+          Nothing -> return Nothing
           Just t -> do
             P.zeroPage t
             pokeElemOff l2 (l2Index vaddr) (descFromTable t)
-            return t
-    if l3 == (nullPtr `plusPtr` (-4096))
-      then return False
-      else do
+            return (Just t)
+    case ml3 of
+      Nothing -> return False
+      Just l3 -> do
         pokeElemOff l3 (l3Index vaddr) (pageInfoToDesc pinfo)
         invalidate l0 vaddr
         return True
