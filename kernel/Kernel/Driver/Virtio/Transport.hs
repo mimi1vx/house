@@ -11,6 +11,7 @@ module Kernel.Driver.Virtio.Transport
     virtioAck,
     virtioGetStatus,
     virtioStatusAll,
+    virtioLookup,
   )
 where
 
@@ -18,6 +19,7 @@ import Data.Bits ((.&.), (.|.))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word32, Word64)
+import Foreign.C.Types (CInt (..))
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (peek)
@@ -56,27 +58,29 @@ virtioSem :: QSem
 virtioSem = unsafePerformH $ newQSem 1
 
 -- FFI
-foreign import ccall unsafe "virtio_probe_slot" c_probe_slot :: Int -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> IO Int
+foreign import ccall unsafe "virtio_probe_slot" c_probe_slot :: Int -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> IO CInt
 
-foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int
+foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO CInt
 
-foreign import ccall unsafe "virtio_transport_set_features" c_set_features :: Int -> Word64 -> IO Int
+foreign import ccall unsafe "virtio_transport_set_features" c_set_features :: Int -> Word64 -> IO CInt
 
-foreign import ccall unsafe "virtio_transport_get_status" c_get_status :: Int -> Ptr Word32 -> IO Int
+foreign import ccall unsafe "virtio_transport_get_status" c_get_status :: Int -> Ptr Word32 -> IO CInt
 
-foreign import ccall unsafe "virtio_transport_set_status" c_set_status :: Int -> Word32 -> IO Int
+foreign import ccall unsafe "virtio_transport_set_status" c_set_status :: Int -> Word32 -> IO CInt
 
-foreign import ccall unsafe "virtio_transport_queue_max" c_queue_max :: Int -> Ptr Word32 -> IO Int
+foreign import ccall unsafe "virtio_transport_queue_max" c_queue_max :: Int -> Ptr Word32 -> IO CInt
 
-foreign import ccall unsafe "virtio_transport_queue_setup" c_queue_setup :: Int -> Word64 -> Word64 -> Word64 -> Word32 -> IO Int
+foreign import ccall unsafe "virtio_transport_queue_setup" c_queue_setup :: Int -> Word64 -> Word64 -> Word64 -> Word32 -> IO CInt
 
-foreign import ccall unsafe "virtio_transport_notify" c_notify :: Int -> Word32 -> IO Int
+foreign import ccall unsafe "virtio_transport_notify" c_notify :: Int -> Word32 -> IO CInt
 
 foreign import ccall unsafe "virtio_transport_interrupt_status" c_int_status :: Int -> IO Word32
 
 foreign import ccall unsafe "virtio_transport_ack" c_ack :: Int -> Word32 -> IO ()
 
 foreign import ccall unsafe "virtio_transport_dc_flush" c_dc_flush :: Word64 -> Word64 -> IO ()
+
+foreign import ccall unsafe "virtio_blk_save_queue" c_save_blk_queue :: Int -> Word64 -> Word64 -> Word64 -> Word32 -> IO ()
 
 wantedMask :: Word64
 wantedMask = virtioFeatureMask [VirtioFVersion1, VirtioFRingEventIdx]
@@ -109,20 +113,21 @@ virtioInit slot
               -- Init transport (ACK|DRIVER)
               initRes <- liftIO $ alloca $ \pLo -> alloca $ \pHi -> c_init slot pLo pHi
               if initRes /= 0
-                then return (Left (cErrToVirtioError initRes))
+                then do Dmesg.dmesgLog ("virtio init slot " ++ show slot ++ " initRes=" ++ show initRes); return (Left (cErrToVirtioError (fromIntegral initRes)))
                 else do
                   featRes <- liftIO $ c_set_features slot wantedMask
                   if featRes /= 0
                     then do
                       _ <- liftIO $ c_set_status slot 0x80
-                      return (Left (cErrToVirtioError featRes))
+                      Dmesg.dmesgLog ("virtio featRes slot " ++ show slot ++ "=" ++ show featRes)
+                      return (Left (cErrToVirtioError (fromIntegral featRes)))
                     else do
                       -- Queue max
                       qmaxRes <- liftIO $ alloca $ \pMax -> do
                         r <- c_queue_max slot pMax
                         if r /= 0 then return (Left r) else do v <- peek pMax; return (Right v)
                       case qmaxRes of
-                        Left e -> return (Left (cErrToVirtioError e))
+                        Left e -> do Dmesg.dmesgLog ("virtio qmaxRes slot " ++ show slot ++ "=" ++ show e); return (Left (cErrToVirtioError (fromIntegral e)))
                         Right qmax -> do
                           let qsize = min qmax 64
                           if qsize == 0
@@ -138,8 +143,14 @@ virtioInit slot
                                   liftIO $ c_dc_flush (queueUsedPa vq) 4096
                                   setupRes <- liftIO $ c_queue_setup slot (queueDescPa vq) (queueAvailPa vq) (queueUsedPa vq) qsize
                                   if setupRes /= 0
-                                    then do freeQueue vq; return (Left (cErrToVirtioError setupRes))
+                                    then do
+                                      qmaxDbg <- liftIO $ alloca $ \pM -> do _ <- c_queue_max slot pM; peek pM
+                                      stDbg <- liftIO $ alloca $ \pS -> do _ <- c_get_status slot pS; peek pS
+                                      Dmesg.dmesgLog ("virtio setupRes slot " ++ show slot ++ "=" ++ show setupRes ++ " qsize=" ++ show qsize ++ " qmax=" ++ show qmaxDbg ++ " status=" ++ show stDbg)
+                                      freeQueue vq
+                                      return (Left (cErrToVirtioError (fromIntegral setupRes)))
                                     else do
+                                      liftIO $ c_save_blk_queue slot (queueDescPa vq) (queueAvailPa vq) (queueUsedPa vq) qsize
                                       -- Set DRIVER_OK
                                       stRes <- liftIO $ alloca $ \pSt -> do
                                         _ <- c_get_status slot pSt
@@ -148,7 +159,7 @@ virtioInit slot
                                         r <- c_set_status slot st2
                                         return r
                                       if stRes /= 0
-                                        then do freeQueue vq; return (Left (cErrToVirtioError stRes))
+                                        then do Dmesg.dmesgLog ("virtio stRes slot " ++ show slot ++ "=" ++ show stRes); freeQueue vq; return (Left (cErrToVirtioError (fromIntegral stRes)))
                                         else do
                                           -- Verify not FAILED
                                           stCheck <- liftIO $ alloca $ \pSt -> do _ <- c_get_status slot pSt; peek pSt
@@ -208,7 +219,7 @@ virtioNotify slot qidx
             liftIO $ c_dc_flush (queueDescPa vq) 4096
             liftIO $ c_dc_flush (queueAvailPa vq) 4096
             r <- liftIO $ c_notify slot qidx
-            if r /= 0 then return (Left (cErrToVirtioError r)) else return (Right ())
+            if r /= 0 then return (Left (cErrToVirtioError (fromIntegral r))) else return (Right ())
 
 -- | Read InterruptStatus.
 virtioInterruptStatus :: Int -> H Word32
@@ -229,8 +240,14 @@ virtioGetStatus slot
   | otherwise = do
       r <- liftIO $ alloca $ \pSt -> do
         rc <- c_get_status slot pSt
-        if rc /= 0 then return (Left (cErrToVirtioError rc)) else do v <- peek pSt; return (Right v)
+        if rc /= 0 then return (Left (cErrToVirtioError (fromIntegral rc))) else do v <- peek pSt; return (Right v)
       return r
+
+-- | Lookup device by slot (if initialized).
+virtioLookup :: Int -> H (Maybe VirtioDevice)
+virtioLookup slot
+  | not (slotValid slot) = return Nothing
+  | otherwise = withQSem virtioSem $ do m <- readRef virtioMap; return (Map.lookup slot m)
 
 -- | All slots status.
 virtioStatusAll :: H [(Int, Word32)]

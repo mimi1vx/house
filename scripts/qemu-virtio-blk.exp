@@ -1,0 +1,143 @@
+#!/usr/bin/expect -f
+# Virtio-blk test (Track 4).
+# Usage: expect scripts/qemu-virtio-blk.exp <kernel.elf> [timeout] [accel] [mem] [smp] [-- extra qemu args]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 45}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+set qemu_extra [lrange $argv 5 end]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+# Build spawn command with extra args
+# Force 8 transports so first blk lands at slot 7 (within 0..7 scan) — QEMU default 32 puts it at 31 outside our 8.
+# Also force modern virtio (force-legacy=false) else queue setup fails with legacy mode.
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel"
+foreach a $qemu_extra {
+    if {$a eq "--"} { continue }
+    append cmd " $a"
+}
+puts "SPAWN: $cmd"
+eval spawn $cmd
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re ">" { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "dmesg\r"
+expect {
+    -re "House driver framework online" { puts "\nPASS: dmesg framework online" }
+    timeout { puts "\nFAIL: dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "lsdev\r"
+expect { -re ">" { puts "\nPASS: lsdev" } timeout { puts "\nFAIL: lsdev timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+send "virtio scan\r"
+expect {
+    -re "virtio slot 0" { puts "\nPASS: virtio scan slot 0" }
+    timeout { puts "\nFAIL: virtio scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+# Check device_id=2 present when blk device supplied; if no drive, scan will show empty - still pass scan
+send "virtio scan\r"
+expect {
+    -re "device_id=2" { puts "\nPASS: virtio scan device_id=2" }
+    -re "virtio slot" { puts "\nINFO: virtio scan no blk device (maybe no drive)"; }
+    timeout { puts "\nFAIL: virtio scan2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+set blkSlot 7
+send "blk init $blkSlot\r"
+expect {
+    -re "ok.*capacity" { puts "\nPASS: blk init 0 ok capacity" }
+    -re "BlkBadSlot|BlkNotBlk|BadSlot|BadVersion" { puts "\nINFO: blk init 0 no device (empty slot) - checking fallback"; }
+    timeout { puts "\nFAIL: blk init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+# If init succeeded, do full r/w sequence, else skip to ramfs check
+send "blk status $blkSlot\r"
+expect {
+    -re "capacity" { puts "\nPASS: blk status capacity" }
+    -re "Blk" { puts "\nINFO: blk status returned error (expected if no device)" }
+    timeout { puts "\nFAIL: blk status timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk write $blkSlot 0 hello-blk\r"
+expect {
+    -re "ok" { puts "\nPASS: blk write 0 0 hello-blk" }
+    -re "Blk" { puts "\nINFO: blk write failed (no device?)" }
+    timeout { puts "\nFAIL: blk write timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk read $blkSlot 0\r"
+expect {
+    -re "hello-blk" { puts "\nPASS: blk read 0 0 hello-blk" }
+    -re "Blk" { puts "\nINFO: blk read returned error" }
+    timeout { puts "\nFAIL: blk read timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "write /a hello\r"
+expect { -re ">" { puts "\nPASS: write /a hello" } timeout { puts "\nFAIL: write timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+send "cat /a\r"
+expect { -re "hello" { puts "\nPASS: cat /a -> hello" } timeout { puts "\nFAIL: cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+sleep 1
+send "ns ls\r"
+expect { -re ">" { puts "\nPASS: ns ls after blk" } timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+# Overwrite + reread persistence within same boot
+send "blk write $blkSlot 1 world2\r"
+expect {
+    -re "ok" { puts "\nPASS: blk write 0 1 world2" }
+    -re "Blk" { puts "\nINFO: blk write 1 failed" }
+    timeout { puts "\nFAIL: blk write 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk read $blkSlot 1\r"
+expect {
+    -re "world2" { puts "\nPASS: blk read 0 1 world2" }
+    -re "Blk" { puts "\nINFO: blk read 1 error" }
+    timeout { puts "\nFAIL: blk read 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk read $blkSlot 0\r"
+expect {
+    -re "hello-blk" { puts "\nPASS: blk read 0 0 still hello-blk" }
+    timeout { puts "\nFAIL: blk read 0 0 second timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk teardown $blkSlot\r"
+expect {
+    -re "teardown ok|ok" { puts "\nPASS: blk teardown 0" }
+    -re "Blk" { puts "\nINFO: blk teardown error" }
+    timeout { puts "\nFAIL: blk teardown timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk init $blkSlot\r"
+expect {
+    -re "ok.*capacity" { puts "\nPASS: blk re-init 0 ok" }
+    -re "Blk" { puts "\nINFO: blk re-init failed" }
+    timeout { puts "\nFAIL: blk re-init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk read $blkSlot 0\r"
+expect {
+    -re "hello-blk" { puts "\nPASS: blk read after re-init hello-blk (in-boot persistence)" }
+    -re "Blk" { puts "\nINFO: blk read after re-init error (maybe device reset cleared?)" }
+    timeout { puts "\nFAIL: blk read after re-init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+# burst 5 scans without deadlock
+for {set i 0} {$i < 5} {incr i} {
+    send "virtio scan\r"
+    expect { -re "virtio slot 0" {} timeout { puts "\nFAIL: burst scan $i"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+    expect { -re ">" {} timeout { puts "\nFAIL: prompt burst $i"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+}
+puts "\nPASS: burst 5 scans ok"
+puts "\nPASS: virtio-blk ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

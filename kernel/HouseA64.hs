@@ -22,6 +22,8 @@ import qualified Kernel.Driver.IRQ as DIRQ
 import qualified Kernel.Driver.PL011Server as PL011S
 import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (showDriverInfo)
+import qualified Kernel.Driver.Virtio.Blk as Blk
+import qualified Kernel.Driver.Virtio.Blk.Types as BlkTypes
 import qualified Kernel.Driver.Virtio.Queue as VQueue
 import qualified Kernel.Driver.Virtio.Transport as VTrans
 import qualified Kernel.Driver.Virtio.Types as VTypes
@@ -130,6 +132,13 @@ house_main = do
       ["virtio", "irqtest", s] -> handleVirtioIrqtest s
       ["virtio", "teardown", s] -> handleVirtioTeardown s
       ["virtio"] -> withCString "usage: virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot>\n" c_uart_puts
+      ["blk", "init", s] -> handleBlkInit s
+      ["blk", "status", s] -> handleBlkStatus s
+      ["blk", "read", s, lba] -> handleBlkRead s lba
+      ["blk", "write", s, lba, txt] -> handleBlkWrite s lba txt
+      ["blk", "write", s, lba] -> handleBlkWrite s lba ""
+      ["blk", "teardown", s] -> handleBlkTeardown s
+      ["blk"] -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot>\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -290,6 +299,41 @@ house_main = do
           Left e -> withCString (VTypes.virtioErrorToString e ++ "\n") c_uart_puts
           Right () -> withCString "teardown ok\n" c_uart_puts
       _ -> withCString "usage: virtio teardown <slot>\n" c_uart_puts
+    handleBlkInit s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Blk.blkServerInit n)
+        case r of
+          Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
+          Right dev -> withCString ("ok capacity=" ++ show (Blk.blkCapacity dev) ++ " sectors (" ++ show (Blk.blkCapacity dev `div` 8) ++ " blocks) slot=" ++ show (Blk.blkSlot dev) ++ "\n") c_uart_puts
+      _ -> withCString "usage: blk init <slot>\n" c_uart_puts
+    handleBlkStatus s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Blk.blkGetCapacity n)
+        case r of
+          Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
+          Right cap -> withCString ("capacity " ++ show cap ++ " sectors (" ++ show (cap `div` 8) ++ " blocks) slot=" ++ show n ++ "\n") c_uart_puts
+      _ -> withCString "usage: blk status <slot>\n" c_uart_puts
+    handleBlkRead s lbaStr = case (reads s, reads lbaStr) of
+      ([(n, "")], [(lba, "")]) -> do
+        r <- runH (Blk.blkReadBlocks n lba)
+        case r of
+          Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
+          Right txt -> withCString (txt ++ "\n") c_uart_puts
+      _ -> withCString "usage: blk read <slot> <lba>\n" c_uart_puts
+    handleBlkWrite s lbaStr txt = case (reads s, reads lbaStr) of
+      ([(n, "")], [(lba, "")]) -> do
+        r <- runH (Blk.blkWriteBlocks n lba txt)
+        case r of
+          Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "ok\n" c_uart_puts
+      _ -> withCString "usage: blk write <slot> <lba> <text>\n" c_uart_puts
+    handleBlkTeardown s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Blk.blkServerTeardown n)
+        case r of
+          Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "teardown ok\n" c_uart_puts
+      _ -> withCString "usage: blk teardown <slot>\n" c_uart_puts
     handleUname args = do
       let sysname = "House"
           nodename = "house"
@@ -390,7 +434,8 @@ house_main = do
           "       ipc ping <nsName> -- sync call to endpoint",
           "       ipc grant -- alloc one page and send to pl011",
           "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)",
-          "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)"
+          "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)",
+          "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B)"
         ]
     seqFib :: Int -> Int
     seqFib n

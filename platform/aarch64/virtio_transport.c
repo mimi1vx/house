@@ -147,7 +147,41 @@ int virtio_transport_queue_setup(int slot, uint64_t desc_pa, uint64_t avail_pa, 
     mmio_w32(base + VIRTIO_MMIO_OFF_QUEUE_READY, 1);
     __asm__ volatile("dsb sy; isb" ::: "memory");
     uint32_t ready = mmio_r32(base + VIRTIO_MMIO_OFF_QUEUE_READY);
-    if (ready != 1) return VIRTIO_ERR_NOT_READY;
+    uint32_t st2 = mmio_r32(base + VIRTIO_MMIO_OFF_STATUS);
+    if (ready != 1) {
+        // debug via uart hex
+        {
+            // simple: print ready and status via uart_puts
+            uart_puts("virtio queue ready fail ready=0x");
+            const char *hex="0123456789abcdef";
+            for(int i=7;i>=0;i--) {
+                char c = hex[(ready >> (i*4)) & 0xF];
+                char tmp[2] = {c,0};
+                uart_puts(tmp);
+            }
+            uart_puts(" status=0x");
+            for(int i=7;i>=0;i--) {
+                char c = hex[(st2 >> (i*4)) & 0xF];
+                char tmp[2] = {c,0};
+                uart_puts(tmp);
+            }
+            uart_puts(" qmax=0x");
+            for(int i=7;i>=0;i--) {
+                char c = hex[(qmax >> (i*4)) & 0xF];
+                char tmp[2] = {c,0};
+                uart_puts(tmp);
+            }
+            uart_puts(" qsize=0x");
+            for(int i=7;i>=0;i--) {
+                char c = hex[(qsize >> (i*4)) & 0xF];
+                char tmp[2] = {c,0};
+                uart_puts(tmp);
+            }
+            uart_puts("\n");
+        }
+        return VIRTIO_ERR_NOT_READY;
+    }
+    (void)st2;
     return VIRTIO_OK;
 }
 
