@@ -15,7 +15,13 @@ import Foreign.Storable (poke)
 import GHC.Conc (getNumCapabilities, getNumProcessors)
 import qualified H.FileSystem as FS
 import H.Monad (runH)
+import qualified Kernel.Driver.Dmesg as Dmesg
+import qualified Kernel.Driver.GIC as DGIC
+import qualified Kernel.Driver.IRQ as DIRQ
 import qualified Kernel.Driver.PL011Server as PL011S
+import qualified Kernel.Driver.Registry as DrvReg
+import Kernel.Driver.Types (showDriverInfo)
+import qualified Kernel.Driver.VirtioProbe as VProbe
 import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
 import qualified Kernel.IPC.Nameservice as NS
@@ -39,6 +45,10 @@ house_main :: IO ()
 house_main = do
   withCString "Welcome to the House shell! Enter help to see a list of commands.\n\n" c_uart_puts
   _ <- runH FS.fsInit
+  _ <- runH Dmesg.dmesgInit
+  _ <- runH (Dmesg.dmesgLog "House driver framework online")
+  -- Link driver GIC/IRQ helpers into closure (probe-only track keeps them unused at runtime)
+  _ <- runH (return (DGIC.enableSpi, DGIC.disableSpi, DIRQ.registerIrqForwarding) >> return ())
   loop
   where
     loop = do
@@ -101,6 +111,11 @@ house_main = do
       ["ipc", "ping"] -> withCString "usage: ipc ping <nsName>\n" c_uart_puts
       ["ipc", "grant"] -> handleIpcGrant
       ["ipc"] -> withCString "usage: ipc ping <nsName> | ipc grant\n" c_uart_puts
+      ["lsdev"] -> handleLsdev
+      ["dmesg"] -> handleDmesg
+      ["dmesg", "clear"] -> handleDmesgClear
+      ["virtio", "scan"] -> handleVirtioScan
+      ["virtio"] -> withCString "usage: virtio scan\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -190,6 +205,30 @@ house_main = do
       case r of
         Left e -> withCString ("grant failed: " ++ e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
+    handleLsdev = do
+      ds <- runH DrvReg.listDrivers
+      if null ds
+        then withCString "(empty)\n" c_uart_puts
+        else withCString (unlines (map showDriverInfo ds)) c_uart_puts
+    handleDmesg = do
+      xs <- runH Dmesg.dmesgRead
+      if null xs
+        then withCString "(empty)\n" c_uart_puts
+        else withCString (unlines xs) c_uart_puts
+    handleDmesgClear = do
+      _ <- runH Dmesg.dmesgClear
+      withCString "cleared\n" c_uart_puts
+    handleVirtioScan = do
+      infos <- runH VProbe.virtioScan
+      let fmt i =
+            "virtio slot "
+              ++ show (VProbe.vsiSlot i)
+              ++ ": "
+              ++ ( if VProbe.vsiPresent i
+                     then "device_id=" ++ show (VProbe.vsiDeviceId i) ++ " vendor=0x" ++ showHex (fromIntegral (VProbe.vsiVendorId i)) ++ " spi=" ++ maybe "?" show (VProbe.vsiSpi i)
+                     else "empty"
+                 )
+      withCString (unlines (map fmt infos)) c_uart_puts
     showFsError e = case e of
       FS.ENOENT -> "ENOENT: No such file or directory"
       FS.EEXIST -> "EEXIST: File exists"
@@ -217,7 +256,8 @@ house_main = do
           "       ns ls -- list IPC names",
           "       ns reg <name> -- register name (pl011 launches server)",
           "       ipc ping <nsName> -- sync call to endpoint",
-          "       ipc grant -- alloc one page and send to pl011"
+          "       ipc grant -- alloc one page and send to pl011",
+          "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)"
         ]
     seqFib :: Int -> Int
     seqFib n

@@ -1,0 +1,125 @@
+#!/usr/bin/expect -f
+# Driver framework test for House/aarch64 (Track 2).
+# Registry + dmesg + virtio scan + SPI plumbing + ns + ramfs + IPC.
+# Usage: expect scripts/qemu-driver.exp <kernel.elf> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 30}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# dmesg should contain framework online
+send "dmesg\r"
+expect {
+    -re "House driver framework online" { puts "\nPASS: dmesg framework online" }
+    timeout { puts "\nFAIL: dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# lsdev should run without hang (empty at boot)
+send "lsdev\r"
+expect {
+    -re "> " { puts "\nPASS: lsdev empty ok" }
+    timeout { puts "\nFAIL: lsdev timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# virtio scan should print slot 0 (empty on vanilla virt)
+send "virtio scan\r"
+expect {
+    -re "virtio slot 0" { puts "\nPASS: virtio scan slot 0" }
+    timeout { puts "\nFAIL: virtio scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after virtio scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ns ls still functional
+send "ns ls\r"
+expect {
+    -re "> " { puts "\nPASS: ns ls after virtio scan" }
+    timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# register pl011 via ns, then lsdev should list pl011 if driver registry wired?
+# Currently registry is separate; we test ns reg path and later lsdev shows empty or pl011.
+# Use ns reg pl011 to launch server
+send "ns reg pl011\r"
+expect {
+    -re "registered pl011" { puts "\nPASS: ns reg pl011" }
+    timeout { puts "\nFAIL: ns reg pl011 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ns reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "lsdev\r"
+expect {
+    -re "> " { puts "\nPASS: lsdev after ns reg" }
+    timeout { puts "\nFAIL: lsdev after reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# dmesg should have virtio slot logs
+send "dmesg\r"
+expect {
+    -re "virtio slot" { puts "\nPASS: dmesg has virtio slot" }
+    timeout { puts "\nFAIL: dmesg virtio timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after second dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ramfs still live
+send "write /a hello\r"
+expect {
+    -re "> " { puts "\nPASS: write /a hello" }
+    timeout { puts "\nFAIL: write /a timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /a\r"
+expect {
+    -re "hello" { puts "\nPASS: cat /a -> hello" }
+    timeout { puts "\nFAIL: cat /a timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ipc ping pl011 still ok
+send "ipc ping pl011\r"
+expect {
+    -re "ok" { puts "\nPASS: ipc ping pl011 -> ok" }
+    timeout { puts "\nFAIL: ipc ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ipc ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# burst 5 virtio scans without deadlock
+for {set i 0} {$i < 5} {incr i} {
+    send "virtio scan\r"
+    expect {
+        -re "virtio slot 0" {}
+        timeout { puts "\nFAIL: burst virtio scan $i timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    expect {
+        -re "> " {}
+        timeout { puts "\nFAIL: prompt after burst scan $i timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+}
+puts "\nPASS: burst 5 virtio scans ok"
+puts "\nPASS: driver ok"
+catch {exec kill -9 [exp_pid]}
+exit 0
