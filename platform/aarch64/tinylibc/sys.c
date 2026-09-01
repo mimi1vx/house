@@ -360,12 +360,12 @@ int house_timerfd_due(int fd)
     int s = fd_slot(fd);
     if (s < 0 || fdt[s].kind != FD_TIMER)
         return 0;
-    if (house_isr_active) {
+    if (__atomic_load_n(&house_isr_active, __ATOMIC_SEQ_CST)) {
         // Single global ticker: any pending tick makes timerfd ready,
         // regardless of which core's ISR fired and which core polls.
         // This allows secondary timer disabled (pending[0] only) to be
         // visible to ticker threads pinned to any core.
-        for (int i = 0; i < HOUSE_MAX_SMP; i++) if (house_isr_pending[i] > 0) return 1;
+        for (int i = 0; i < HOUSE_MAX_SMP; i++) if (__atomic_load_n(&house_isr_pending[i], __ATOMIC_SEQ_CST) > 0) return 1;
         return 0;
     }
     if (!tick_interval_ns)
@@ -422,11 +422,17 @@ ssize_t read(int fd, void *buf, size_t n)
             *__errno_location() = EAGAIN;
             return -1;
         }
-        if (house_isr_active) {
+        if (__atomic_load_n(&house_isr_active, __ATOMIC_SEQ_CST)) {
             // Consume any pending tick, regardless of current core, to match
             // house_timerfd_due's global readiness (single ticker, secondary
-            // timer disabled, pending[0] only).
-            for (int i = 0; i < HOUSE_MAX_SMP; i++) if (house_isr_pending[i] > 0) { house_isr_pending[i]--; break; }
+            // timer disabled, pending[0] only). Use atomic decrement.
+            for (int i = 0; i < HOUSE_MAX_SMP; i++) {
+                uint64_t v = __atomic_load_n(&house_isr_pending[i], __ATOMIC_SEQ_CST);
+                if (v > 0) {
+                    __atomic_fetch_sub(&house_isr_pending[i], 1, __ATOMIC_SEQ_CST);
+                    break;
+                }
+            }
             ++fdt[s].ticks;
             *(uint64_t *)buf = 1;
             return 8;

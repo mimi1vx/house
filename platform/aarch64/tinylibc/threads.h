@@ -69,6 +69,7 @@ void house_thread_switch(house_thread_t *old_thr, house_thread_t *new_thr);
 void house_sched_maybe_preempt_from_isr(void);
 void house_sched_ipi_handler(void);
 void house_sched_kick(int core);
+void house_threads_rebalance(void);
 
 extern house_spinlock_t sched_lock;
 extern volatile int house_sched_deferred[HOUSE_MAX_SMP];

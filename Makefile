@@ -118,6 +118,12 @@ house-posix-check:
 # SMP check (phase 9): N cores online + Haskell parallel (parametrised by SMP_N, default 2)
 # Use SMP_N=4 make smp-check for the >2 gate (4G working RAM, tested to 8, ceiling 16).
 smp-check:
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C $(SPIKE_DIR) clean
+	container run --platform linux/arm64 --rm \
+	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  make -C kernel clean
 	$(MAKE) house-build SMP_N=$(SMP_N)
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) $(SMP_N)

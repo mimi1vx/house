@@ -93,7 +93,7 @@ void c_handle_irq(uint64_t *gpr, void *fpi)
         uint32_t core = house_cpu_id();
         __asm__ volatile("msr CNTV_TVAL_EL0, %0" :: "r"((uint64_t)house_timer_interval));
         __asm__ volatile("isb");
-        if (house_isr_active) house_isr_pending[core]++;
+        if (house_isr_active) __atomic_fetch_add(&house_isr_pending[core], 1, __ATOMIC_SEQ_CST);
         // Timer tick is via pending counter + timerfd, not via H.Interrupts
         // ring. Suppress MPSC ring push for timer to avoid contention with N
         // cores each firing at 100Hz (SPSC assumption).
@@ -138,21 +138,18 @@ extern void house_mmu_early(void);
 void c_start_secondary(uint64_t core_id)
 {
     uint32_t core = (uint32_t)core_id;
-    // Secondary cores: init GIC redistributor + timers + thread idle
     uart_puts("[house] c_start_secondary core "); uart_putc('0'+core); uart_puts("\n");
     house_gic_init_secondary(core);
     house_timer_init_secondary(core);
     house_threads_init_secondary(core);
-    // Signal online: set bit and DSB
-    house_smp_online_mask |= (1u << core);
+    // Signal online: atomic OR and DSB
+    __atomic_fetch_or(&house_smp_online_mask, 1u << core, __ATOMIC_SEQ_CST);
     __asm__ volatile("dmb sy; dsb sy; sev");
     uart_puts("[house] secondary core "); uart_putc('0'+core); uart_puts(" online\n");
-    // Idle loop: wait for work via IPI/wfi, handle irq via vectors
+    // Idle loop: wait for work via IPI/wfe with SEV fallback.
     house_irq_enable();
     for (;;) {
-        __asm__ volatile("wfi");
-        // IPI handler will have enqueued work; scheduler will switch via house_sched_yield
-        // For now, just yield if runnable
+        __asm__ volatile("wfe");
         extern void house_sched_yield(void);
         house_sched_yield();
     }
@@ -176,15 +173,15 @@ void c_start(void)
             int64_t r = psci_cpu_on((uint64_t)i, entry, (uint64_t)i);
             uart_puts("[house] psci_cpu_on "); uart_putc('0'+i); uart_puts(" -> "); uart_puthex((uint64_t)r); uart_puts("\n");
         }
-        // Wait for online mask (timeout ~1s)
+        // Wait for online mask (timeout ~2s for TCG 4 cores)
         uint64_t start_ns;
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(start_ns));
         uint64_t freq; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
         uint32_t want = (house_smp_n >= 32) ? 0xFFFFFFFFu : ((1u << house_smp_n)-1);
-        while ((house_smp_online_mask & want) != want) {
+        while ((__atomic_load_n(&house_smp_online_mask, __ATOMIC_SEQ_CST) & want) != want) {
             __asm__ volatile("wfe");
             uint64_t now; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
-            if (freq && (now - start_ns) > freq) break; // 1s timeout
+            if (freq && (now - start_ns) > freq * 2) break; // 2s timeout
         }
         uart_puts("[house] smp: "); uart_puthex(house_smp_online_mask); uart_puts(" online mask (want "); uart_puthex(want); uart_puts(")\n");
         int online = 0;

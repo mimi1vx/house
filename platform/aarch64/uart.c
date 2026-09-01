@@ -1,7 +1,9 @@
 #include <stdint.h>
 #include "uart.h"
+#include "spinlock.h"
 
 #define UART_BASE 0x09000000UL
+static house_spinlock_t uart_lock = {0};
 #define DR        (*(volatile uint32_t *)(UART_BASE + 0x000))
 #define FR        (*(volatile uint32_t *)(UART_BASE + 0x018))
 #define IBRD      (*(volatile uint32_t *)(UART_BASE + 0x024))
@@ -24,18 +26,29 @@ void uart_init(void)
 
 void uart_putc(char c)
 {
+    house_spin_lock(&uart_lock);
     if (c == '\n') {
         while (FR & FR_TXFF) ;
         DR = '\r';
     }
     while (FR & FR_TXFF) ;
     DR = (uint8_t)c;
+    house_spin_unlock(&uart_lock);
 }
 
 void uart_puts(const char *s)
 {
-    while (*s)
-        uart_putc(*s++);
+    house_spin_lock(&uart_lock);
+    while (*s) {
+        char c = *s++;
+        if (c == '\n') {
+            while (FR & FR_TXFF) ;
+            DR = '\r';
+        }
+        while (FR & FR_TXFF) ;
+        DR = (uint8_t)c;
+    }
+    house_spin_unlock(&uart_lock);
 }
 
 int uart_getc_blocking(void)

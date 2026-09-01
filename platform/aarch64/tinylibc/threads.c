@@ -129,11 +129,13 @@ void house_thread_init_main(void) {
 
 void house_threads_init_secondary(uint32_t core) {
     if (core >= HOUSE_MAX_SMP) return;
-    // Allocate idle thread for this core if not yet
+    house_spin_lock(&sched_lock);
     house_thread_t *idle = alloc_thread();
-    if (!idle) return;
-    idle->tid = next_tid++;
+    if (!idle) { house_spin_unlock(&sched_lock); return; }
     idle->state = HOUSE_THR_RUNNING;
+    int tid = __atomic_fetch_add(&next_tid, 1, __ATOMIC_SEQ_CST);
+    house_spin_unlock(&sched_lock);
+    idle->tid = tid;
     idle->detached = 0;
     idle->exited = 0;
     idle->stack_base = NULL;
@@ -156,6 +158,42 @@ void house_threads_init_secondary(uint32_t core) {
     house_current_thr[core] = idle;
 }
 
+void house_threads_rebalance(void) {
+    // Called after hs_init to spread early caps (tid 2..9) across cores.
+    house_spin_lock(&sched_lock);
+    for (int i = 0; i < HOUSE_MAX_THREADS; i++) {
+        house_thread_t *t = &threads[i];
+        if (t->state == HOUSE_THR_UNUSED) continue;
+        if (t->tid < 2 || t->tid >= 10) continue;
+        int target = t->tid % house_smp_n;
+        uint32_t want = 1u << target;
+        if (t->affinity == want) continue;
+        // If thread is currently running on its old core, don't move now; next yield will handle.
+        // If runnable and queued, move between queues.
+        if (t->state == HOUSE_THR_RUNNABLE) {
+            for (int c = 0; c < house_smp_n; c++) {
+                house_thread_t *prev = NULL;
+                house_thread_t *cur = run_head[c];
+                while (cur) {
+                    if (cur == t) {
+                        if (prev) prev->next = cur->next;
+                        else run_head[c] = cur->next;
+                        if (run_tail[c] == cur) run_tail[c] = prev;
+                        cur->next = NULL;
+                        enqueue_run_core(target, cur);
+                        if ((uint32_t)target != house_cpu_id()) house_sched_kick(target);
+                        goto next_thread;
+                    }
+                    prev = cur; cur = cur->next;
+                }
+            }
+        }
+        t->affinity = want;
+next_thread: ;
+    }
+    house_spin_unlock(&sched_lock);
+}
+
 void house_sched_wake(house_thread_t *thr) {
     if (!thr) return;
     house_spin_lock(&sched_lock);
@@ -167,15 +205,16 @@ void house_sched_wake(house_thread_t *thr) {
 
 void house_sched_ipi_handler(void) {
     uint32_t core = house_cpu_id();
-    if (core < HOUSE_MAX_SMP) house_ipi_pending[core] = 1;
-    __asm__ volatile("dsb sy; isb");
+    if (core < HOUSE_MAX_SMP) __atomic_store_n(&house_ipi_pending[core], 1, __ATOMIC_SEQ_CST);
+    __asm__ volatile("dsb sy; sev; isb");
 }
 
 void house_sched_kick(int core) {
     if (core < 0 || core >= house_smp_n) return;
     if (core >= 32) return;
-    if (!(house_smp_online_mask & (1u << core))) return;
+    if (!(__atomic_load_n(&house_smp_online_mask, __ATOMIC_SEQ_CST) & (1u << core))) return;
     house_gic_send_sgi_to_core(SGI_IPI, (uint32_t)core);
+    __asm__ volatile("dsb sy; sev; isb");
 }
 
 void house_sched_block(void) {
@@ -186,7 +225,7 @@ void house_sched_block(void) {
     if (!next) {
         house_spin_unlock(&sched_lock);
         __asm__ volatile("msr daifclr, #2" ::: "memory");
-        __asm__ volatile("wfi");
+        __asm__ volatile("wfe");
         __asm__ volatile("msr daifset, #2" ::: "memory");
         house_spin_lock(&sched_lock);
         next = dequeue_run_core(core);
@@ -206,16 +245,9 @@ void house_sched_block(void) {
 
 void house_sched_yield(void) {
     uint32_t core = house_cpu_id();
-    // quick check for lock
-    // use spinlock with deferred handling similar to old
     __asm__ volatile("msr daifset, #2" ::: "memory");
-    // try lock without blocking? Use spin
-    // If sched_lock is held, defer
-    // We check via trylock to avoid deadlock
-    if (house_spin_trylock(&sched_lock)) {
-        if (core < HOUSE_MAX_SMP) house_sched_deferred[core] = 1;
-        __asm__ volatile("msr daifclr, #2" ::: "memory");
-        return;
+    while (house_spin_trylock(&sched_lock)) {
+        __asm__ volatile("msr daifclr, #2; isb; yield; msr daifset, #2" ::: "memory");
     }
     house_thread_t *old = house_current_thr[core];
     if (!old) { house_spin_unlock(&sched_lock); __asm__ volatile("msr daifclr, #2" ::: "memory"); return; }
@@ -797,13 +829,17 @@ int poll(struct pollfd *fds, unsigned long nfds, int timeout) {
     if (ready) return ready;
     if (timeout == 0) return 0;
     uint32_t core = house_cpu_id();
-    if (run_head[core]) {
+    int has_runnable = 0;
+    house_spin_lock(&sched_lock);
+    if (core < HOUSE_MAX_SMP && run_head[core]) has_runnable = 1;
+    house_spin_unlock(&sched_lock);
+    if (has_runnable) {
         house_sched_yield();
     } else {
         uint64_t start = house_uptime_ns();
         uint64_t timeout_ns = timeout < 0 ? 0xffffffffULL : (uint64_t)timeout * 1000000ULL;
         while (1) {
-            __asm__ volatile("wfi");
+            __asm__ volatile("wfe");
             int r = 0;
             for (i = 0; i < nfds; i++) {
                 if ((fds[i].events & 0x0001) && (house_timerfd_due(fds[i].fd) || house_fd_pipe_readable(fds[i].fd))) {
