@@ -6,6 +6,7 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM_)
 import Data.Bits (shiftL)
+import Data.List (isPrefixOf, nub)
 import Data.Word (Word64)
 import Foreign.C.String (peekCString, withCString)
 import Foreign.C.Types (CChar (..), CInt (..))
@@ -77,7 +78,7 @@ house_main = do
       ("help" : _) -> withCString usage c_uart_puts
       ("echo" : ws) -> handleEcho ws
       ["clear"] -> withCString "\ESC[2J\ESC[H" c_uart_puts
-      ["uname"] -> withCString "House/hOp 0.8.93 aarch64 GHC-9.14.1 QEMU-virt\n" c_uart_puts
+      ("uname" : args) -> handleUname args
       ["uptime"] -> do s <- c_uptime; withCString ("up " ++ show s ++ " seconds\n") c_uart_puts
       ("shutdown" : args) -> case args of
         ["-r"] -> c_reset
@@ -241,6 +242,76 @@ house_main = do
                      else "empty"
                  )
       withCString (unlines (map fmt infos)) c_uart_puts
+    handleUname args = do
+      let sysname = "House"
+          nodename = "house"
+          release = "0.8.93"
+          version = "#1 SMP 2026-09-01 House/hOp GHC-9.14.1 QEMU-virt"
+          machine = "aarch64"
+          processor = "aarch64"
+          hw = "QEMU-virt"
+          os = "House"
+          canon = "snrvmpio" :: String
+          merge sel flags =
+            let combined = nub (sel ++ flags)
+             in filter (`elem` combined) canon
+          flagToStr c = case c of
+            's' -> sysname
+            'n' -> nodename
+            'r' -> release
+            'v' -> version
+            'm' -> machine
+            'p' -> processor
+            'i' -> hw
+            'o' -> os
+            _ -> ""
+          unameHelp =
+            unlines
+              [ "Usage: uname [OPTION]...",
+                "Print certain system information.  With no OPTION, same as -s.",
+                "",
+                "  -a, --all                print all information, in the following order,",
+                "                             except omit -p and -i if unknown:",
+                "                             -s -n -r -v -m -p -i -o",
+                "  -s, --kernel-name        print the kernel name",
+                "  -n, --nodename           print the network node hostname",
+                "  -r, --kernel-release     print the kernel release",
+                "  -v, --kernel-version     print the kernel version",
+                "  -m, --machine            print the machine hardware name",
+                "  -p, --processor          print the processor type",
+                "  -i, --hardware-platform  print the hardware platform",
+                "  -o, --operating-system   print the operating system",
+                "      --help               display this help and exit",
+                "      --version            output version information and exit"
+              ]
+          unameVersionStr = sysname ++ " " ++ release ++ " (" ++ version ++ ") " ++ machine ++ "\n"
+          parse [] sel = Right sel
+          parse (a : as) sel
+            | a == "--help" = Left unameHelp
+            | a == "--version" = Left unameVersionStr
+            | a == "--all" || a == "-a" = parse as (merge sel canon)
+            | a == "--kernel-name" = parse as (merge sel "s")
+            | a == "--nodename" = parse as (merge sel "n")
+            | a == "--kernel-release" = parse as (merge sel "r")
+            | a == "--kernel-version" = parse as (merge sel "v")
+            | a == "--machine" = parse as (merge sel "m")
+            | a == "--processor" = parse as (merge sel "p")
+            | a == "--hardware-platform" = parse as (merge sel "i")
+            | a == "--operating-system" = parse as (merge sel "o")
+            | "-" `isPrefixOf` a && not ("--" `isPrefixOf` a) =
+                let flags = drop 1 a
+                 in if null flags
+                      then Left ("uname: invalid option -- '" ++ a ++ "'\nTry 'uname --help' for more information.\n")
+                      else
+                        let bad = filter (`notElem` canon) flags
+                         in case bad of
+                              (b : _) -> Left ("uname: invalid option -- '" ++ [b] ++ "'\nTry 'uname --help' for more information.\n")
+                              [] -> parse as (merge sel flags)
+            | otherwise = Left ("uname: extra operand '" ++ a ++ "'\nTry 'uname --help' for more information.\n")
+      case parse args [] of
+        Left msg -> withCString msg c_uart_puts
+        Right [] -> withCString (sysname ++ "\n") c_uart_puts
+        Right sel -> withCString (unwords (map flagToStr (filter (`elem` sel) canon)) ++ "\n") c_uart_puts
     showFsError e = case e of
       FS.ENOENT -> "ENOENT: No such file or directory"
       FS.EEXIST -> "EEXIST: File exists"
@@ -250,7 +321,7 @@ house_main = do
       FS.EINVAL s -> "EINVAL: " ++ s
     usage =
       unlines
-        [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname | uptime | shutdown [-h|-r] -- halt or reboot the machine",
+        [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname [-asnrvmio] | uptime | shutdown [-h|-r] -- halt or reboot the machine",
           "       lambda -- lambda demo",
           "       preempt -- preemption demo",
           "       wastemem <number> -- allocate memory",
@@ -258,6 +329,7 @@ house_main = do
           "       caps -- show capabilities",
           "       parfib <n> -- parallel fib",
           "       mvar <n> -- MVar ping-pong test",
+          "       uname [-asnrvmio] [--help] -- print system information (default -s; -a all)",
           "       ls [path] -- list directory",
           "       cat <path> -- show file",
           "       mkdir <path> -- create directory",
