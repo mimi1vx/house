@@ -3,6 +3,7 @@
 #include "uart.h"
 #include "irq.h"
 #include "psci.h"
+#include "house_detect.h"
 char *getenv(const char *n);
 void hs_init(int *argc, char ***argv);
 
@@ -162,8 +163,20 @@ void c_start(void)
     static char **argv = argv_vals;
 
     uart_init();
+    house_detect_early();
+    {
+        uart_puts("[house] detect early: ram=");
+        uart_puthex(house_ram_bytes);
+        uart_puts(" smp="); uart_putc('0'+house_smp);
+        uart_puts(" src="); uart_puts(house_ram_source);
+        uart_puts(" stack_top="); uart_puthex(house_boot_stack_top);
+        uart_puts("\n");
+    }
     uart_puts("[house] c_start: irq_init\n");
     house_irq_init();
+    house_detect_late();
+    // Sync late SMP to global and log
+    uart_puts("[house] c_start: house_smp_n="); uart_putc('0'+house_smp_n); uart_puts("\n");
     house_thread_init_main();
     // SMP bring-up: PSCI CPU_ON for cores 1..N-1
     if (house_smp_n > 1) {

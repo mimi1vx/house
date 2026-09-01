@@ -5,12 +5,19 @@
    secondary_entry (4K-aligned), skip relocs/BSS, enable MMU via shared
    tables and enter c_start_secondary. Per-core SP = BOOT_STACK_TOP - core*16K. */
 
-    .section .text.boot, "ax"
-    .global _start
-_start:
-    msr     daifset, #0xf
+     .section .data
+     .align 3
+     .global __boot_dtb
+__boot_dtb:
+     .quad 0
 
-    mrs     x0, CurrentEL
+     .section .text.boot, "ax"
+     .global _start
+_start:
+     msr     daifset, #0xf
+     mov     x20, x0                /* preserve DTB/x0 before clobber */
+
+     mrs     x0, CurrentEL
     cmp     x0, #0xc
     b.eq    enter_el3
     cmp     x0, #0x8
@@ -76,24 +83,31 @@ el1_setup:
     str     x4, [x2]
 3:  add     x0, x0, #24
     b       1b
-2:
-    /* Per-core SP: BOOT_STACK_TOP - core*16K (core 0 = top). */
-    ldr     x1, =BOOT_STACK_TOP
-    mov     x2, #16384
-    mul     x3, x19, x2
-    sub     x1, x1, x3
-    mov     sp, x1
+ 2:
+     /* Per-core SP: house_boot_stack_top - core*16K if set else BOOT_STACK_TOP. */
+     ldr     x1, =house_boot_stack_top
+     ldr     x1, [x1]
+     cbnz    x1, 10f
+     ldr     x1, =BOOT_STACK_TOP
+ 10: mov     x2, #16384
+     mul     x3, x19, x2
+     sub     x1, x1, x3
+     mov     sp, x1
 
-    ldr     x0, =__bss_start
-    ldr     x1, =__bss_end
-4:  cmp     x0, x1
-    b.hs    5f
-    stp     xzr, xzr, [x0], #16
-    b       4b
-5:
-    /* Vectors live identity-mapped; installing them before the MMU comes
-       up means any fault in house_mmu_early reports instead of vanishing
-       through an unset VBAR. */
+     ldr     x0, =__bss_start
+     ldr     x1, =__bss_end
+ 4:  cmp     x0, x1
+     b.hs    5f
+     stp     xzr, xzr, [x0], #16
+     b       4b
+ 5:
+     /* Persist boot DTB before any C code clobbers it. */
+     ldr     x1, =__boot_dtb
+     str     x20, [x1]
+
+     /* Vectors live identity-mapped; installing them before the MMU comes
+        up means any fault in house_mmu_early reports instead of vanishing
+        through an unset VBAR. */
     ldr     x1, =vectors
     msr     vbar_el1, x1
     isb
@@ -161,18 +175,21 @@ sec_el1:
     msr     cpacr_el1, x1
     isb
 
-    /* Per-core SP */
-    ldr     x1, =BOOT_STACK_TOP
-    mov     x2, #16384
-    mul     x3, x19, x2
-    sub     x1, x1, x3
-    mov     sp, x1
+     /* Per-core SP: runtime top if already set by primary. */
+     ldr     x1, =house_boot_stack_top
+     ldr     x1, [x1]
+     cbnz    x1, 11f
+     ldr     x1, =BOOT_STACK_TOP
+ 11: mov     x2, #16384
+     mul     x3, x19, x2
+     sub     x1, x1, x3
+     mov     sp, x1
 
-    ldr     x1, =vectors
-    msr     vbar_el1, x1
-    isb
+     ldr     x1, =vectors
+     msr     vbar_el1, x1
+     isb
 
-    bl      house_mmu_enable_secondary
+     bl      house_mmu_enable_secondary
 
     mov     x0, x19
     bl      c_start_secondary

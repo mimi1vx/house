@@ -56,20 +56,26 @@ SECTIONS
     __bss_end = .;
   } :data
 
-  /* Per-core early stacks: SMP_N * 16K, 16-byte aligned.
-      Primary uses top of first 16K (__early_stack_top / core0), secondaries
-      compute base + (core+1)*16K in start.S. Keep old names as aliases.
-      SMP>2 working set is 4G RAM; 512M stays valid for N=2 regression only. */
+  /* Per-core early stacks: max 16*16K=256K, runtime uses house_boot_stack_top.
+      Old HOUSE_SMP_N kept as compat alias for HOUSE_MAX_SMP. */
+#ifndef HOUSE_MAX_SMP
+#ifdef HOUSE_SMP_N
+#define HOUSE_MAX_SMP HOUSE_SMP_N
+#else
+#define HOUSE_MAX_SMP 16
+#endif
+#endif
 #ifndef HOUSE_SMP_N
-#define HOUSE_SMP_N 2
+#define HOUSE_SMP_N HOUSE_MAX_SMP
 #endif
   __early_stacks_base = .;
   __early_stack = .;
   . = ALIGN(16);
-  . += HOUSE_SMP_N * 16384;
+  . += HOUSE_MAX_SMP * 16384;
   __early_stacks_top = .;
   __early_stack_top = __early_stacks_base + 16384;
   __early_stack_top_core0 = __early_stack_top;
+  __early_stacks_max_top = __early_stacks_top;
 
   /DISCARD/ : {
     *(.comment)
@@ -85,7 +91,8 @@ SECTIONS
 }
 
 __ram_base       = 0x40000000;   /* guest RAM start (QEMU virt) */
+__kernel_virt_base = 0x40000000; /* TTBR1 identity alias (v1); higher-half 0xFFFFFFC000000000 in Phase 7 */
 __heap_base      = 0x42000000;   /* bump malloc / mmap-commit region;
-                                    RAM extent itself is compiled in via
-                                    HOUSE_RAM_BYTES/BOOT_STACK_TOP from
-                                    the top-level Makefile (SPIKE_MEM) */
+                                     RAM extent itself is compiled in via
+                                     HOUSE_RAM_BYTES/BOOT_STACK_TOP from
+                                     the top-level Makefile (SPIKE_MEM) */

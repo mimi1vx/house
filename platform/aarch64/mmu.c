@@ -1,25 +1,14 @@
-/* Guest RAM discovery + early identity page tables.
+/* Guest RAM discovery + TTBR0/TTBR1 split.
 
-   With the MMU disabled every data access is Device-nGnRnE.
-   Two levels, 1GB blocks: TTBR0 -> L0 -> one populated L1 covering the
-   first 512GB of VA. Block 0 keeps peripheral attributes (PL011/GIC),
-   the guest RAM blocks become Normal WBWA with I+D caches ON (SCTLR.C/I=1);
-   real LDXR/STXR are coherent across cores on Inner-shareable Normal WB.
-   Every other entry stays invalid so wild pointers fault loudly.
-   48-bit VA because the stock RTS reserves terabyte-scale address-space
-   arenas (NORESERVE promises — only committed chunks, backed by real
-   RAM, are ever touched).
-
-   The RTS heap arena (VA 0x4200000000+, see alloc.c) aliases the second
-   half of guest RAM through a third-level tier of 2MB blocks, sized so
-   commits can never reach past real RAM even for small guests.
-
-   RAM extent comes from HOUSE_RAM_BYTES (from the top-level Makefile,
-   paired with the -m flag of the QEMU invocation). */
+   TTBR1 = kernel identity + RTS alias (Normal WB), TTBR0 = user (zeroed
+   initially, per-process via house_mmu_set_ttbr0). 48-bit VA, 4K granule,
+   IPS=40, TCR EPD1=0 (was 1), MAIR 0xFF/0x04. RAM size is runtime
+   house_ram_bytes if set else HOUSE_RAM_BYTES compile fallback. */
 
 #include <stdint.h>
 
 #include "uart.h"
+#include "house_detect.h"
 
 #ifndef HOUSE_RAM_BYTES
 #define HOUSE_RAM_BYTES 0x100000000ULL   /* 4G */
@@ -38,13 +27,16 @@
 #define ATTR_NORMAL 0            /* MAIR attr0: Normal inner/outer WB */
 #define ATTR_DEVICE 1            /* MAIR attr1: Device-nGnRE */
 
-static uint64_t l0_table[512] __attribute__((aligned(4096)));
+static uint64_t ttbr1_l0[512] __attribute__((aligned(4096)));
+static uint64_t ttbr0_l0[512] __attribute__((aligned(4096)));
 static uint64_t l1_low[512] __attribute__((aligned(4096)));
 /* RTS arena alias tier: eight level-2 tables of 2MB blocks cover up to
     8GB of VA 0x4200000000+ mapped onto upper-half guest RAM (4G working
     set uses 2GB, 8G/16G hosts use more). */
 static uint64_t l1_rts[512] __attribute__((aligned(4096)));
 static uint64_t l2_rts[8][512] __attribute__((aligned(4096)));
+/* compat alias: old l0_table now ttbr1_l0 */
+#define l0_table ttbr1_l0
 
 /* Global 1GB block index within the first 512GB of VA (l1_low slot). */
 static void map_block(int idx, int attr)
@@ -60,12 +52,33 @@ static void dcache_clean_invalidate_all(void)
     __asm__ volatile("dsb sy");
 }
 
+static inline uint64_t get_ram_bytes(void) {
+    if (house_ram_bytes) return house_ram_bytes;
+    return (uint64_t)HOUSE_RAM_BYTES;
+}
+
+static uint64_t tcr_value(void) {
+    return (uint64_t)16             /* T0SZ 48-bit */
+         | ((uint64_t)1 << 8)       /* IRGN0 WB */
+         | ((uint64_t)1 << 10)      /* ORGN0 WB */
+         | ((uint64_t)3 << 12)      /* SH0 inner */
+         | ((uint64_t)0 << 14)      /* TG0 4K */
+         | ((uint64_t)16 << 16)     /* T1SZ 48-bit */
+         | ((uint64_t)0 << 22)      /* A1: TTBR0 base */
+         | ((uint64_t)1 << 23)      /* EPD1 1: disable TTBR1 walk until higher-half migrates (staged) */
+         | ((uint64_t)1 << 24)      /* IRGN1 WB */
+         | ((uint64_t)1 << 26)      /* ORGN1 WB */
+         | ((uint64_t)3 << 28)      /* SH1 inner */
+         | ((uint64_t)2 << 30)      /* TG1 4K */
+         | ((uint64_t)2 << 32);     /* IPS 40-bit */
+}
+
 /* Called from start.S once BSS is clear and SP is live; DAIF masked. */
 void house_mmu_early(void)
 {
     int i, blocks;
     uint64_t sctlr;
-    uint64_t span = HOUSE_RAM_BYTES;
+    uint64_t span = get_ram_bytes();
     uint64_t half = span >> 1;
 
     /* Block 0 stays Device: PL011 @0x09000000, GIC @0x08000000. */
@@ -99,21 +112,18 @@ void house_mmu_early(void)
                            PTE_ATTR(ATTR_NORMAL) | (pa + off);
         }
     }
-    /* Root pointer: without it EVERY walk fails at level 0 and the
-       first post-enable fetch storms forever. */
-    l0_table[0] = PTE_VALID | PTE_TABLE | (uint64_t)(uintptr_t)l1_low;
-    /* every other entry stays invalid: touching it faults loudly */
+    /* Root pointers: staged identity via TTBR0 (TTBR1 disabled via EPD1). */
+    for (i = 0; i < 512; i++) ttbr0_l0[i] = 0;
+    for (i = 0; i < 512; i++) ttbr1_l0[i] = 0;
+    ttbr1_l0[0] = PTE_VALID | PTE_TABLE | (uint64_t)(uintptr_t)l1_low;
+    ttbr0_l0[0] = PTE_VALID | PTE_TABLE | (uint64_t)(uintptr_t)l1_low;
+    /* every other entry stays invalid: fault loudly */
 
     __asm__ volatile("msr mair_el1, %0" ::
                      "r"((uint64_t)0xFF | ((uint64_t)0x04 << 8)));
-    __asm__ volatile("msr tcr_el1, %0" :: "r"(
-        (uint64_t)16             /* T0SZ: 48-bit VA, walk starts at L0 */
-        | ((uint64_t)1 << 8)     /* IRGN0 write-back */
-        | ((uint64_t)1 << 10)    /* ORGN0 write-back */
-        | ((uint64_t)3 << 12)    /* SH0 inner-shareable */
-        | ((uint64_t)1 << 23)    /* EPD1: never walk TTBR1 */
-        | ((uint64_t)2 << 32))); /* IPS: 40-bit PA */
-    __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)l0_table));
+    __asm__ volatile("msr tcr_el1, %0" :: "r"(tcr_value()));
+    __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)ttbr0_l0));
+    __asm__ volatile("msr ttbr1_el1, %0" :: "r"((uint64_t)ttbr1_l0));
     // Caches ON: clean D$, invalidate I$, TLB flush before enabling
     __asm__ volatile("dsb sy");
     __asm__ volatile("tlbi vmalle1");
@@ -131,16 +141,23 @@ void house_mmu_enable_secondary(void)
 {
     uint64_t sctlr;
     __asm__ volatile("msr mair_el1, %0" :: "r"((uint64_t)0xFF | ((uint64_t)0x04 << 8)));
-    __asm__ volatile("msr tcr_el1, %0" :: "r"(
-        (uint64_t)16
-        | ((uint64_t)1 << 8)
-        | ((uint64_t)1 << 10)
-        | ((uint64_t)3 << 12)
-        | ((uint64_t)1 << 23)
-        | ((uint64_t)2 << 32)));
-    __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)l0_table));
+    __asm__ volatile("msr tcr_el1, %0" :: "r"(tcr_value()));
+    __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)ttbr0_l0));
+    __asm__ volatile("msr ttbr1_el1, %0" :: "r"((uint64_t)ttbr1_l0));
     __asm__ volatile("dsb sy; tlbi vmalle1; ic iallu; dsb sy; isb");
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
     __asm__ volatile("msr sctlr_el1, %0" :: "r"(sctlr | (1UL<<0) | (1UL<<2) | (1UL<<12)));
     __asm__ volatile("isb");
+}
+
+void house_mmu_set_ttbr0(void *pdir, uint64_t asid) {
+    uint64_t v = ((uint64_t)(uintptr_t)pdir & ~0xFFFFULL) | (asid & 0xFFFF);
+    // Avoid using asid 0 reserved for kernel? caller ensures.
+    __asm__ volatile("msr ttbr0_el1, %0" :: "r"(v));
+    __asm__ volatile("dsb ish; tlbi vmalle1is; dsb ish; isb" ::: "memory");
+}
+
+void house_mmu_map_kernel(uint64_t pa, uint64_t va, uint64_t size, uint64_t attr) {
+    (void)pa; (void)va; (void)size; (void)attr;
+    // stub for Phase 5 kernel vm: to be implemented when buddy live
 }
