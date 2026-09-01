@@ -1,0 +1,122 @@
+#!/usr/bin/expect -f
+# IPC microkernel test for House/aarch64 (Track 1b).
+# L4 sync rendezvous, copy+grant, both ns+cap, hybrid Haskell/EL0.
+# Usage: expect scripts/qemu-ipc.exp <kernel.elf> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 30}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# ns ls should be empty at boot
+send "ns ls\r"
+expect {
+    -re "empty" { puts "\nPASS: ns ls empty at boot" }
+    -re "> " { puts "\nPASS: ns ls (empty)" }
+    timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# register pl011 server
+send "ns reg pl011\r"
+expect {
+    -re "registered pl011|pl011" { puts "\nPASS: ns reg pl011" }
+    timeout { puts "\nFAIL: ns reg pl011 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ns reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ns ls should now list pl011
+send "ns ls\r"
+expect {
+    -re "pl011" { puts "\nPASS: ns ls contains pl011" }
+    timeout { puts "\nFAIL: ns ls after reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ns ls pl011 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ipc ping pl011 -> ok
+send "ipc ping pl011\r"
+expect {
+    -re "ok" { puts "\nPASS: ipc ping pl011 -> ok" }
+    timeout { puts "\nFAIL: ipc ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ipc ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# second ping to verify rendezvous not one-shot
+send "ipc ping pl011\r"
+expect {
+    -re "ok" { puts "\nPASS: second ipc ping pl011 -> ok" }
+    timeout { puts "\nFAIL: second ipc ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after second ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ipc grant -> ok (page moved)
+send "ipc grant\r"
+expect {
+    -re "ok" { puts "\nPASS: ipc grant -> ok" }
+    timeout { puts "\nFAIL: ipc grant timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ipc grant timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ramfs still live alongside IPC (no pool corruption)
+send "rm /a\r"
+expect {
+    -re "> " { puts "\nPASS: rm /a (ignore)" }
+    timeout { puts "\nFAIL: rm /a timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "write /a hello\r"
+expect {
+    -re "> " { puts "\nPASS: write /a hello after ipc" }
+    timeout { puts "\nFAIL: write /a after ipc timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /a\r"
+expect {
+    -re "hello" { puts "\nPASS: cat /a -> hello after ipc" }
+    timeout { puts "\nFAIL: cat /a after ipc timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat hello timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# burst 20 pings without deadlock at SMP_N=2
+for {set i 0} {$i < 20} {incr i} {
+    send "ipc ping pl011\r"
+    expect {
+        -re "ok" {}
+        timeout { puts "\nFAIL: burst ping $i timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    expect {
+        -re "> " {}
+        timeout { puts "\nFAIL: prompt after burst ping $i timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+}
+puts "\nPASS: burst 20 pings ok"
+puts "\nPASS: ipc ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

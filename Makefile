@@ -127,6 +127,11 @@ house-fs-check: house-build
 	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
 
+# IPC microkernel (Track 1b): L4 sync rendezvous, copy+grant, ns+cap, hybrid Haskell/EL0
+house-ipc-check: house-build
+	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
 # spike ticks, GIC dispatch + VM, house banner, and interactive shell,
@@ -144,4 +149,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check house-ipc-check run check

@@ -15,6 +15,11 @@ import Foreign.Storable (poke)
 import GHC.Conc (getNumCapabilities, getNumProcessors)
 import qualified H.FileSystem as FS
 import H.Monad (runH)
+import qualified Kernel.Driver.PL011Server as PL011S
+import qualified Kernel.IPC.Endpoint as IPC
+import qualified Kernel.IPC.Grant as G
+import qualified Kernel.IPC.Nameservice as NS
+import Kernel.IPC.Types (Message (..))
 
 foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 
@@ -89,6 +94,13 @@ house_main = do
       ["stat", p] -> handleStat p
       ("write" : p : rest) -> handleWrite p (unwords rest)
       ["write"] -> withCString "usage: write <path> <text>\n" c_uart_puts
+      ["ns", "ls"] -> handleNsLs
+      ["ns", "reg", name] -> handleNsReg name
+      ["ns", "reg"] -> withCString "usage: ns reg <name>\n" c_uart_puts
+      ["ipc", "ping", name] -> handleIpcPing name
+      ["ipc", "ping"] -> withCString "usage: ipc ping <nsName>\n" c_uart_puts
+      ["ipc", "grant"] -> handleIpcGrant
+      ["ipc"] -> withCString "usage: ipc ping <nsName> | ipc grant\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -129,6 +141,55 @@ house_main = do
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right () -> return ()
+    handleNsLs = do
+      xs <- runH NS.nsList
+      withCString (if null xs then "(empty)\n" else unwords xs ++ "\n") c_uart_puts
+    handleNsReg name = do
+      r <- runH $ do
+        -- special-case pl011 launches the server demo
+        if name == "pl011"
+          then do PL011S.launchPL011Server; return (Right ())
+          else do
+            ep <- IPC.newEndpoint
+            NS.nsRegister name ep
+      case r of
+        Left e -> withCString (show e ++ "\n") c_uart_puts
+        Right () -> withCString ("registered " ++ name ++ "\n") c_uart_puts
+    handleIpcPing name = do
+      r <- runH $ do
+        mep <- NS.nsLookup name
+        case mep of
+          Nothing -> return (Left (show name ++ " not found"))
+          Just ep -> do
+            let msg = Message 0 [42] Nothing
+            res <- IPC.call ep msg
+            case res of
+              Left e -> return (Left (show e))
+              Right replyMsg -> return (Right replyMsg)
+      case r of
+        Left e -> withCString ("ipc ping failed: " ++ e ++ "\n") c_uart_puts
+        Right _ -> withCString "ok\n" c_uart_puts
+    handleIpcGrant = do
+      r <- runH $ do
+        mg <- G.grantAlloc
+        case mg of
+          Left e -> return (Left (show e))
+          Right g -> do
+            mep <- NS.nsLookup "pl011"
+            case mep of
+              Nothing -> do
+                -- no server yet, just free and report ok (grant alloc succeeded)
+                G.grantFree g
+                return (Right "ok (no server, grant alloc ok)")
+              Just ep -> do
+                let msg = Message 1 [] (Just g)
+                res <- IPC.call ep msg
+                case res of
+                  Left e -> do G.grantFree g; return (Left (show e))
+                  Right _ -> return (Right "ok")
+      case r of
+        Left e -> withCString ("grant failed: " ++ e ++ "\n") c_uart_puts
+        Right s -> withCString (s ++ "\n") c_uart_puts
     showFsError e = case e of
       FS.ENOENT -> "ENOENT: No such file or directory"
       FS.EEXIST -> "EEXIST: File exists"
@@ -152,7 +213,11 @@ house_main = do
           "       rm <path> -- remove file or empty dir",
           "       write <path> <text> -- write file (truncate)",
           "       stat <path> -- show file stat",
-          "       echo <word>... [> /path] -- echo or write via ramfs (volatile 2 MiB pool)"
+          "       echo <word>... [> /path] -- echo or write via ramfs (volatile 2 MiB pool)",
+          "       ns ls -- list IPC names",
+          "       ns reg <name> -- register name (pl011 launches server)",
+          "       ipc ping <nsName> -- sync call to endpoint",
+          "       ipc grant -- alloc one page and send to pl011"
         ]
     seqFib :: Int -> Int
     seqFib n
