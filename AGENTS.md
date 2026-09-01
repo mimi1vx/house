@@ -1,68 +1,41 @@
-# AGENTS.md — house/hOp aarch64 OS / microkernel
+# AGENTS.md — house/hOp aarch64 OS
 
-GHC RTS-based operating system and microkernel (Haskell + tinylibc C wrapper), aarch64-only, runs freestanding under QEMU `virt` on Apple silicon. No GHC patches — stock threaded RTS (-N=SMP_N, per-core run queues, SGI 0 IPI, I+D caches WB via `tinylibc/threads.c`+`spinlock.h`); freestanding constraint "unsafe FFI only" (safe ccall would need scheduler-backed worker threads).
+GHC RTS microkernel (Haskell + tinylibc), aarch64-only, QEMU `virt` on Apple silicon. Stock threaded RTS (`-N=SMP_N`), unsafe FFI only.
 
 ## Layout
+- `kernel/` — Haskell closure rooted at `HouseA64.hs` (`H/`, `Kernel/`, `Monad/`, `Util/`). `kernel/Makefile` is `ghc --make -no-link` only.
+- `platform/aarch64/` — freestanding C/asm, `tinylibc/`, `spinlock.h`, `aarch64.ld`, entry Haskell `Spike.hs`/`IrqCheck.hs`. `build/` gitignored.
+- `scripts/` — `expect` harnesses `qemu-*.exp` (ELF path is argv).
+- `Makefile` — host orchestration; `Containerfile` — build image.
 
-- `kernel/` — Haskell kernel closure rooted at `HouseA64.hs` (`H/`, `Kernel/`, `Monad/`, `Util/`; import roots preserved). `kernel/Makefile` is `ghc --make -no-link` only.
-- `platform/aarch64/` — freestanding C/asm + `tinylibc/` + `spinlock.h` + `aarch64.ld` + entry Haskell (`Spike.hs`, `IrqCheck.hs`). Link via `ld --build-id=none --gc-sections -T build/aarch64.ld` against bindist archives (SMP-aware `build/aarch64.ld` generated via `cc -E -P -DHOUSE_SMP_N`). `build/` gitignored.
-- `scripts/` — 11 `expect` harnesses (`qemu-smoke.exp`, `qemu-irq.exp`, `qemu-house.exp`, `qemu-house-shell.exp`, `qemu-house-posix.exp`, `qemu-smp.exp`, `qemu-ipc.exp`, `qemu-driver.exp`, `qemu-virtio-transport.exp`, `qemu-virtio-blk.exp`, `qemu-virtio-net.exp`). ELF path is argv.
-- `plans/` — untracked local notes (not gitignored, not committed).
-- Root `Makefile` — aarch64-only orchestration; `Containerfile` — build image.
+## Container — build only
+- **All compilation runs inside `house-port:latest`** (Debian 12, GHC 9.14.1 aarch64). QEMU never runs inside the container; host needs `brew install qemu expect`.
+- **Every `container` invocation must pin `--platform linux/arm64`.** Never set `CONTAINER_DEFAULT_PLATFORM` globally. `Containerfile:5` fails if `uname -m != aarch64`; `Makefile:9` asserts `image inspect` arch is `arm64` (no Rosetta/amd64 fallback).
+- Host entrypoints wrap this for you — `make spike-build` / `irq-build` / `house-build` run `container run --platform linux/arm64 --rm -v $PWD:/work -w /work house-port:latest make -C platform/aarch64 ...` with `DEFS_C`/`DEFS_S`/`SMP_N`.
+- One-time setup: `make container-image`
+- Interactive shell: `make container-shell` → `container run --platform linux/arm64 --rm -it -v $PWD:/work -w /work house-port:latest bash`
+- Inside container directly: `make -C kernel` and `make -C platform/aarch64 house SMP_N=2 DEFS_C='... -DHOUSE_SMP_N=2' DEFS_S='... -DHOUSE_SMP_N=2'`
 
-## Commands (run from repo root on macOS host)
-
+## Commands (repo root, macOS host)
 ```sh
-make container-image          # build linux/arm64 image (pinned, asserts arm64-only)
-make container-shell          # interactive shell inside image (binds $PWD -> /work)
-
-SPIKE_MEM=4G make spike-build && make spike-run     # 512M/1G/2G/4G all valid; default 4G
-SPIKE_MEM=512M make spike-check                      # clean+build+ expect hvf
-SMP_N=2 make smp-check                               # 2 cores online + Haskell parallel (hvf+tcg)
-SMP_N=4 make smp-check                               # 4 cores online + Haskell parallel (hvf+tcg, 4G working set)
-
-make irq-build / irq-run / irq-check                # irq-check = hvf+tcg, asserts vm-ok
-make house-build / house-run / house-check          # banner "Welcome to the House shell" hvf+tcg
-make house-shell-check        # prompt + help->Usage + lambda + wastemem 10->55 hvf+tcg
-make house-posix-check        # help -- descriptions, echo/uname/uptime, shutdown -r (reboot) / -h (halt)
-make house-fs-check           # ramfs: write/cat/ls/mkdir/rm + echo > /path over H.FileSystem (2 MiB pool) hvf+tcg
-make house-ipc-check          # ipc: ns ls/reg + ipc ping/pl011 + grant + burst 20 over Kernel.IPC (L4 sync, copy+grant, both ns+cap, hybrid Haskell/EL0) hvf+tcg
-make house-driver-check       # driver: lsdev/dmesg/virtio scan 0x0a000000+i*0x200 + registry on IPC nsRegister+Endpoint + SPI spi n=32+n hvf+tcg
-make house-virtio-transport-check # virtio: Virtio-MMIO transport 0x0a000000+i*0x200 split virtqueue queue_notify FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX dc cvac/dsb IRQ->Endpoint hvf+tcg
-make house-virtio-blk-check # virtio-blk: block device on transport 0x0a000000+i*0x200, virtio_blk_req, Grant pages, 4K blocks (512B sectors on wire), capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B hvf+tcg
-make house-virtio-net-check # virtio-net: network device on transport 0x0a000000+i*0x200, virtio_net_hdr 12B, Grant pages, rx0+tx1, ARP/IPv4/UDP/DHCP, queue_notify, IRQ->Endpoint, user netdev 10.0.2.0/24 hvf+tcg
-make smp-check                # smp: N cores online + caps N + parfib 20=6765 + mvar ok hvf+tcg (default N=2; SMP_N=4 for >2 gate)
-make check                    # CI gate: spike-check + irq-check + house-check + house-shell-check + house-posix-check
-make run                      # alias for house-run (hvf, $SPIKE_MEM)
+make spike-check                         # ticks-ok, hvf
+make irq-check                           # vm-ok, hvf+tcg
+make house-check                         # "Welcome to the House shell", hvf+tcg
+make house-shell-check house-posix-check # shell + POSIX (help/echo/uname/uptime/shutdown)
+make house-fs-check house-ipc-check house-driver-check
+make house-virtio-transport-check house-virtio-blk-check house-virtio-net-check
+make smp-check                           # default SMP_N=2; SMP_N=4 for >2 gate (needs 4G)
+make check                               # CI gate: spike + irq + house + shell + posix
+SPIKE_MEM=512M make spike-check          # 512M/1G/2G/4G valid, default 4G
+SMP_N=4 make smp-check
 ```
 
-Inside container (or via `make container-shell`):
-```sh
-make -C kernel                # ghc --make -no-link HouseA64.hs -O1 -package mtl,array,containers,pretty + EXTS
-make -C platform/aarch64 house SMP_N=2 DEFS_C='... -DHOUSE_SMP_N=2' DEFS_S='... -DHOUSE_SMP_N=2'   # ld --build-id=none
-```
-
-## Toolchain quirks
-
-- **Container is build-only; QEMU never runs inside it.** Host needs `brew install qemu expect`; QEMU uses `-accel hvf` (macOS) or `tcg`, `-M virt,gic-version=3`, `-cpu max`, `-smp SMP_N`.
-- **Every `container` invocation must pin `--platform linux/arm64`** — `CONTAINER_DEFAULT_PLATFORM` is not set globally. `Containerfile:5` fails if `uname -m != aarch64`; root `Makefile:9` asserts `image inspect` arch == `arm64` (no Rosetta/amd64 fallback).
-- **RAM is compiled in.** `SPIKE_MEM` (default `4G`) computes `SPIKE_RAM_BYTES` + `BOOT_STACK_TOP`/`HOUSE_RAM_BYTES`/`HOUSE_STACK_TOP` in `Makefile:22-35` and drives both `DEFS_C/S` and QEMU `-m`. `SPIKE_MEM` and QEMU `-m` can never disagree. `SMP_N` (default `2`, ≤`HOUSE_MAX_SMP` `16`, tested to `8`) computes `HOUSE_SMP_N` and per-core 16K stacks (`BOOT_STACK_TOP - core*16K`, `__early_stacks_base + SMP_N*16K`); `SPIKE_MEM`+`SMP_N` together must fit (512M+2 stacks is smallest gate). `4G` is the `SMP>2` working set; `512M` stays valid for `N=2` regression only. Small values are first-class.
-- **Stock RTS seam:** `platform/aarch64/tinylibc/sys.c` fakes `timerfd`/`signal`/`pipe`/`mmap`; `tick.h` + `timer.c` feeds `house_rts_tick()` from the ARM generic timer (PPI 27/30) — per-core `house_isr_pending[core]` + `house_boot_ticks[core]`, `house_timer_init_secondary` per core; `house_isr_active` switches `house_timerfd_due(core)` to per-core pending. `sysconf(_SC_NPROCESSORS)=SMP_N` and `sched_getaffinity` reports `(1<<SMP_N)-1`; `sched_setaffinity`/`pthread_setaffinity_np` honor affinity. RTS defaults to `-N SMP_N` via synthesized `+RTS -Nn -RTS` if no explicit `-N`.
-- **Boot:** `platform/aarch64/start.S` handles EL3→EL2→EL1 drop, enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocs (primary only), clears BSS (primary only), installs VBAR, calls `house_mmu_early` (primary, identity-maps RAM `0x40000000` + `HOUSE_RAM_BYTES` as Normal WB Inner-shareable, `SCTLR.C/I=1` with TLB/ICI/DCISW maintenance) or `house_mmu_enable_secondary` (secondaries, shared tables), per-core `sp = BOOT_STACK_TOP - core*16K`, then `c_start` vs `c_start_secondary` (secondary via `secondary_entry` 4K-aligned PSCI entry `psci_cpu_on` `0xC4000003` `hvc` with `smc` fallback). Guest entry `_start` at `0x40080000` (`build/aarch64.ld:12`).
-- **GICv3** (`gic.c`): `GICD 0x08000000`, `GICR 0x080A0000 + core*0x20000`; wake `GICR_WAKER` per core, mark PPIs 27/29/30 + SGI 0 Group1 per core, enable via `ICC_PMR/IGRPEN1/BPR1`. `house_gic_send_sgi_to_core(0, core)` via `ICC_SGI1R_EL1` Aff3/Aff2/Aff1/RS/TargetList encoding (unicast, correct for any Aff topology; mask variant loops via helper) kicks remote core's scheduler. `H.Interrupts` maps `ppiVirtTimer=27`, `ppiPhysTimer=30`, `spi n = 32+n`.
-- **Link:** `platform/aarch64/Makefile:28-39` locates `HsFFI.h` + `libHS{rts,base,ghc-prim,ghc-bignum,ghc-internal,containers,pretty,mtl,array,transformers,deepseq,Cffi}.a` via `ghc --print-libdir`/`ghc-pkg field`; `rts` is threaded (`grep thr`); archives + `libgmp.a` + `libgcc` linked `--start-group/--end-group`. `readelf -h` gate checks `ENTRY(_start)` / `Machine: AArch64`.
-- **Haskell exts** pinned in `kernel/Makefile:20-32`: `MultiParamTypeClasses FunctionalDependencies FlexibleInstances FlexibleContexts UndecidableInstances ImplicitParams ExistentialQuantification ScopedTypeVariables Rank2Types KindSignatures PatternGuards ForeignFunctionInterface GeneralizedNewtypeDeriving` (`-O1 -Wall`; `OverlappingInstances` is per-instance `OVERLAPPING`, not global).
-- **PSCI:** `psci.c` via `hvc #0` (`SYSTEM_OFF`/`SYSTEM_RESET`/`CPU_ON 0xC4000003`/`CPU_OFF`/`AFFINITY_INFO`) with `smc` fallback; QEMU `virt` pins `psci-conduit=hvc`. `timer.c` records `CNTVCT_EL0` per core at boot for `house_uptime_secs`.
-- **Shell:** `HouseA64.hs` — `help`/`echo`/`clear`/`uname [-asnrvmio] [--help]` (`House` bare, `-a` → `House house 0.8.93 #1 SMP ... aarch64 aarch64 QEMU-virt House`)/`uptime`/`shutdown [-h|-r]` (xor semantics; both/neither → `usage: shutdown [-h|-r]`) + `lambda`/`preempt`/`wastemem` + `smp` (`cores=N onlineMask timers PPI27+30 ipi=SGI0 caches=WB`)/`caps` (`getNumCapabilities`)/`parfib`/`mvar` + `ls`/`cat`/`write`/`rm`/`mkdir`/`stat` + `echo > /path` via `H.FileSystem` ramfs (volatile 2 MiB pool over `H.Pages` 512×4K) + `ns ls/reg` + `ipc ping/pl011` + `ipc grant` via `Kernel.IPC` (L4 sync rendezvous, copy+grant, both ns+cap, hybrid Haskell/EL0) + `lsdev`/`dmesg`/`virtio scan` via `Kernel.Driver` (registry on IPC nsRegister+Endpoint + dmesg ring + SPI spi n=32+n + virtio-MMIO probe 0x0a000000+i*0x200) + `virtio init/notify/ack/status/irqtest` via `Kernel.Driver.Virtio` (Virtio-MMIO transport: 0x0a000000+i*0x200, split virtQueues, queue_notify, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint) + `blk read/write/status/teardown` via `Kernel.Driver.Virtio.Blk` (virtio-blk server: virtio_blk_req, Grant pages, 4K blocks / 512B sectors on wire, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B) + `net init/status/ifconfig/ping/udpecho/arp ls/dhcp` via `Kernel.Driver.Virtio.Net` (virtio-net server: device_id 1, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24). UART via `Kernel.Driver.PL011`.
-
-## Verification order
-
-- Always `make -C platform/aarch64 clean` (and `make -C kernel clean` for house) before a `*-check` — `*-check` targets do this themselves; don't skip when running `*-build` manually.
-- Expect signature: `expect scripts/<harness>.exp <elf> <marker> [timeout] [accel] [mem] [smp]` — marker strings: `ticks-ok` (spike), `vm-ok` (irq implies `irq-ok`), `Welcome to the House shell` (house), `smp: 2 cores online` (smp).
-- No `npm`/`cargo`/`pytest`/`ruff`/`biome` — only `make check` + `expect`.
+## Gotchas
+- **RAM is compiled in.** `SPIKE_MEM` (default `4G`) sets `HOUSE_RAM_BYTES`/`BOOT_STACK_TOP` via `DEFS_C`/`DEFS_S` and must match QEMU `-m`. `SMP_N` (default `2`, max `16`, tested to `8`) sets `HOUSE_SMP_N` and per-core 16K stacks. `4G` is the `SMP_N>2` working set.
+- `*-check` targets run `clean` themselves. If running `*-build` manually, `make -C platform/aarch64 clean` (and `make -C kernel clean` for house) first.
+- Expect signature: `expect scripts/<harness>.exp <elf> <marker> [timeout] [accel] [mem] [smp]` — markers: `ticks-ok`, `vm-ok`, `Welcome to the House shell`, `smp: N cores online`.
+- No `npm`/`cargo`/`pytest` — only `make` + `expect`.
 
 ## Conventions
-
-- Do not add `CONTAINER_DEFAULT_PLATFORM` globally; keep per-invocation `--platform linux/arm64`.
-- Keep aarch64-only — no x86/i386 paths.
-- `plans/` stays untracked (intentional); `.gitignore` only covers `kernel/build/` + `platform/aarch64/build/`.
+- Keep aarch64-only; no x86 paths.
+- `plans/` is untracked local notes (intentional, not gitignored); `.gitignore` only covers `kernel/build/` + `platform/aarch64/build/`.
