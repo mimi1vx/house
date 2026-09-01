@@ -11,10 +11,10 @@ GHC RTS microkernel (Haskell + tinylibc), aarch64-only, QEMU `virt` on Apple sil
 ## Container — build only
 - **All compilation runs inside `house-port:latest`** (Debian 12, GHC 9.14.1 aarch64). QEMU never runs inside the container; host needs `brew install qemu expect`.
 - **Every `container` invocation must pin `--platform linux/arm64`.** Never set `CONTAINER_DEFAULT_PLATFORM` globally. `Containerfile:5` fails if `uname -m != aarch64`; `Makefile:9` asserts `image inspect` arch is `arm64` (no Rosetta/amd64 fallback).
-- Host entrypoints wrap this for you — `make spike-build` / `irq-build` / `house-build` run `container run --platform linux/arm64 --rm -v $PWD:/work -w /work house-port:latest make -C platform/aarch64 ...` with `DEFS_C`/`DEFS_S`/`SMP_N`.
+- Host entrypoints wrap this for you — `make spike-build` / `irq-build` / `house-build` run `container run --platform linux/arm64 --rm -v $PWD:/work -w /work house-port:latest make -C platform/aarch64 ...` with `SMP_N` only (RAM auto-detected).
 - One-time setup: `make container-image`
 - Interactive shell: `make container-shell` → `container run --platform linux/arm64 --rm -it -v $PWD:/work -w /work house-port:latest bash`
-- Inside container directly: `make -C kernel` and `make -C platform/aarch64 house SMP_N=2 DEFS_C='... -DHOUSE_SMP_N=2' DEFS_S='... -DHOUSE_SMP_N=2'`
+- Inside container directly: `make -C kernel` and `make -C platform/aarch64 house SMP_N=2`
 
 ## Commands (repo root, macOS host)
 ```sh
@@ -31,7 +31,7 @@ SMP_N=4 make smp-check
 ```
 
 ## Gotchas
-- **RAM is compiled in.** `SPIKE_MEM` (default `4G`) sets `HOUSE_RAM_BYTES`/`BOOT_STACK_TOP` via `DEFS_C`/`DEFS_S` and must match QEMU `-m`. `SMP_N` (default `2`, max `16`, tested to `8`) sets `HOUSE_SMP_N` and per-core 16K stacks. `4G` is the `SMP_N>2` working set.
+- **RAM is auto-detected.** No `HOUSE_RAM_BYTES` limit — DTB `reg` → fault-trapped probe (`128M→16G`) → `128M` fallback; `SPIKE_MEM` (default `4G`) only drives QEMU `-m` and same ELF boots at `256M`/`512M`/`1G`/`2G`/`4G`/`8G`/`16G` without rebuild. `SMP_N` (default `2`, max `16`, tested to `8`) sets `HOUSE_SMP_N` and per-core 16K stacks.
 - `*-check` targets run `clean` themselves. If running `*-build` manually, `make -C platform/aarch64 clean` (and `make -C kernel clean` for house) first.
 - Expect signature: `expect scripts/<harness>.exp <elf> <marker> [timeout] [accel] [mem] [smp]` — markers: `ticks-ok`, `vm-ok`, `Welcome to the House shell`, `smp: N cores online`.
 - No `npm`/`cargo`/`pytest` — only `make` + `expect`.

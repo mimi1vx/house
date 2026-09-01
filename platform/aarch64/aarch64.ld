@@ -92,7 +92,4 @@ SECTIONS
 
 __ram_base       = 0x40000000;   /* guest RAM start (QEMU virt) */
 __kernel_virt_base = 0x40000000; /* TTBR1 identity alias (v1); higher-half 0xFFFFFFC000000000 in Phase 7 */
-__heap_base      = 0x42000000;   /* bump malloc / mmap-commit region;
-                                     RAM extent itself is compiled in via
-                                     HOUSE_RAM_BYTES/BOOT_STACK_TOP from
-                                     the top-level Makefile (SPIKE_MEM) */
+__heap_base      = 0x42000000;   /* bump malloc / mmap-commit region; RAM auto-detected */

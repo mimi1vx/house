@@ -3,9 +3,6 @@
 #include "uart.h"
 #include "psci.h"
 
-#ifndef HOUSE_RAM_BYTES
-#define HOUSE_RAM_BYTES 0x100000000ULL
-#endif
 #ifndef HOUSE_SMP_N
 #define HOUSE_SMP_N 2
 #endif
@@ -19,7 +16,7 @@ const char *house_ram_source = "unknown";
 extern uint64_t __boot_dtb;
 extern volatile int house_smp_n;
 
-static uint64_t fallback_ram(void) { return (uint64_t)HOUSE_RAM_BYTES; }
+static uint64_t fallback_ram(void) { return HOUSE_RAM_MIN_BYTES; }
 static int fallback_smp(void) { return HOUSE_SMP_N; }
 
 void house_detect_early(void) {
@@ -107,7 +104,9 @@ int house_smp_detect_gicr(void) {
 }
 
 void house_detect_late(void) {
-    int dtb_smp = house_smp;
+    int dtb_smp = 0;
+    const void *dtb = (const void *)(uintptr_t)__boot_dtb;
+    if (fdt_valid(dtb)) dtb_smp = fdt_get_cpu_count(dtb);
     int psci = house_smp_detect_psci();
     int gicr = house_smp_detect_gicr();
     int chosen = dtb_smp;
@@ -118,8 +117,10 @@ void house_detect_late(void) {
         else if (gicr >= 1 && gicr <= HOUSE_MAX_SMP) { chosen = gicr; src = "gicr"; }
         else { chosen = fallback_smp(); src = "fallback"; }
     } else {
-        // dtb present but validate against psci/gicr? Keep dtb priority, but clamp
         src = "dtb";
+        // If PSCI/GICR report more, take max (handles stale DTB vs QEMU smp mismatch)
+        if (psci > chosen && psci <= HOUSE_MAX_SMP) { chosen = psci; src = "psci>d tb"; }
+        if (gicr > chosen && gicr <= HOUSE_MAX_SMP) { chosen = gicr; src = "gicr>dtb"; }
     }
 
     // clamp to compile-time limit/MAX

@@ -15,35 +15,20 @@ container-shell:
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) bash
 
 # --- aarch64 freestanding spike ---
-# Guest RAM for the spike: 4G default — comfortable on 32GB dev hosts.
-# The kernel is COMPILED with the same size (kernel learns it at link
-# time via SPIKE_DEFS), so SPIKE_MEM and QEMU -m can never disagree.
-# Small values are first-class: SPIKE_MEM=512M make spike-check works.
-# SMP_N: number of vCPUs for QEMU -smp and compiled-in early stacks.
-# Default 2 (generalizes to N ≤ HOUSE_MAX_SMP=16, tested to 8); single-core via SMP_N=1 keeps old path.
-# 4G RAM is the working set for SMP>2; 512M remains valid for N=2 regression only.
+# Guest RAM is auto-detected (DTB → probe → fallback) — no compile limit.
+# SPIKE_MEM only drives QEMU -m (512M/1G/2G/4G/8G/16G all verified, hvf+tcg);
+# same ELF boots at any -m without rebuild. SMP_N: vCPUs for QEMU -smp
+# and early stacks (default 2, up to HOUSE_MAX_SMP=16, tested to 8).
 SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
 SMP_N ?= 2
 SMP_DEFS_C := -DHOUSE_SMP_N=$(SMP_N)
 SMP_DEFS_S := -DHOUSE_SMP_N=$(SMP_N)
 
-ifeq ($(findstring G,$(SPIKE_MEM)),G)
-  SPIKE_RAM_BYTES := $(shell echo $$(( $(subst G,,$(SPIKE_MEM)) * 1024 * 1024 * 1024 )))
-else
-  SPIKE_RAM_BYTES := $(shell echo $$(( $(subst M,,$(SPIKE_MEM)) * 1024 * 1024 )))
-endif
-SPIKE_DEFS_C := -DHOUSE_RAM_BYTES=$(SPIKE_RAM_BYTES)ULL \
-                -DHOUSE_STACK_TOP="(0x40000000ULL + $(SPIKE_RAM_BYTES)ULL - 0x200000ULL)"
-SPIKE_STACK_TOP := $(shell echo $$((1073741824 + $(SPIKE_RAM_BYTES) - 2097152)))
-SPIKE_DEFS_S := -DHOUSE_RAM_BYTES=$(SPIKE_RAM_BYTES) \
-                -DBOOT_STACK_TOP=$(SPIKE_STACK_TOP)
-SPIKE_DEFS_C += -DHOUSE_STACK_TOP="(0x40000000ULL + $(SPIKE_RAM_BYTES)ULL - 0x200000ULL)"
-
 spike-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) DEFS_C='$(SPIKE_DEFS_C) $(SMP_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S) $(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 spike-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -58,12 +43,11 @@ spike-check:
 	  'ticks-ok' 90 hvf $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 irq-check kernel ---
-# Shares SPIKE_DEFS_C/SPIKE_DEFS_S with the spike so RAM/stack defines stay
-# identical; only the Haskell entry point differs (IrqCheck vs Spike).
+# Only entry point differs (IrqCheck vs Spike); RAM is auto-detected.
 irq-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) DEFS_C='$(SPIKE_DEFS_C) $(SMP_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S) $(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 irq-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -84,7 +68,7 @@ irq-check:
 house-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) DEFS_C='$(SPIKE_DEFS_C) $(SMP_DEFS_C)' DEFS_S='$(SPIKE_DEFS_S) $(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 house-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \

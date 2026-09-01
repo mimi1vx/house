@@ -9,5 +9,6 @@ void buddy_free_page(void *p);
 int buddy_free_count(void);
 int buddy_total_count(void);
 void house_mem_stats(uint64_t *total, uint64_t *free_pages);
+int buddy_contains(void *p);
 
 #endif

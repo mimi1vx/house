@@ -14,20 +14,20 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 
 * Build container `house-port:latest` (Debian 12, GHC 9.14.1 aarch64 bindist via ghcup, binutils/gcc). Every Haskell/C compilation runs `container run --platform linux/arm64 ...` (see `Containerfile`); `CONTAINER_DEFAULT_PLATFORM` is never set globally — each invocation pins `--platform linux/arm64` and `container image inspect` asserts `arm64` only.
 * QEMU on the macOS host (`brew install qemu expect`, HVF acceleration). The container is build-only; QEMU never runs inside it.
-* Guest RAM is one knob: `SPIKE_MEM ?= 4G` compiles `HOUSE_RAM_BYTES` / `BOOT_STACK_TOP` into the kernel and drives QEMU `-m` (`512M`/`1G`/`2G`/`4G` all verified, hvf+tcg). `SMP_N ?= 2` compiles `HOUSE_SMP_N` and per-core 16 KiB stacks (`BOOT_STACK_TOP - core*16K`, `__early_stacks_base + SMP_N*16K`); `SMP_N` scales to `HOUSE_MAX_SMP` 16 (tested to 8). `4G` is the working set for `SMP_N > 2`; `512M` remains valid for `N=2` regression only.
+* Guest RAM is auto-detected (DTB `reg` → probe `128M→16G` → `128M` fallback; same ELF at `256M`/`512M`/`1G`/`2G`/`4G`/`8G`/`16G` without rebuild). `SPIKE_MEM ?= 4G` only drives QEMU `-m`. `SMP_N ?= 2` compiles `HOUSE_SMP_N` and per-core 16 KiB stacks (`house_boot_stack_top - core*16K`, `__early_stacks_base + SMP_N*16K`); `SMP_N` scales to `HOUSE_MAX_SMP` 16 (tested to 8).
 
 ### What boots
 
 * `platform/aarch64/{start.S,c_start.c,mmu.c,gic.c,timer.c,irq.c,userspace.c,uart.c,psci.c,aarch64.ld}` plus `tinylibc` and `spinlock.h` for the stock threaded RTS (`-N SMP_N`, per-core run queues, SGI 0 IPI, I+D caches WB via `tinylibc/threads.c` + `spinlock.h`). Guest entry `_start` at `0x40080000` (`build/aarch64.ld:12`).
 * `tinylibc/sys.c` fakes `timerfd`/`signal`/`pipe`/`mmap`; `tick.h` + `timer.c` feeds `house_rts_tick()` from the ARM generic timer (PPI 27/30) — per-core `house_isr_pending[core]` + `house_boot_ticks[core]`, `house_timer_init_secondary` per core; `house_isr_active` switches `house_timerfd_due(core)` to per-core pending. `sysconf(_SC_NPROCESSORS) = SMP_N` and `sched_getaffinity` reports `(1<<SMP_N)-1`; `sched_setaffinity`/`pthread_setaffinity_np` honor affinity. RTS defaults to `-N SMP_N` via synthesized `+RTS -Nn -RTS` when no explicit `-N` is given.
 * `H.Interrupts` is GIC-native (`IntId`, `ppiVirtTimer=27`, `ppiPhysTimer=30`, `spi n = 32+n`, dispatcher `threadDelay 20ms` poll, `house_irq_push/pop`).
-* `H.VirtualMemory` is aarch64 4 KiB-granule L0→L3 identity-mapping RAM `0x40000000` + `HOUSE_RAM_BYTES` as Normal WB Inner-shareable (`SCTLR_EL1.C/I=1` with TLB/ICI/DCISW maintenance).
+* `H.VirtualMemory` is aarch64 4 KiB-granule L0→L3 identity-mapping RAM `0x40000000` + detected `house_ram_bytes` as Normal WB Inner-shareable (`SCTLR_EL1.C/I=1` with TLB/ICI/DCISW maintenance).
 * `H.FileSystem` is a volatile ramfs over `H.Pages` (512×4 KiB pool, 2 MiB cap) with `H.AdHocMem`/`H.Utils` backing.
 * `HouseA64.hs` is the shell entry (`house_main`): `help` (every command carries a `-- description`), `echo <word>...`, `clear` (`ESC[2J ESC[H`), `uname [-asnrvmio] [--help]` (`House` bare, `-a` → `House house 0.8.93 #1 SMP ... aarch64 aarch64 QEMU-virt House`), `uptime` (`house_uptime_secs` via `CNTVCT_EL0`), `shutdown [-h|-r]` (PSCI `SYSTEM_OFF`/`SYSTEM_RESET` via `hvc #0`; `-r` only → reboot, `-h` only → halt, neither/both → `usage: shutdown [-h|-r]`), plus `lambda`, `preempt`, `wastemem` (all with descriptions), `smp` (`cores=N onlineMask timers PPI27+30 ipi=SGI0 caches=WB`), `caps` (`getNumCapabilities`), `parfib`, `mvar`, and the VFS commands `ls`/`cat`/`write`/`rm`/`mkdir`/`stat` plus `echo > /path` sugar over `H.FileSystem`. UART via `Kernel.Driver.PL011`. `psci.c` parks in `wfi` on failure; QEMU `virt` pins `psci-conduit=hvc`. `timer.c` records `CNTVCT_EL0` per core at boot for `house_uptime_secs()`.
 
 ### Boot
 
-`platform/aarch64/start.S` handles the EL3→EL2→EL1 drop, enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocations (primary only), clears BSS (primary only), installs VBAR, calls `house_mmu_early` (primary, identity-maps RAM) or `house_mmu_enable_secondary` (secondaries, shared tables), sets per-core `sp = BOOT_STACK_TOP - core*16K`, then enters `c_start` vs `c_start_secondary` (secondaries via `secondary_entry` 4 KiB-aligned PSCI entry `psci_cpu_on` `0xC4000003` `hvc` with `smc` fallback).
+`platform/aarch64/start.S` handles the EL3→EL2→EL1 drop, enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocations (primary only), clears BSS (primary only), installs VBAR, calls `house_mmu_early` (primary, identity-maps RAM up to `16G` for probe) or `house_mmu_enable_secondary` (secondaries, shared tables), sets per-core `sp = house_boot_stack_top - core*16K` (early `__early_stacks_top`, rebased after `house_detect_early`), then enters `c_start` vs `c_start_secondary` (secondaries via `secondary_entry` 4 KiB-aligned PSCI entry `psci_cpu_on` `0xC4000003` `hvc` with `smc` fallback). `c_start` probes `house_ram_probe` (`128M→16G`) then `house_mmu_update_alias()` rebuilds RTS alias `0x4200000000+`.
 
 ### GICv3
 
@@ -76,7 +76,7 @@ Inside the container (via `make container-shell`):
 
 ```sh
 make -C kernel                            # ghc --make -no-link HouseA64.hs
-make -C platform/aarch64 house SMP_N=2 DEFS_C='... -DHOUSE_SMP_N=2' DEFS_S='... -DHOUSE_SMP_N=2'   # ld --build-id=none
+make -C platform/aarch64 house SMP_N=2    # ld --build-id=none
 ```
 
 Expect harnesses live in `scripts/` (`qemu-smoke.exp`, `qemu-irq.exp`, `qemu-house.exp`, `qemu-house-shell.exp`, `qemu-house-posix.exp`, `qemu-house-fs.exp`, `qemu-smp.exp` plus `rts-symbols.sh`) — each `spawn qemu-system-aarch64 -accel hvf|tcg -M virt,gic-version=3 -smp SMP_N -m $mem -nographic -kernel $elf` and asserts its marker (`ticks-ok`, `vm-ok`, `Welcome to the House shell`, prompt/echo, ramfs round-trip, or `smp: N cores online`).

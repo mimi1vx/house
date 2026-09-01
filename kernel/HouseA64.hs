@@ -11,12 +11,13 @@ import Data.List (isPrefixOf, nub)
 import Data.Word (Word64)
 import Foreign.C.String (peekCString, withCString)
 import Foreign.C.Types (CChar (..), CInt (..))
-import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, plusPtr)
-import Foreign.Storable (poke)
+import Foreign.Storable (peek, poke)
 import GHC.Conc (getNumCapabilities, getNumProcessors)
 import qualified H.FileSystem as FS
 import H.Monad (runH)
+import qualified H.Pages as HPages
 import qualified Kernel.Driver.Dmesg as Dmesg
 import qualified Kernel.Driver.GIC as DGIC
 import qualified Kernel.Driver.IRQ as DIRQ
@@ -47,6 +48,16 @@ foreign import ccall unsafe "house_uptime_secs" c_uptime :: IO Word64
 foreign import ccall unsafe "psci_system_off" c_off :: IO ()
 
 foreign import ccall unsafe "psci_system_reset" c_reset :: IO ()
+
+foreign import ccall unsafe "house_detect.h &house_ram_bytes" c_ram_ref :: Ptr Word64
+
+foreign import ccall unsafe "house_detect.h &house_boot_stack_top" c_stack_top_ref :: Ptr Word64
+
+foreign import ccall unsafe "house_mem_stats" c_mem_stats :: Ptr Word64 -> Ptr Word64 -> IO ()
+
+foreign import ccall unsafe "buddy_total_count" c_buddy_total :: IO CInt
+
+foreign import ccall unsafe "buddy_free_count" c_buddy_free :: IO CInt
 
 foreign export ccall house_main :: IO ()
 
@@ -152,6 +163,9 @@ house_main = do
       ["arp", "ls"] -> handleArpLs
       ["net", "dhcp"] -> handleNetDhcp
       ["net"] -> withCString "usage: net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>\n" c_uart_puts
+      ["free"] -> handleFree
+      ["mem"] -> handleMem
+      ["detect"] -> handleDetect
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -413,6 +427,28 @@ house_main = do
       case r of
         Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
+    handleFree = do
+      fc <- runH HPages.freePageCount
+      tot <- c_buddy_total
+      freeB <- c_buddy_free
+      ram <- peek c_ram_ref
+      alloca $ \pTot -> alloca $ \pFree -> do
+        c_mem_stats pTot pFree
+        t <- peek pTot
+        f <- peek pFree
+        withCString ("free: H.Pages=" ++ show fc ++ " buddy " ++ show freeB ++ "/" ++ show tot ++ " mem " ++ show f ++ "/" ++ show t ++ " ram " ++ show (ram `div` (1024 * 1024)) ++ "M\n") c_uart_puts
+    handleMem = do
+      ram <- peek c_ram_ref
+      stk <- peek c_stack_top_ref
+      tot <- c_buddy_total
+      fr <- c_buddy_free
+      withCString ("mem: ram " ++ show (ram `div` (1024 * 1024)) ++ "M stack_top 0x" ++ showHex (fromIntegral stk) ++ " buddy " ++ show fr ++ "/" ++ show tot ++ " pages\n") c_uart_puts
+    handleDetect = do
+      ram <- peek c_ram_ref
+      stk <- peek c_stack_top_ref
+      caps <- getNumCapabilities
+      procs <- getNumProcessors
+      withCString ("detect: ram " ++ show (ram `div` (1024 * 1024)) ++ "M stack_top 0x" ++ showHex (fromIntegral stk) ++ " caps=" ++ show caps ++ " procs=" ++ show procs ++ "\n") c_uart_puts
     parseIpv4 s = case splitDot s of
       [a, b, c, d] -> case (reads a, reads b, reads c, reads d) of
         ([(av, "")], [(bv, "")], [(cv, "")], [(dv, "")]) -> Just (NetTypes.Ipv4 av bv cv dv)
@@ -505,6 +541,9 @@ house_main = do
           "       lambda -- lambda demo",
           "       preempt -- preemption demo",
           "       wastemem <number> -- allocate memory",
+          "       free -- show H.Pages + buddy + ram",
+          "       mem -- show ram/stack/buddy",
+          "       detect -- show ram/stack/caps",
           "       smp -- show SMP cores online",
           "       caps -- show capabilities",
           "       parfib <n> -- parallel fib",

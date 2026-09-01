@@ -2,17 +2,14 @@
 
    TTBR1 = kernel identity + RTS alias (Normal WB), TTBR0 = user (zeroed
    initially, per-process via house_mmu_set_ttbr0). 48-bit VA, 4K granule,
-   IPS=40, TCR EPD1=0 (was 1), MAIR 0xFF/0x04. RAM size is runtime
-   house_ram_bytes if set else HOUSE_RAM_BYTES compile fallback. */
+   IPS=40, TCR EPD1=0, MAIR 0xFF/0x04. RAM size is runtime house_ram_bytes
+   (auto-detected, no compile limit). */
 
 #include <stdint.h>
 
 #include "uart.h"
 #include "house_detect.h"
 
-#ifndef HOUSE_RAM_BYTES
-#define HOUSE_RAM_BYTES 0x100000000ULL   /* 4G */
-#endif
 #ifndef HOUSE_SMP_N
 #define HOUSE_SMP_N 2
 #endif
@@ -54,7 +51,8 @@ static void dcache_clean_invalidate_all(void)
 
 static inline uint64_t get_ram_bytes(void) {
     if (house_ram_bytes) return house_ram_bytes;
-    return (uint64_t)HOUSE_RAM_BYTES;
+    // Early (before detect) — no limit, probe will determine. Map 16G max for probe.
+    return 0;
 }
 
 static uint64_t tcr_value(void) {
@@ -65,12 +63,45 @@ static uint64_t tcr_value(void) {
          | ((uint64_t)0 << 14)      /* TG0 4K */
          | ((uint64_t)16 << 16)     /* T1SZ 48-bit */
          | ((uint64_t)0 << 22)      /* A1: TTBR0 base */
-         | ((uint64_t)1 << 23)      /* EPD1 1: disable TTBR1 walk until higher-half migrates (staged) */
+         | ((uint64_t)0 << 23)      /* EPD1 0: TTBR1 enabled, split VA */
          | ((uint64_t)1 << 24)      /* IRGN1 WB */
          | ((uint64_t)1 << 26)      /* ORGN1 WB */
          | ((uint64_t)3 << 28)      /* SH1 inner */
          | ((uint64_t)2 << 30)      /* TG1 4K */
          | ((uint64_t)2 << 32);     /* IPS 40-bit */
+}
+
+static void build_rts_alias(uint64_t span) {
+    int i;
+    uint64_t half = span >> 1;
+    uint64_t stack_reserve = 0x200000ULL + (uint64_t)HOUSE_SMP_N * 16384ULL;
+    uint64_t usable_half = half > stack_reserve ? half - stack_reserve : 0;
+    uint64_t vspan64 = usable_half > (8UL << 30) ? (8UL << 30) : usable_half;
+    int n_l2 = (int)((vspan64 + (1UL << 30) - 1) >> 30);
+    uint64_t off;
+    uint64_t pa = RAM_BASE + half;
+    // Clear previous alias entries
+    for (i = 0; i < 8; i++) {
+        for (int e = 0; e < 512; e++) l2_rts[i][e] = 0;
+        l1_rts[i] = 0;
+        l1_low[264 + i] = 0;
+    }
+    if (n_l2 > 8) n_l2 = 8;
+    for (i = 0; i < n_l2; i++) {
+        l1_rts[i] = PTE_VALID | PTE_TABLE | (uint64_t)(uintptr_t)l2_rts[i];
+        l1_low[264 + i] = l1_rts[i];
+    }
+    for (off = 0; off < vspan64; off += (1UL << 21)) {
+        int t = (int)(off >> 30);
+        int e = (int)((off >> 21) & 511);
+        l2_rts[t][e] = PTE_VALID | PTE_BLOCK_AF | PTE_SH_INNER | PTE_ATTR(ATTR_NORMAL) | (pa + off);
+    }
+    __asm__ volatile("dsb sy; tlbi vmalle1; dsb sy; isb" ::: "memory");
+}
+
+void house_mmu_update_alias(void) {
+    uint64_t span = get_ram_bytes();
+    build_rts_alias(span);
 }
 
 /* Called from start.S once BSS is clear and SP is live; DAIF masked. */
@@ -79,7 +110,7 @@ void house_mmu_early(void)
     int i, blocks;
     uint64_t sctlr;
     uint64_t span = get_ram_bytes();
-    uint64_t half = span >> 1;
+    if (span == 0) span = 4ULL<<30; // fallback 4G for early map (probe capped)
 
     /* Block 0 stays Device: PL011 @0x09000000, GIC @0x08000000. */
     map_block(0, ATTR_DEVICE);
@@ -87,31 +118,7 @@ void house_mmu_early(void)
     for (i = 1; i <= blocks && i < 256; i++)     /* identity RAM */
         map_block(i, ATTR_NORMAL);
 
-    /* RTS working window: VA 0x4200000000+k*2MB -> upper-half RAM,
-        excluding the top BOOT_STACK area (2M + SMP_N*16K) so heap commits
-        never stomp per-core stacks. 4G is the SMP>2 working RAM; larger
-        hosts use more of the upper half. */
-    {
-        uint64_t stack_reserve = 0x200000ULL + (uint64_t)HOUSE_SMP_N * 16384ULL;
-        uint64_t usable_half = half > stack_reserve ? half - stack_reserve : 0;
-        uint64_t vspan64 = usable_half > (8UL << 30) ? (8UL << 30) : usable_half;
-        int n_l2 = (int)((vspan64 + (1UL << 30) - 1) >> 30);
-        uint64_t off;
-        uint64_t pa = RAM_BASE + half;
-        if (n_l2 > 8)
-            n_l2 = 8;
-        for (i = 0; i < n_l2; i++) {
-            l1_rts[i] = PTE_VALID | PTE_TABLE |
-                        (uint64_t)(uintptr_t)l2_rts[i];
-            l1_low[264 + i] = l1_rts[i];         /* VA 0x4200000000+ */
-        }
-        for (off = 0; off < vspan64; off += (1UL << 21)) {
-            int t = (int)(off >> 30);
-            int e = (int)((off >> 21) & 511);
-            l2_rts[t][e] = PTE_VALID | PTE_BLOCK_AF | PTE_SH_INNER |
-                           PTE_ATTR(ATTR_NORMAL) | (pa + off);
-        }
-    }
+    build_rts_alias(span);
     /* Root pointers: staged identity via TTBR0 (TTBR1 disabled via EPD1). */
     for (i = 0; i < 512; i++) ttbr0_l0[i] = 0;
     for (i = 0; i < 512; i++) ttbr1_l0[i] = 0;

@@ -84,11 +84,14 @@ el1_setup:
 3:  add     x0, x0, #24
     b       1b
  2:
-     /* Per-core SP: house_boot_stack_top - core*16K if set else BOOT_STACK_TOP. */
+     /* Per-core SP: house_boot_stack_top - core*16K if set else early stacks.
+          Early boot uses low __early_stacks_top (after BSS) which is safe
+          for both 512M and 4G QEMU; c_start rebases to runtime top after
+          detect (so same ELF works at 512M/4G without stack fault). */
      ldr     x1, =house_boot_stack_top
      ldr     x1, [x1]
      cbnz    x1, 10f
-     ldr     x1, =BOOT_STACK_TOP
+     ldr     x1, =__early_stacks_top
  10: mov     x2, #16384
      mul     x3, x19, x2
      sub     x1, x1, x3
@@ -175,11 +178,11 @@ sec_el1:
     msr     cpacr_el1, x1
     isb
 
-     /* Per-core SP: runtime top if already set by primary. */
+     /* Per-core SP: runtime top if already set by primary (else early). */
      ldr     x1, =house_boot_stack_top
      ldr     x1, [x1]
      cbnz    x1, 11f
-     ldr     x1, =BOOT_STACK_TOP
+     ldr     x1, =__early_stacks_top
  11: mov     x2, #16384
      mul     x3, x19, x2
      sub     x1, x1, x3

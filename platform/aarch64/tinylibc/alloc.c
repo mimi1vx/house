@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include "../spinlock.h"
+#include "../house_detect.h"
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
@@ -10,25 +11,19 @@ static house_spinlock_t alloc_lock = {0};
 
 extern char __heap_base[];
 
-/* Same pairing as mmu.c: RAM extent comes from the top-level Makefile. */
-#ifndef HOUSE_RAM_BYTES
-#define HOUSE_RAM_BYTES 0x100000000ULL   /* 4G */
-#endif
-#ifndef HOUSE_STACK_TOP
-#define HOUSE_STACK_TOP (0x40000000ULL + HOUSE_RAM_BYTES - 0x200000ULL)
-#endif
 #ifndef HOUSE_SMP_N
 #define HOUSE_SMP_N 2
 #endif
 
-#define RAM_LIMIT (0x40000000ULL + HOUSE_RAM_BYTES)
+static inline uint64_t runtime_ram_bytes(void) {
+    // No compile-time limit — pure auto-detect. Fallback to 512M until probe.
+    if (house_ram_bytes) return house_ram_bytes;
+    return 512ULL<<20;
+}
+#define RAM_LIMIT (0x40000000ULL + runtime_ram_bytes())
 
-// Per-core boot stacks (16K each) sit below HOUSE_STACK_TOP; with caches ON
-// they are Normal WB Inner-shareable, so no DCCMVAC needed per 4K commit.
-// GIC/PL011 remain Device in block 0 (mmu.c). 4G is the SMP>2 working set;
-// 512M stays valid for N=2 regression only.
-_Static_assert(HOUSE_RAM_BYTES > 0x200000ULL + (HOUSE_SMP_N * 16384ULL),
-               "HOUSE_RAM_BYTES too small for SMP boot stacks");
+// Per-core boot stacks (16K each) are at runtime house_boot_stack_top;
+// GIC/PL011 remain Device block 0. No compile-time RAM size check.
 
 /* The RTS heap arena lives at GHC's working aarch64 base (VA
    0x4200000000, aliased onto upper-half guest RAM by mmu.c's L2 tier);
@@ -59,12 +54,13 @@ static int committable(char *lo, size_t n)
     if (in_ram(lo, n))
         return 1;
     /* RTS alias window (see mmu.c): VA 0x4200000000+ backed by the
-       upper half of guest RAM, capped at 2GB, excluding the top
-       BOOT_STACK area (2M + SMP_N*16K) so heap never overwrites
-       per-core boot stacks that live at the very top of RAM. */
+       upper half of guest RAM, capped at 8GB, excluding the top
+       BOOT_STACK area (2M + SMP_N*16K). Runtime uses house_ram_bytes
+       if available so 512M vs 4G detection changes span. */
     {
         uint64_t stack_reserve = 0x200000ULL + (uint64_t)HOUSE_SMP_N * 16384ULL;
-        uint64_t half = HOUSE_RAM_BYTES >> 1;
+        uint64_t ram = runtime_ram_bytes();
+        uint64_t half = ram >> 1;
         uint64_t span = half > stack_reserve ? half - stack_reserve : 0;
         if (span > (8UL << 30))
             span = 8UL << 30;

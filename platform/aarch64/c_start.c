@@ -4,6 +4,7 @@
 #include "irq.h"
 #include "psci.h"
 #include "house_detect.h"
+#include "buddy.h"
 char *getenv(const char *n);
 void hs_init(int *argc, char ***argv);
 
@@ -37,15 +38,27 @@ extern void house_timer_init_secondary(uint32_t core);
 extern void house_threads_init_secondary(uint32_t core);
 void c_start_secondary(uint64_t core_id);
 
+extern volatile int house_in_probe;
+extern volatile uint64_t house_probe_recovery;
+extern volatile int house_probe_faulted;
+
 /* Synchronous exceptions: with I+D caches ON real LDXR/STXR are coherent
    across Inner-shareable Normal WB; the single-core exclusive emulation is
-   removed. DFSC 0x35 is now fatal, as are all other sync faults. */
+   removed. DFSC 0x35 is now fatal, as are all other sync faults. Probe
+   path (house_probe.c) uses fault-trapped scan: if house_in_probe and
+   EC 0x25 data abort, flag fault and jump to recovery ELR. */
 uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr,
                        uint64_t *gpr, void *fpi)
 {
     (void)fpi;
     int ec = (int)((esr >> 26) & 0x3f);
-    (void)ec;
+    if (house_in_probe && ec == 0x25) {
+        house_probe_faulted = 1;
+        __asm__ volatile("dsb sy; isb");
+        // Skip faulting LDR (4 bytes) — more robust than label address
+        return elr + 4;
+    }
+    uart_puts("[probe] in_probe="); uart_putc('0'+ (house_in_probe?1:0)); uart_puts(" ec="); uart_puthex(esr); uart_puts(" far="); uart_puthex(far); uart_puts(" elr="); uart_puthex(elr); uart_puts(" rec="); uart_puthex(house_probe_recovery); uart_puts("\n");
 
     uart_puts("\n[house] fatal sync exception ESR=");
     uart_puthex(esr);
@@ -170,10 +183,46 @@ void c_start(void)
         uart_puts(" smp="); uart_putc('0'+house_smp);
         uart_puts(" src="); uart_puts(house_ram_source);
         uart_puts(" stack_top="); uart_puthex(house_boot_stack_top);
+        { extern uint64_t __boot_dtb; uart_puts(" dtb="); uart_puthex((uint64_t)(uintptr_t)__boot_dtb); }
         uart_puts("\n");
+        // Rebase SP from early low stacks to runtime high stacks now that
+        // house_boot_stack_top is known (safe for both 512M and 4G QEMU).
+        {
+            uint64_t core = (uint64_t)house_cpu_id();
+            uint64_t new_sp = house_boot_stack_top - core * 16384ULL;
+            __asm__ volatile("mov sp, %0" :: "r"(new_sp) : "memory");
+        }
+    }
+    // Update RTS alias for correct half-RAM after probe (mmu early used fallback)
+    {
+        extern void house_mmu_update_alias(void);
+        house_mmu_update_alias();
+        uart_puts("[house] mmu alias updated for ram "); uart_puthex(house_ram_bytes); uart_puts("\n");
     }
     uart_puts("[house] c_start: irq_init\n");
     house_irq_init();
+    // Buddy over whole RAM minus bump heap (64M at 0x42000000) and top stacks
+    {
+        extern char __heap_base[];
+        uint64_t pool_top = (uint64_t)(uintptr_t)__heap_base + (64ULL << 20);
+        uint64_t b_start = (pool_top + 4095) & ~4095ULL;
+        uint64_t b_end = house_boot_stack_top;
+        if (b_end > (uint64_t)HOUSE_MAX_SMP * 16384ULL) b_end -= (uint64_t)HOUSE_MAX_SMP * 16384ULL;
+        b_end &= ~4095ULL;
+        if (b_end > b_start) {
+            buddy_init(b_start, b_end);
+            uart_puts("[house] buddy: "); uart_puthex(b_start); uart_puts(".."); uart_puthex(b_end);
+            uart_puts(" pages="); {
+                uint64_t tp, fp; house_mem_stats(&tp, &fp);
+                uart_puthex(tp); uart_puts("/"); uart_puthex(fp);
+            } uart_puts("\n");
+            extern void house_userspace_init(void);
+            extern void *min_user_addr;
+            extern void *max_user_addr;
+            house_userspace_init();
+            uart_puts("[house] userspace: "); uart_puthex((uint64_t)(uintptr_t)min_user_addr); uart_puts(".."); uart_puthex((uint64_t)(uintptr_t)max_user_addr); uart_puts("\n");
+        }
+    }
     house_detect_late();
     // Sync late SMP to global and log
     uart_puts("[house] c_start: house_smp_n="); uart_putc('0'+house_smp_n); uart_puts("\n");

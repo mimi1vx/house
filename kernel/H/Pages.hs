@@ -5,7 +5,8 @@
 module H.Pages (Page, pageSize, allocPage, freePage, registerPage, zeroPage, validPage, freePageCount) where
 
 import Data.Word (Word8)
-import H.AdHocMem (Ptr, castPtr, peek, plusPtr, poke)
+import Foreign.C.Types (CInt (..))
+import H.AdHocMem (Ptr, castPtr, nullPtr, peek, plusPtr, poke)
 import H.Concurrency
 import H.Monad (liftIO)
 import H.Mutable
@@ -44,7 +45,18 @@ minAddr, maxAddr :: Ptr a
 minAddr = unsafePerformH (peek minAddrRef)
 maxAddr = unsafePerformH (peek maxAddrRef)
 
-validPage p = validPtr (minAddr, maxAddr) p && alignedPtr pageSize p
+foreign import ccall unsafe "buddy_alloc_page" buddyAllocPageIO :: IO (Ptr a)
+
+foreign import ccall unsafe "buddy_free_page" buddyFreePageIO :: Ptr a -> IO ()
+
+foreign import ccall unsafe "buddy_contains" buddyContainsIO :: Ptr a -> IO CInt
+
+foreign import ccall unsafe "buddy_free_count" buddyFreeCountIO :: IO CInt
+
+buddyContains :: Ptr a -> Bool
+buddyContains p = unsafePerformH (do v <- liftIO (buddyContainsIO p); return (v /= 0))
+
+validPage p = (validPtr (minAddr, maxAddr) p && alignedPtr pageSize p) || (alignedPtr pageSize p && buddyContains p)
 
 {-# NOINLINE freeList #-}
 freeList :: Ref [Ptr a]
@@ -67,16 +79,20 @@ allocPageFromList =
     do
       pages <- readRef freeList
       case pages of
-        [] -> return Nothing
         (page : rest) -> do
           writeRef freeList rest
-          -- putStrLn ("newPage:" ++ (show page))
           return (Just page)
+        [] -> do
+          mp <- liftIO buddyAllocPageIO
+          if mp == nullPtr
+            then return Nothing
+            else return (Just mp)
 
 freePageToList :: Ptr a -> H ()
 freePageToList page =
-  withQSem pageSem $
-    do modifyRef freeList (page :)
+  if buddyContains page
+    then liftIO (buddyFreePageIO page)
+    else withQSem pageSem $ do modifyRef freeList (page :)
 
 -- putStrLn ("freePage:" ++ (show page))
 
@@ -123,9 +139,10 @@ cleanRegisteredPages =
 
 zeroPage p = sequence_ [poke ((castPtr p) `plusPtr` i) (0 :: Word8) | i <- [0 .. pageSize - 1]]
 
-freePageCount = withQSem pageSem $ do
-  pages <- readRef freeList
-  return (length pages)
+freePageCount = do
+  n <- withQSem pageSem $ do pages <- readRef freeList; return (length pages)
+  bc <- liftIO buddyFreeCountIO
+  return (n + fromIntegral bc)
 
 type Weak v = W.Weak v
 

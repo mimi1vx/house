@@ -656,6 +656,9 @@ gid_t getgid(void) { return 0; }
 gid_t getegid(void) { return 0; }
 
 extern volatile int house_smp_n;
+extern uint64_t house_ram_bytes;
+extern int buddy_total_count(void);
+extern int buddy_free_count(void);
 long sysconf(int name)
 {
     switch (name) {
@@ -664,11 +667,15 @@ long sysconf(int name)
     case _SC_NPROCESSORS_ONLN:
     case _SC_NPROCESSORS_CONF:
         return house_smp_n ? house_smp_n : 1;
-    case _SC_PHYS_PAGES:
-        return 131072;          /* 512 MiB / 4K: keeps the RTS heap
-                                   reservation inside our bump region */
-    case _SC_AVPHYS_PAGES:
+    case _SC_PHYS_PAGES: {
+        uint64_t ram = house_ram_bytes ? house_ram_bytes : (uint64_t)131072 * 4096;
+        return (long)(ram >> 12);
+    }
+    case _SC_AVPHYS_PAGES: {
+        int bc = buddy_free_count();
+        if (bc > 0) return (long)bc + 512;
         return 100000;
+    }
     case _SC_CLK_TCK:
         return 100;
     case _SC_OPEN_MAX:
