@@ -31,7 +31,9 @@ SMP_N=4 make smp-check
 ```
 
 ## Gotchas
-- **RAM is auto-detected.** No `HOUSE_RAM_BYTES` limit — DTB `reg` → fault-trapped probe (`128M→16G`) → `128M` fallback; `SPIKE_MEM` (default `4G`) only drives QEMU `-m` and same ELF boots at `256M`/`512M`/`1G`/`2G`/`4G`/`8G`/`16G` without rebuild. `SMP_N` (default `2`, max `16`, tested to `8`) sets `HOUSE_SMP_N` and per-core 16K stacks.
+- **RAM is auto-detected.** No `HOUSE_RAM_BYTES` limit — DTB `reg` → fault-trapped probe (`128M→16G`) → `128M` fallback; `SPIKE_MEM` (default `4G`, now `HOUSE_RAM_LIMIT`) only drives QEMU `-m` and same ELF boots at `256M`/`512M`/`1G`/`2G`/`4G`/`8G`/`16G` without rebuild; `HOUSE_RAM_LIMIT_BYTES` caps auto-detect. `SMP_N` (default `2`, max `16`, tested to `8`, now `HOUSE_SMP_LIMIT`) sets `HOUSE_SMP_N`/`HOUSE_SMP_LIMIT` and per-core 16K stacks.
+- **MMU is split TTBR0=user / TTBR1=kernel.** `mmu.c` builds `ttbr1_l0`/`ttbr0_l0` with `TCR EPD1=0 T1SZ=16 TG1=4K`, `house_mmu_set_ttbr0(pdir,asid)` loads `TTBR0_EL1` per `H.VirtualMemory PageMap` with 8-bit ASID (0 reserved). `c_start.c` handles EL1 translation faults `DFSC 0x04..0x07` via `userspace.c:house_handle_user_fault` (buddy 4K + `VAE1IS` + SGI 1 `VMALLE1IS` shootdown).
+- **Buddy allocator over whole RAM.** `buddy.c` manages `__heap_base+64M .. house_boot_stack_top-16*16K` as intrusive free-list+bump; `H.Pages` falls through to `buddy_alloc_page` and `sysconf(_SC_PHYS_PAGES)` = `house_ram_bytes>>12`, `_SC_AVPHYS_PAGES` = `buddy_free+512`; `free`/`mem`/`detect` shell commands show `buddy`/`ram`/`stack_top`.
 - `*-check` targets run `clean` themselves. If running `*-build` manually, `make -C platform/aarch64 clean` (and `make -C kernel clean` for house) first.
 - Expect signature: `expect scripts/<harness>.exp <elf> <marker> [timeout] [accel] [mem] [smp]` — markers: `ticks-ok`, `vm-ok`, `Welcome to the House shell`, `smp: N cores online`.
 - No `npm`/`cargo`/`pytest` — only `make` + `expect`.

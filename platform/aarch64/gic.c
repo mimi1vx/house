@@ -64,7 +64,7 @@ void house_gic_init(void) {
 
     uint64_t igroup_addr = gicr_base(0) + GICR_IGROUPR0;
     uint32_t gr = mmio_r32(igroup_addr);
-    gr |= (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI);
+    gr |= (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI) | (1u << 1);
     mmio_w32(igroup_addr, gr);
     uart_puts("[house] gic: GICR_IGROUPR0=0x"); puthex32(mmio_r32(igroup_addr)); uart_puts("\n");
 
@@ -75,7 +75,7 @@ void house_gic_init(void) {
     uart_puts("[house] gic: GICD_CTLR after=0x"); puthex32(ctlr); uart_puts("\n");
 
     uint64_t isen_addr = gicr_base(0) + GICR_ISENABLER0;
-    mmio_w32(isen_addr, (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI));
+    mmio_w32(isen_addr, (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI) | (1u << 1));
     uart_puts("[house] gic: GICR_ISENABLER0=0x"); puthex32(mmio_r32(isen_addr)); uart_puts("\n");
 
     __asm__ volatile("mrs %0, ICC_SRE_EL1" : "=r"(s));
@@ -100,11 +100,11 @@ void house_gic_init_secondary(uint32_t core) {
     }
     uint64_t igroup_addr = gicr_base(core) + GICR_IGROUPR0;
     uint32_t gr = mmio_r32(igroup_addr);
-    gr |= (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI);
+    gr |= (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI) | (1u << 1);
     mmio_w32(igroup_addr, gr);
     __asm__ volatile("dsb sy; isb");
     uint64_t isen_addr = gicr_base(core) + GICR_ISENABLER0;
-    mmio_w32(isen_addr, (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI));
+    mmio_w32(isen_addr, (1u << 27) | (1u << 29) | (1u << 30) | (1u << SGI_IPI) | (1u << 1));
     __asm__ volatile("dsb sy; isb");
     gic_enable_sre();
     __asm__ volatile("dsb sy; isb");

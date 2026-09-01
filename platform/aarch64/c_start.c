@@ -58,6 +58,22 @@ uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr,
         // Skip faulting LDR (4 bytes) — more robust than label address
         return elr + 4;
     }
+    // Demand-pager: EL1 translation faults on TTBR0 user VA (0x01000000–0x3FFFFFFF)
+    // DFSC 0x04..0x07 = translation fault L0..L3. Try to allocate and map.
+    {
+        uint64_t dfsc = esr & 0x3f;
+        int is_data_abort = (ec == 0x24 || ec == 0x25);
+        int is_insn_abort = (ec == 0x20 || ec == 0x21);
+        int is_translation = (dfsc >= 0x04 && dfsc <= 0x07);
+        if ((is_data_abort || is_insn_abort) && is_translation) {
+            extern int house_handle_user_fault(uint64_t far);
+            if (house_handle_user_fault(far)) {
+                __asm__ volatile("dsb ish; isb");
+                return elr; // retry faulting instruction
+            }
+            uart_puts("[demand] unhandled translation FAR="); uart_puthex(far); uart_puts(" DFSC="); uart_puthex(dfsc); uart_puts("\n");
+        }
+    }
     uart_puts("[probe] in_probe="); uart_putc('0'+ (house_in_probe?1:0)); uart_puts(" ec="); uart_puthex(esr); uart_puts(" far="); uart_puthex(far); uart_puts(" elr="); uart_puthex(elr); uart_puts(" rec="); uart_puthex(house_probe_recovery); uart_puts("\n");
 
     uart_puts("\n[house] fatal sync exception ESR=");
@@ -96,6 +112,13 @@ void c_handle_irq(uint64_t *gpr, void *fpi)
         // SGI IPI 0: scheduler kick
         extern void house_sched_ipi_handler(void);
         house_sched_ipi_handler();
+        __asm__ volatile("msr ICC_EOIR1_EL1, %0" :: "r"(iar));
+        __asm__ volatile("dsb sy; isb");
+        return;
+    }
+    if (intid == 1) {
+        // SGI 1: TLB shootdown (invalidate all, ASID-aware would be VAE1)
+        __asm__ volatile("dsb ish; tlbi vmalle1is; dsb ish; isb" ::: "memory");
         __asm__ volatile("msr ICC_EOIR1_EL1, %0" :: "r"(iar));
         __asm__ volatile("dsb sy; isb");
         return;

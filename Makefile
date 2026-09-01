@@ -19,11 +19,20 @@ container-shell:
 # SPIKE_MEM only drives QEMU -m (512M/1G/2G/4G/8G/16G all verified, hvf+tcg);
 # same ELF boots at any -m without rebuild. SMP_N: vCPUs for QEMU -smp
 # and early stacks (default 2, up to HOUSE_MAX_SMP=16, tested to 8).
+# New names HOUSE_RAM_LIMIT / HOUSE_SMP_LIMIT are caps (compat shims kept):
+#   HOUSE_RAM_LIMIT ?= SPIKE_MEM  → -DHOUSE_RAM_LIMIT_BYTES
+#   HOUSE_SMP_LIMIT ?= SMP_N      → -DHOUSE_SMP_LIMIT (also HOUSE_SMP_N for compat)
 SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
 SMP_N ?= 2
-SMP_DEFS_C := -DHOUSE_SMP_N=$(SMP_N)
-SMP_DEFS_S := -DHOUSE_SMP_N=$(SMP_N)
+HOUSE_RAM_LIMIT ?= $(SPIKE_MEM)
+HOUSE_SMP_LIMIT ?= $(SMP_N)
+# Convert e.g. 512M/4G to bytes for -DHOUSE_RAM_LIMIT_BYTES (unless already given as bytes)
+ifeq ($(origin HOUSE_RAM_LIMIT_BYTES),undefined)
+HOUSE_RAM_LIMIT_BYTES := $(shell echo "$(HOUSE_RAM_LIMIT)" | awk '{v=$$0; m=substr(v,length(v),1); n=substr(v,1,length(v)-1)+0; if(m=="G"||m=="g") print n*1024*1024*1024; else if(m=="M"||m=="m") print n*1024*1024; else if(m=="K"||m=="k") print n*1024; else print v}')
+endif
+SMP_DEFS_C := -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT) -DHOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES)
+SMP_DEFS_S := -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
 
 spike-build:
 	container run --platform linux/arm64 --rm \

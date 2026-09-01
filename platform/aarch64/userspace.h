@@ -8,3 +8,5 @@ void init_page_dir(void *pdir);
 void *current_pdir(void);
 void invalidate_page(uint64_t vaddr);
 void house_userspace_init(void);
+void house_tlb_shootdown(uint64_t vaddr);
+int house_handle_user_fault(uint64_t far);
