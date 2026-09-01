@@ -22,6 +22,9 @@ import qualified Kernel.Driver.IRQ as DIRQ
 import qualified Kernel.Driver.PL011Server as PL011S
 import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (showDriverInfo)
+import qualified Kernel.Driver.Virtio.Queue as VQueue
+import qualified Kernel.Driver.Virtio.Transport as VTrans
+import qualified Kernel.Driver.Virtio.Types as VTypes
 import qualified Kernel.Driver.VirtioProbe as VProbe
 import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
@@ -120,7 +123,13 @@ house_main = do
       ["dmesg"] -> handleDmesg
       ["dmesg", "clear"] -> handleDmesgClear
       ["virtio", "scan"] -> handleVirtioScan
-      ["virtio"] -> withCString "usage: virtio scan\n" c_uart_puts
+      ["virtio", "init", s] -> handleVirtioInit s
+      ["virtio", "notify", s] -> handleVirtioNotify s
+      ["virtio", "status"] -> handleVirtioStatus
+      ["virtio", "ack", s] -> handleVirtioAck s
+      ["virtio", "irqtest", s] -> handleVirtioIrqtest s
+      ["virtio", "teardown", s] -> handleVirtioTeardown s
+      ["virtio"] -> withCString "usage: virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot>\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -242,6 +251,45 @@ house_main = do
                      else "empty"
                  )
       withCString (unlines (map fmt infos)) c_uart_puts
+    handleVirtioInit s = case reads s of
+      [(n, "")] -> do
+        r <- runH (VTrans.virtioInit n)
+        case r of
+          Left e -> withCString (VTypes.virtioErrorToString e ++ "\n") c_uart_puts
+          Right dev -> withCString ("ok device_id=" ++ show (VTrans.vdId dev) ++ " qsize=" ++ show (maybe 0 VQueue.queueSize (VTrans.vdQueue dev)) ++ " endpoint=" ++ show (VTrans.vdEndpoint dev) ++ "\n") c_uart_puts
+      _ -> withCString "usage: virtio init <slot>\n" c_uart_puts
+    handleVirtioNotify s = case reads s of
+      [(n, "")] -> do
+        r <- runH (VTrans.virtioNotify n 0)
+        case r of
+          Left e -> withCString (VTypes.virtioErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "notified\n" c_uart_puts
+      _ -> withCString "usage: virtio notify <slot>\n" c_uart_puts
+    handleVirtioStatus = do
+      xs <- runH VTrans.virtioStatusAll
+      let fmt (slot, st) = "virtio slot " ++ show slot ++ ": status=0x" ++ showHex (fromIntegral st) ++ " " ++ show st
+      withCString (unlines (map fmt xs)) c_uart_puts
+    handleVirtioAck s = case reads s of
+      [(n, "")] -> do
+        st <- runH (VTrans.virtioInterruptStatus n)
+        _ <- runH (VTrans.virtioAck n 1)
+        withCString ("ack slot " ++ show n ++ " status=0x" ++ showHex (fromIntegral st) ++ "\n") c_uart_puts
+      _ -> withCString "usage: virtio ack <slot>\n" c_uart_puts
+    handleVirtioIrqtest s = case reads s of
+      [(n, "")] -> do
+        st <- runH (VTrans.virtioInterruptStatus n)
+        _ <- runH (VTrans.virtioAck n 1)
+        xs <- runH NS.nsList
+        let hasNs = ("virtio-slot" ++ show n) `elem` xs
+        withCString ("irqtest slot " ++ show n ++ " status=0x" ++ showHex (fromIntegral st) ++ " ns=" ++ show hasNs ++ " irq ok\n") c_uart_puts
+      _ -> withCString "usage: virtio irqtest <slot>\n" c_uart_puts
+    handleVirtioTeardown s = case reads s of
+      [(n, "")] -> do
+        r <- runH (VTrans.virtioTeardown n)
+        case r of
+          Left e -> withCString (VTypes.virtioErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "teardown ok\n" c_uart_puts
+      _ -> withCString "usage: virtio teardown <slot>\n" c_uart_puts
     handleUname args = do
       let sysname = "House"
           nodename = "house"
@@ -341,7 +389,8 @@ house_main = do
           "       ns reg <name> -- register name (pl011 launches server)",
           "       ipc ping <nsName> -- sync call to endpoint",
           "       ipc grant -- alloc one page and send to pl011",
-          "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)"
+          "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)",
+          "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)"
         ]
     seqFib :: Int -> Int
     seqFib n

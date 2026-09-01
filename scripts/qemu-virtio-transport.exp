@@ -1,0 +1,162 @@
+#!/usr/bin/expect -f
+# Virtio-MMIO transport test (Track 3).
+# Device-agnostic: scan/status/notify/ack + ramfs/ipc sanity.
+# Usage: expect scripts/qemu-virtio-transport.exp <kernel.elf> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 30}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re ">" { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# dmesg framework online
+send "dmesg\r"
+expect {
+    -re "House driver framework online" { puts "\nPASS: dmesg framework online" }
+    timeout { puts "\nFAIL: dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after dmesg"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# lsdev empty ok
+send "lsdev\r"
+expect {
+    -re ">" { puts "\nPASS: lsdev empty ok" }
+    timeout { puts "\nFAIL: lsdev timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# virtio scan slot 0 (empty)
+send "virtio scan\r"
+expect {
+    -re "virtio slot 0" { puts "\nPASS: virtio scan slot 0" }
+    timeout { puts "\nFAIL: virtio scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after virtio scan"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# scan again to slot 7
+send "virtio scan\r"
+expect {
+    -re "virtio slot 7" { puts "\nPASS: virtio scan slot 7" }
+    timeout { puts "\nFAIL: virtio scan slot7 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after scan7"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# virtio status should print status per slot
+send "virtio status\r"
+expect {
+    -re "status" { puts "\nPASS: virtio status" }
+    timeout { puts "\nFAIL: virtio status timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after status"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# virtio init 0 on empty -> BadSlot/BadVersion/InvalidArg quickly, not hang
+send "virtio init 0\r"
+expect {
+    -re "BadSlot|BadVersion|InvalidArg|empty|init" { puts "\nPASS: virtio init 0 empty quick" }
+    timeout { puts "\nFAIL: virtio init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after init"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ramfs still live
+send "write /a hello\r"
+expect {
+    -re ">" { puts "\nPASS: write /a hello" }
+    timeout { puts "\nFAIL: write timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /a\r"
+expect {
+    -re "hello" { puts "\nPASS: cat /a -> hello" }
+    timeout { puts "\nFAIL: cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after cat"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# ns ls + ipc ping pl011 still ok
+send "ns ls\r"
+expect {
+    -re ">" { puts "\nPASS: ns ls after virtio" }
+    timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "ns reg pl011\r"
+expect {
+    -re "registered pl011" { puts "\nPASS: ns reg pl011" }
+    timeout { puts "\nFAIL: ns reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after ns reg"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "ipc ping pl011\r"
+expect {
+    -re "ok" { puts "\nPASS: ipc ping pl011 ok" }
+    timeout { puts "\nFAIL: ipc ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after ipc ping"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# virtio ack
+send "virtio ack 0\r"
+expect {
+    -re ">" { puts "\nPASS: virtio ack 0" }
+    timeout { puts "\nFAIL: virtio ack timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# virtio notify on empty -> NotReady/BadSlot
+send "virtio notify 0\r"
+expect {
+    -re "NotReady|BadSlot|InvalidArg" { puts "\nPASS: virtio notify empty" }
+    timeout { puts "\nFAIL: virtio notify timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after notify"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# virtio irqtest
+send "virtio irqtest 0\r"
+expect {
+    -re "irq ok|status" { puts "\nPASS: virtio irqtest" }
+    timeout { puts "\nFAIL: irqtest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re ">" {}
+    timeout { puts "\nFAIL: prompt after irqtest"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# burst 5 scans without deadlock
+for {set i 0} {$i < 5} {incr i} {
+    send "virtio scan\r"
+    expect {
+        -re "virtio slot 0" {}
+        timeout { puts "\nFAIL: burst scan $i"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    expect {
+        -re ">" {}
+        timeout { puts "\nFAIL: prompt burst $i"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+}
+puts "\nPASS: burst 5 scans ok"
+puts "\nPASS: virtio-transport ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

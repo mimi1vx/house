@@ -143,6 +143,11 @@ house-driver-check: house-build
 	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
 
+# Virtio-MMIO transport (Track 3): device-agnostic split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint
+house-virtio-transport-check: house-build
+	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
 # spike ticks, GIC dispatch + VM, house banner, and interactive shell,
@@ -160,4 +165,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check house-ipc-check house-driver-check run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check run check
