@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
+# staticlib required — single panic owner house-libc provides __stack_chk_guard,
+# other crates (house-boot, house-hal-aarch64) declare extern C __stack_chk_guard
 crate-type = ["staticlib", "rlib"]
 
 [lints]

@@ -99,8 +99,12 @@ VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-# Common base (c_start + mm/vm stays C in Phase 3)
+# Common base — Phase 4: when RUST=1, TINY is Rust (house-libc), c_start+vm stay C until c_start.rs/vm.rs landing
+ifeq ($(RUST),1)
 COMMON_OBJS := $(BOOT_O) build/c_start.o $(TINY_OBJS) $(VM_OBJ)
+else
+COMMON_OBJS := $(BOOT_O) build/c_start.o $(TINY_OBJS) $(VM_OBJ)
+endif
 
 ifeq ($(RUST),1)
 OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
@@ -128,9 +132,9 @@ ifeq ($(RUST),1)
 build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
 	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
 	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS_HOUSE_DEPS)) $$(find ../../kernel/build -name '*.o') \
-	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) --end-group \
-	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
-	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) \
+	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	    /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
 else
 build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
@@ -183,17 +187,16 @@ ifeq ($(RUST),1)
 build/spike.elf: $(OBJS) build/aarch64.ld
 	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
 	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS)) \
-	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) --end-group \
-	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) \
-	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) \
+	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
 
 build/irq.elf: $(OBJS_IRQ) build/aarch64.ld
 	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
 	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS_IRQ)) \
-	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) --end-group \
-	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
-	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) \
+	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	    /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
 else
 build/spike.elf: $(OBJS) build/aarch64.ld
