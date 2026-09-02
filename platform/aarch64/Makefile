@@ -14,11 +14,15 @@ RUST_MANIFEST := ../../rust/Cargo.toml
 RUST_TARGET   := aarch64-unknown-none
 RUST_BOOT_A   := ../../rust/target/$(RUST_TARGET)/debug/libhouse_boot.rlib
 RUST_LIBC_A   := ../../rust/target/$(RUST_TARGET)/debug/libhouse_libc.a
-RUST_LIBS     := $(RUST_BOOT_A) $(RUST_LIBC_A)
+RUST_HAL_A    := ../../rust/target/$(RUST_TARGET)/debug/libhouse_hal_aarch64.rlib
+RUST_SYSROOT  := $(shell rustc --print sysroot)
+RUST_CORE_A   := $(wildcard $(RUST_SYSROOT)/lib/rustlib/$(RUST_TARGET)/lib/libcore-*.rlib)
+RUST_COMPILER_BUILTINS_A := $(wildcard $(RUST_SYSROOT)/lib/rustlib/$(RUST_TARGET)/lib/libcompiler_builtins-*.rlib)
+RUST_LIBS     := $(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A)
 
 ifeq ($(RUST),1)
 BOOT_O := $(RUST_BOOT_A)
-$(RUST_BOOT_A):
+$(RUST_BOOT_A) $(RUST_HAL_A):
 	cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
 else
 BOOT_O := build/start.o
@@ -31,6 +35,13 @@ ifneq ($(HOUSE_RAM_LIMIT_BYTES),)
 DEFS_C += -DHOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES)
 endif
 DEFS_C += -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
+
+# Ensure Rust panic handler is linked via house-libc when RUST=1
+ifeq ($(RUST),1)
+RUST_LIBC_A_DEPS := $(RUST_LIBC_A)
+else
+RUST_LIBC_A_DEPS :=
+endif
 CFLAGS  := -O2 -ffreestanding -fno-builtin -fno-pic -fno-pie \
            -fno-stack-protector -Wall -Werror -I. -I$(HSINC) $(DEFS_C)
 ASFLAGS := -I. $(DEFS_S) -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
@@ -68,32 +79,38 @@ TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
 
 TINY_ASM := tinylibc/switch.S tinylibc/tls_desc.S
 
-PLATFORM_C := gic.c timer.c irq.c userspace.c svc.c psci.c ipc.c virtio_probe.c virtio_transport.c virtio_blk.c virtio_net.c house_dtb.c house_detect.c house_probe.c buddy.c mm/vm.c
+PLATFORM_C := gic.c timer.c irq.c userspace.c svc.c psci.c ipc.c virtio_probe.c virtio_transport.c virtio_blk.c virtio_net.c house_dtb.c house_detect.c house_probe.c buddy.c
 
-OBJS := $(BOOT_O) build/mmu.o build/c_start.o build/uart.o \
-         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
-         $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
-         $(addprefix build/,$(PLATFORM_C:.c=.o)) \
-         build/Spike.o
+PLATFORM_C_HAL := $(PLATFORM_C)
+# HAL objects (C fallback) — PLATFORM_C + mmu/uart replaced by Rust when RUST=1; mm/vm.c stays C always
+HAL_C := mmu.c uart.c $(PLATFORM_C_HAL)
+HAL_C_OBJS := $(addprefix build/,$(HAL_C:.c=.o))
+VM_OBJ := build/mm/vm.o
+ifeq ($(RUST),1)
+HAL_O := $(RUST_HAL_A)
+else
+HAL_O := $(HAL_C_OBJS)
+endif
+
+TINY_OBJS := $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o)))
 
 VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Concurrency Kernel/Types/Console Kernel/Console Kernel/Debug \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-OBJS_IRQ := $(BOOT_O) build/mmu.o build/c_start.o build/uart.o \
-         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
-         $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
-         $(addprefix build/,$(PLATFORM_C:.c=.o)) \
-         build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
+# Common base (c_start + mm/vm stays C in Phase 3)
+COMMON_OBJS := $(BOOT_O) build/c_start.o $(TINY_OBJS) $(VM_OBJ)
 
-# House kernel (phase 4): boot → PL011 welcome banner, blocks on empty input.
-# Haskell objects are produced by kernel/Makefile (build/**.o)
-# and collected via find; C/platform objects are rebuilt here.
-OBJS_HOUSE_DEPS := $(BOOT_O) build/mmu.o build/c_start.o build/uart.o \
-         $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
-         $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
-         $(addprefix build/,$(PLATFORM_C:.c=.o))
+ifeq ($(RUST),1)
+OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
+OBJS_IRQ := $(COMMON_OBJS) $(HAL_O) build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
+OBJS_HOUSE_DEPS := $(COMMON_OBJS) $(HAL_O)
+else
+OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
+OBJS_IRQ := $(COMMON_OBJS) $(HAL_O) build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
+OBJS_HOUSE_DEPS := $(COMMON_OBJS) $(HAL_O)
+endif
 
 all: build/spike.elf
 	@readelf -h build/spike.elf | grep -E 'Entry|Machine'
@@ -107,12 +124,22 @@ house: build/house.elf
 house-hs:
 	$(MAKE) -C ../../kernel
 
+ifeq ($(RUST),1)
+build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
+	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
+	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS_HOUSE_DEPS)) $$(find ../../kernel/build -name '*.o') \
+	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) --end-group \
+	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  $(shell $(CC) -print-libgcc-file-name)
+else
 build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
 	$(LD) --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
 	  $(OBJS_HOUSE_DEPS) $$(find ../../kernel/build -name '*.o') \
 	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
+endif
 
 build/aarch64.ld: aarch64.ld | build
 	$(CC) -E -P -x c -DHOUSE_SMP_N=$(SMP_N) -o $@ $<
@@ -152,6 +179,23 @@ build/%.o: ../../kernel/%.hs | build
 build/IrqCheck.o: IrqCheck.hs build/H/Interrupts.o build/H/Monad.o $(VM_OBJS) | build
 	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
 
+ifeq ($(RUST),1)
+build/spike.elf: $(OBJS) build/aarch64.ld
+	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
+	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS)) \
+	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) --end-group \
+	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  $(shell $(CC) -print-libgcc-file-name)
+
+build/irq.elf: $(OBJS_IRQ) build/aarch64.ld
+	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
+	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS_IRQ)) \
+	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) --end-group \
+	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
+	  $(shell $(CC) -print-libgcc-file-name)
+else
 build/spike.elf: $(OBJS) build/aarch64.ld
 	$(LD) --build-id=none --gc-sections -T build/aarch64.ld -o $@ $(OBJS) \
 	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) \
@@ -163,6 +207,7 @@ build/irq.elf: $(OBJS_IRQ) build/aarch64.ld
 	  --start-group $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	  /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
+endif
 
 clean:
 	rm -rf build
