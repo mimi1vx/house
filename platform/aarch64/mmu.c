@@ -158,7 +158,7 @@ void house_mmu_enable_secondary(void)
 }
 
 void house_mmu_set_ttbr0(void *pdir, uint64_t asid) {
-    uint64_t v = ((uint64_t)(uintptr_t)pdir & ~0xFFFFULL) | (asid & 0xFFFF);
+    uint64_t v = ((uint64_t)(uintptr_t)pdir & ~0xFFFULL) | ((asid & 0xFFFFULL) << 48);
     {
         extern void uart_puts(const char *);
         uart_puts("[mmu] set start\n");

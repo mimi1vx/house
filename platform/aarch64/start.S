@@ -377,8 +377,9 @@ house_enter_el0:
     // x0=entry, x1=sp, x2=pdir, x3=asid
     stp     x29, x30, [sp, #-16]!
     mov     x29, sp
-    // set TTBR0 = pdir | asid
-    orr     x9, x2, x3
+    // set TTBR0 = pdir | (asid << 48)
+    mov     x9, x2
+    bfi     x9, x3, #48, #16
     msr     ttbr0_el1, x9
     dsb     ish
     tlbi    vmalle1is
