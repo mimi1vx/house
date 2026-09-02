@@ -82,7 +82,7 @@ TINY_ASM := tinylibc/switch.S tinylibc/tls_desc.S
 PLATFORM_C := gic.c timer.c irq.c userspace.c svc.c psci.c ipc.c virtio_probe.c virtio_transport.c virtio_blk.c virtio_net.c house_dtb.c house_detect.c house_probe.c buddy.c
 
 PLATFORM_C_HAL := $(PLATFORM_C)
-# HAL objects (C fallback) — PLATFORM_C + mmu/uart replaced by Rust when RUST=1; mm/vm.c stays C always
+# HAL objects (C fallback) — PLATFORM_C + mmu/uart replaced by Rust when RUST=1; mm/vm.c replaced in slice 2
 HAL_C := mmu.c uart.c $(PLATFORM_C_HAL)
 HAL_C_OBJS := $(addprefix build/,$(HAL_C:.c=.o))
 VM_OBJ := build/mm/vm.o
@@ -99,9 +99,9 @@ VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-# Common base — Slice 1: when RUST=1, c_start is Rust (house-boot); tinylibc+vm stay C until slices 2/4
+# Common base — Slice 2: when RUST=1, c_start+vm are Rust; tinylibc stays C until slice 4
 ifeq ($(RUST),1)
-COMMON_OBJS := $(BOOT_O) $(TINY_OBJS) $(VM_OBJ)
+COMMON_OBJS := $(BOOT_O) $(TINY_OBJS)
 else
 COMMON_OBJS := $(BOOT_O) build/c_start.o $(TINY_OBJS) $(VM_OBJ)
 endif
