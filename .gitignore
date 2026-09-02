@@ -1,2 +1,3 @@
 kernel/build/
 platform/aarch64/build/
+rust/target/

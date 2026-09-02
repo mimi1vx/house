@@ -15,4 +15,10 @@ ENV BOOTSTRAP_HASKELL_NONINTERACTIVE=1 \
     PATH=/root/.ghcup/bin:/root/.ghcup/ghc/9.14.1/bin:$PATH
 
 RUN curl -sSf https://get-ghcup.haskell.org | sh \
-   && ghcup install ghc 9.14.1 && ghcup set ghc 9.14.1
+    && ghcup install ghc 9.14.1 && ghcup set ghc 9.14.1
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+    && /root/.cargo/bin/rustup target add aarch64-unknown-none \
+    && /root/.cargo/bin/rustup component add rustfmt clippy
+ENV PATH=/root/.cargo/bin:$PATH
+COPY rust-toolchain.toml /work/rust-toolchain.toml

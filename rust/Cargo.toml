@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/house-hal", "crates/house-hal-aarch64", "crates/house-libc", "crates/house-boot"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "off"
+opt-level = 2
