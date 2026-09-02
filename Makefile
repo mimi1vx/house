@@ -25,6 +25,7 @@ container-shell:
 SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
 SMP_N ?= 2
+RUST ?= 1
 HOUSE_RAM_LIMIT ?= $(SPIKE_MEM)
 HOUSE_SMP_LIMIT ?= $(SMP_N)
 # Convert e.g. 512M/4G to bytes for -DHOUSE_RAM_LIMIT_BYTES (unless already given as bytes)
@@ -37,7 +38,7 @@ SMP_DEFS_S := -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
 spike-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) RUST=$(RUST) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 spike-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -56,7 +57,7 @@ spike-check:
 irq-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) RUST=$(RUST) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 irq-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -77,7 +78,17 @@ irq-check:
 house-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) RUST=$(RUST) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+
+rust-check:
+	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings
+	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  bash -c 'cd rust && cargo fmt --check'
+
+rust-clean:
+	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	  cargo clean --manifest-path rust/Cargo.toml
 
 house-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -187,4 +198,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-userspace-check run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-userspace-check rust-check rust-clean run check

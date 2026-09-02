@@ -1,8 +1,8 @@
 #![no_std]
 
-//! Phase 1: entry/vectors crate.
-//!
-//! Future home of `global_asm!` vectors and `#[unsafe(naked)] _start`
-//! (ported from `platform/aarch64/start.S`). Depends on
-//! `house-hal-aarch64` for HAL primitives. Single panic handler owner is
-//! `house-libc` (per-crate duplicate removed in Phase 1).
+//! Boot entry/vectors crate — Phase 2 `global_asm!` port of `platform/aarch64/start.S`.
+//! Single panic handler owner is `house-libc` (SOTA Rust 03).
+// Safety: every `global_asm!` block has `// SAFETY:` discharging VBAR/sp/DAIF invariants.
+
+pub mod entry;
+pub mod exception;

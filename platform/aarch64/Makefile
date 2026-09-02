@@ -9,8 +9,24 @@ LD      := ld
 DEFS_C  ?=
 DEFS_S  ?=
 SMP_N   ?= 2  # generalizes to N ≤ HOUSE_MAX_SMP (16, tested to 8)
+RUST    ?= 1
+RUST_MANIFEST := ../../rust/Cargo.toml
+RUST_TARGET   := aarch64-unknown-none
+RUST_BOOT_A   := ../../rust/target/$(RUST_TARGET)/debug/libhouse_boot.rlib
+RUST_LIBC_A   := ../../rust/target/$(RUST_TARGET)/debug/libhouse_libc.a
+RUST_LIBS     := $(RUST_BOOT_A) $(RUST_LIBC_A)
+
+ifeq ($(RUST),1)
+BOOT_O := $(RUST_BOOT_A)
+$(RUST_BOOT_A):
+	cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
+else
+BOOT_O := build/start.o
+endif
 HOUSE_SMP_LIMIT ?= $(SMP_N)
 HOUSE_RAM_LIMIT_BYTES ?=
+.DEFAULT_GOAL := all
+
 ifneq ($(HOUSE_RAM_LIMIT_BYTES),)
 DEFS_C += -DHOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES)
 endif
@@ -54,7 +70,7 @@ TINY_ASM := tinylibc/switch.S tinylibc/tls_desc.S
 
 PLATFORM_C := gic.c timer.c irq.c userspace.c svc.c psci.c ipc.c virtio_probe.c virtio_transport.c virtio_blk.c virtio_net.c house_dtb.c house_detect.c house_probe.c buddy.c mm/vm.c
 
-OBJS := build/start.o build/mmu.o build/c_start.o build/uart.o \
+OBJS := $(BOOT_O) build/mmu.o build/c_start.o build/uart.o \
          $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
          $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
          $(addprefix build/,$(PLATFORM_C:.c=.o)) \
@@ -65,7 +81,7 @@ VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-OBJS_IRQ := build/start.o build/mmu.o build/c_start.o build/uart.o \
+OBJS_IRQ := $(BOOT_O) build/mmu.o build/c_start.o build/uart.o \
          $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
          $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
          $(addprefix build/,$(PLATFORM_C:.c=.o)) \
@@ -74,7 +90,7 @@ OBJS_IRQ := build/start.o build/mmu.o build/c_start.o build/uart.o \
 # House kernel (phase 4): boot → PL011 welcome banner, blocks on empty input.
 # Haskell objects are produced by kernel/Makefile (build/**.o)
 # and collected via find; C/platform objects are rebuilt here.
-OBJS_HOUSE_DEPS := build/start.o build/mmu.o build/c_start.o build/uart.o \
+OBJS_HOUSE_DEPS := $(BOOT_O) build/mmu.o build/c_start.o build/uart.o \
          $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \
          $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o))) \
          $(addprefix build/,$(PLATFORM_C:.c=.o))
@@ -151,4 +167,16 @@ build/irq.elf: $(OBJS_IRQ) build/aarch64.ld
 clean:
 	rm -rf build
 
-.PHONY: all clean
+cargo-build:
+	cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
+
+cargo-clippy:
+	cargo clippy --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET) -- -D warnings
+
+cargo-fmt:
+	cd ../../rust && cargo fmt --check
+
+cargo-clean:
+	cargo clean --manifest-path $(RUST_MANIFEST)
+
+.PHONY: all clean cargo-build cargo-clippy cargo-fmt cargo-clean

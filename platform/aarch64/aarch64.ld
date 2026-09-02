@@ -13,6 +13,9 @@ SECTIONS
 
   .text : {
     KEEP(*(.text.boot))
+    KEEP(*(.text.boot.*))
+    /* Phase 2: Rust global_asm! may emit .text.boot.rust subsection — keep from --gc-sections */
+    KEEP(*(.text.boot.rust*))
     *(.text .text.*)
   } :text
 
