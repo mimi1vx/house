@@ -20,13 +20,13 @@ RUST_CORE_A   := $(wildcard $(RUST_SYSROOT)/lib/rustlib/$(RUST_TARGET)/lib/libco
 RUST_COMPILER_BUILTINS_A := $(wildcard $(RUST_SYSROOT)/lib/rustlib/$(RUST_TARGET)/lib/libcompiler_builtins-*.rlib)
 RUST_LIBS     := $(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A)
 
-ifeq ($(RUST),1)
 BOOT_O := $(RUST_BOOT_A)
 $(RUST_BOOT_A) $(RUST_HAL_A):
 	cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
-else
-BOOT_O := build/start.o
-endif
+
+# legacy boot (RUST=0 kept for bisect until slice 6): start.S moved to start.S.legacy
+build/start.o: start.S.legacy | build
+	$(CC) -c $(ASFLAGS) -o $@ $<
 HOUSE_SMP_LIMIT ?= $(SMP_N)
 HOUSE_RAM_LIMIT_BYTES ?=
 .DEFAULT_GOAL := all
@@ -99,8 +99,12 @@ VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-# Common base — Phase 4: when RUST=1, TINY is Rust (house-libc) via --allow-multiple-definition, c_start+vm stay C until later (kept for compatibility)
+# Common base — Slice 1: when RUST=1, c_start is Rust (house-boot); tinylibc+vm stay C until slices 2/4
+ifeq ($(RUST),1)
+COMMON_OBJS := $(BOOT_O) $(TINY_OBJS) $(VM_OBJ)
+else
 COMMON_OBJS := $(BOOT_O) build/c_start.o $(TINY_OBJS) $(VM_OBJ)
+endif
 
 ifeq ($(RUST),1)
 OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
@@ -146,9 +150,6 @@ build/aarch64.ld: aarch64.ld | build
 
 build:
 	mkdir -p build build/H build/Kernel/Types build/Util build/Kernel build/mm
-
-build/start.o: start.S | build
-	$(CC) -c $(ASFLAGS) -o $@ $<
 
 build/tiny-%.o: tinylibc/%.c | build
 	$(CC) -c $(CFLAGS) -o $@ $<

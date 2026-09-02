@@ -4,5 +4,6 @@
 //! Single panic handler owner is `house-libc` (SOTA Rust 03).
 // Safety: every `global_asm!` block has `// SAFETY:` discharging VBAR/sp/DAIF invariants.
 
+pub mod c_start;
 pub mod entry;
 pub mod exception;
