@@ -30,8 +30,14 @@ uint64_t house_ram_probe(void) {
         16ULL<<30, 8ULL<<30, 4ULL<<30, 2ULL<<30,
         1ULL<<30, 512ULL<<20, 256ULL<<20, 128ULL<<20
     };
+#ifdef HOUSE_RAM_LIMIT_BYTES
+    uint64_t limit = HOUSE_RAM_LIMIT_BYTES;
+#else
+    uint64_t limit = 0;
+#endif
     for (int i = 0; i < 8; i++) {
         uint64_t sz = sizes[i];
+        if (limit && sz > limit) continue;
         uint64_t addr = HOUSE_RAM_BASE + sz - 8;
         if (probe_addr(addr)) return sz;
     }

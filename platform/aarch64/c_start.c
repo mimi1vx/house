@@ -52,26 +52,46 @@ uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr,
 {
     (void)fpi;
     int ec = (int)((esr >> 26) & 0x3f);
-    if (house_in_probe && ec == 0x25) {
+    if (house_in_probe && (ec == 0x24 || ec == 0x25)) {
         house_probe_faulted = 1;
         __asm__ volatile("dsb sy; isb");
         // Skip faulting LDR (4 bytes) — more robust than label address
         return elr + 4;
     }
-    // Demand-pager: EL1 translation faults on TTBR0 user VA (0x01000000–0x3FFFFFFF)
-    // DFSC 0x04..0x07 = translation fault L0..L3. Try to allocate and map.
+    // Demand-pager: EL1 faults on TTBR0 user VA (0x01000000–0xFFFFFFFF) — try to allocate
     {
-        uint64_t dfsc = esr & 0x3f;
         int is_data_abort = (ec == 0x24 || ec == 0x25);
         int is_insn_abort = (ec == 0x20 || ec == 0x21);
-        int is_translation = (dfsc >= 0x04 && dfsc <= 0x07);
-        if ((is_data_abort || is_insn_abort) && is_translation) {
+        if ((is_data_abort || is_insn_abort) && far >= 0x01000000ULL && far <= 0xFFFFFFFFULL) {
             extern int house_handle_user_fault(uint64_t far);
             if (house_handle_user_fault(far)) {
                 __asm__ volatile("dsb ish; isb");
                 return elr; // retry faulting instruction
             }
-            uart_puts("[demand] unhandled translation FAR="); uart_puthex(far); uart_puts(" DFSC="); uart_puthex(dfsc); uart_puts("\n");
+        }
+    }
+    // Permission fault RO guard: DFSC 0x0C..0x0F, WnR=1, FAR in user window, PTE AP_RO
+    {
+        uint64_t dfsc = esr & 0x3f;
+        int is_data_abort = (ec == 0x24 || ec == 0x25);
+        int is_insn_abort = (ec == 0x20 || ec == 0x21);
+        int is_permission = (dfsc >= 0x0C && dfsc <= 0x0F);
+        int wnr = (int)((esr >> 6) & 1);
+        if ((is_data_abort || is_insn_abort) && is_permission && wnr) {
+            if (far >= 0x01000000ULL && far <= 0xFFFFFFFFULL) {
+                extern int house_is_ro_page(uint64_t);
+                if (house_is_ro_page(far)) {
+                    uart_puts("[demand] perm fault RO far="); uart_puthex(far);
+                    uart_puts(" DFSC="); uart_puthex(dfsc);
+                    uart_puts(" ESR="); uart_puthex(esr); uart_puts("\n");
+                    // Skip faulting store to avoid livelock; SIGSEGV delivery deferred to PR2b
+                    __asm__ volatile("dsb sy; isb");
+                    return elr + 4;
+                } else {
+                    uart_puts("[demand] perm fault far="); uart_puthex(far);
+                    uart_puts(" DFSC="); uart_puthex(dfsc); uart_puts("\n");
+                }
+            }
         }
     }
     uart_puts("[probe] in_probe="); uart_putc('0'+ (house_in_probe?1:0)); uart_puts(" ec="); uart_puthex(esr); uart_puts(" far="); uart_puthex(far); uart_puts(" elr="); uart_puthex(elr); uart_puts(" rec="); uart_puthex(house_probe_recovery); uart_puts("\n");

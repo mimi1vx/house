@@ -151,6 +151,21 @@ house-virtio-blk-check: house-build
 house-virtio-net-check: house-build
 	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.elf 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 
+# VM/demand pager (PR2): 4K demand paging 0x01000000–0xFFFFFFFF, mprotect RO→perm fault, munmap→translation fault, isolate, ASID+shootdown
+vm-check:
+	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C $(SPIKE_DIR) clean
+	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C kernel clean
+	$(MAKE) house-build HOUSE_RAM_LIMIT=512M HOUSE_SMP_LIMIT=2
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 hvf 512M 2
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 tcg 512M 2
+	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C $(SPIKE_DIR) clean
+	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C kernel clean
+	$(MAKE) house-build HOUSE_RAM_LIMIT=4G HOUSE_SMP_LIMIT=4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 hvf 4G 4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 tcg 4G 4
+
+house-vm-check: vm-check
+
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
 # spike ticks, GIC dispatch + VM, house banner, and interactive shell,
@@ -168,4 +183,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check run check

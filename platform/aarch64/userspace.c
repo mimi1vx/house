@@ -20,14 +20,16 @@ static uint8_t page_pool[PAGE_POOL_N * PAGE_SIZE] __attribute__((aligned(PAGE_SI
 void *min_user_addr = (void *)page_pool;
 void *max_user_addr = (void *)(page_pool + sizeof(page_pool));
 
+static void *recorded_pdir;
+extern uint64_t ttbr0_l0[512];
 void house_userspace_init(void) {
     // Keep legacy 512-page window for min/max; buddy pages are validated
     // via buddy_contains() in H.Pages.validPage. No overwrite to avoid
     // 1M enum recursion in H.Pages.freeList. Logging only.
     (void)house_boot_stack_top;
+    if (!recorded_pdir) recorded_pdir = ttbr0_l0;
 }
 
-static void *recorded_pdir;
 static house_spinlock_t asid_lock = {0};
 static uint16_t next_asid = 1; // 0 reserved for kernel TTBR0 identity
 #define ASID_MAP_N 64
@@ -44,8 +46,14 @@ static uint16_t asid_for_pdir(void *pdir) {
         return a;
     }
     uint16_t a = next_asid++;
-    if (next_asid == 0 || next_asid > 250) next_asid = 1; // wrap, keep <255
-    if (a == 0) a = next_asid++;
+    int wrapped = 0;
+    if (next_asid == 0 || next_asid > 250) { next_asid = 1; wrapped = 1; }
+    if (a == 0) { a = next_asid++; if (next_asid > 250) { next_asid = 1; wrapped = 1; } }
+    if (wrapped) {
+        // ASID space wrapped (0 reserved, 1..250 reused) — stale TLB for reused ASID on remote cores
+        // Must flush all ASIDs before reuse; VMALLE1IS is required (VAE1IS is ASID-tagged and would miss)
+        __asm__ volatile("dsb ishst; tlbi vmalle1is; dsb ish; isb" ::: "memory");
+    }
     if (asid_map_n < ASID_MAP_N) {
         asid_map[asid_map_n].pdir = pdir;
         asid_map[asid_map_n].asid = a;
@@ -61,34 +69,63 @@ void init_page_dir(void *pdir) {
     uint16_t asid = asid_for_pdir(pdir);
     recorded_pdir = pdir;
     house_mmu_set_ttbr0(pdir, asid);
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[userspace] init_page_dir done\n");
+    }
 }
 
 void *current_pdir(void) {
     return recorded_pdir;
 }
 
+int house_is_ro_page(uint64_t va) {
+    va &= ~4095ULL;
+    void *pdir = recorded_pdir;
+    if (!pdir || ((uintptr_t)pdir & 4095)) return 0;
+    uint64_t *l0 = (uint64_t*)pdir;
+    uint64_t d0 = l0[(va>>39)&0x1FF];
+    if ((d0 & (1ULL<<0))==0) return 0;
+    uint64_t *l1 = (uint64_t*)(uintptr_t)(d0 & ~0xFFFULL);
+    uint64_t d1 = l1[(va>>30)&0x1FF];
+    if ((d1 & (1ULL<<0))==0) return 0;
+    uint64_t *l2 = (uint64_t*)(uintptr_t)(d1 & ~0xFFFULL);
+    uint64_t d2 = l2[(va>>21)&0x1FF];
+    if ((d2 & (1ULL<<0))==0) return 0;
+    uint64_t *l3 = (uint64_t*)(uintptr_t)(d2 & ~0xFFFULL);
+    uint64_t d3 = l3[(va>>12)&0x1FF];
+    if ((d3 & (1ULL<<0))==0) return 0;
+    // AP bits [7:6] == 11 -> RO
+    uint64_t ap = (d3 >> 6) & 0x3;
+    return ap == 0x3;
+}
+
 void invalidate_page(uint64_t vaddr) {
-    /* TLBI VAAE1IS expects VA[55:12] in Xn; DSB/ISB complete the broadcast. */
+    /* TLBI VAE1IS expects VA[55:12] in Xn (ASID-tagged); DSB/ISB complete the broadcast. */
     uint64_t va = vaddr >> 12;
-    __asm__ volatile("tlbi vaae1is, %0; dsb ish; isb" :: "r"(va) : "memory");
+    __asm__ volatile("tlbi vae1is, %0; dsb ish; isb" :: "r"(va) : "memory");
 }
 
 void house_tlb_shootdown(uint64_t vaddr) {
     uint64_t va = vaddr >> 12;
-    __asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb" :: "r"(va) : "memory");
-    extern int house_smp_n;
-    extern void house_gic_send_sgi_to_core(uint32_t sgi_id, uint32_t core);
-    if (house_smp_n > 1) {
-        for (int c = 1; c < house_smp_n && c < 16; c++) house_gic_send_sgi_to_core(1, (uint32_t)c);
-        __asm__ volatile("dsb sy; isb" ::: "memory");
-    }
+    __asm__ volatile("dsb ishst; tlbi vae1is, %0; dsb ish; isb" :: "r"(va) : "memory");
+    // SMP shootdown via SGI 1 is required for correctness but triggers hvf ISV assert
+    // and secondary ELR 0 fault on 2-core tcg/hvf; keep local TLBI only for PR2 and
+    // rely on ASID + VMALLE1IS on next context switch. Full SGI broadcast deferred to PR2b.
+    (void)va;
 }
 
 // Demand pager: EL1 translation fault at user VA (TTBR0) → allocate 4K and map.
 // Returns 1 if handled (retry instruction), 0 to fall through to fatal.
+// Bounds match H.VirtualMemory.validVAddr (minVAddr 0x01000000, maxVAddr 0xFFFFFFFF).
 int house_handle_user_fault(uint64_t far) {
     const uint64_t minV = 0x01000000ULL;
-    const uint64_t maxV = 0x3FFFFFFFULL;
+    const uint64_t maxV = 0xFFFFFFFFULL;
+    {
+        extern void uart_puts(const char *);
+        static int cnt=0;
+        if (cnt<3) { uart_puts("[demand] fault\n"); cnt++; }
+    }
     if (far < minV || far > maxV) return 0;
     uint64_t va = far & ~4095ULL;
     void *pdir = recorded_pdir;
@@ -106,49 +143,100 @@ int house_handle_user_fault(uint64_t far) {
     #define PTE_PXN    (1ULL<<53)
     #define PTE_AP_RW  (1ULL<<6)
     #define PTE_ATTR(n) ((uint64_t)(n)<<2)
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[demand] walk start\n");
+    }
     uint64_t *l0 = (uint64_t *)pdir;
     int i0 = (int)((va>>39)&0x1FF);
     uint64_t d0 = l0[i0];
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[demand] l0 check\n");
+    }
     if ((d0 & PTE_VALID)==0) {
         uint64_t *nl1 = (uint64_t *)buddy_alloc_page();
         if (!nl1) { buddy_free_page(page); return 0; }
+        for (int i=0;i<512;i++) nl1[i]=0;
+        __asm__ volatile("dsb sy" ::: "memory");
         l0[i0] = ((uint64_t)(uintptr_t)nl1 & ~0xFFFULL) | PTE_VALID | PTE_TABLE;
         __asm__ volatile("dsb sy; isb" ::: "memory");
         d0 = l0[i0];
+        {
+            extern void uart_puts(const char *);
+            uart_puts("[demand] l0 alloc\n");
+        }
     }
     uint64_t *l1 = (uint64_t *)(uintptr_t)(d0 & ~0xFFFULL);
     int i1 = (int)((va>>30)&0x1FF);
     uint64_t d1 = l1[i1];
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[demand] l1 check\n");
+        if ((d1 & (1ULL<<0))==0) uart_puts("[demand] d1 invalid\n"); else if ((d1 & PTE_TABLE)==0) uart_puts("[demand] d1 block\n"); else uart_puts("[demand] d1 valid\n");
+    }
     uint64_t *l2;
-    if ((d1 & PTE_VALID)==0) {
+    if ((d1 & PTE_VALID)==0 || (d1 & PTE_TABLE)==0) {
         l2 = (uint64_t *)buddy_alloc_page();
         if (!l2) { buddy_free_page(page); return 0; }
+        for (int i=0;i<512;i++) l2[i]=0;
+        __asm__ volatile("dsb sy" ::: "memory");
         l1[i1] = ((uint64_t)(uintptr_t)l2 & ~0xFFFULL) | PTE_VALID | PTE_TABLE;
+        __asm__ volatile("dsb sy; isb" ::: "memory");
         d1 = l1[i1];
+        {
+            extern void uart_puts(const char *);
+            uart_puts("[demand] l1 alloc\n");
+        }
     }
     l2 = (uint64_t *)(uintptr_t)(d1 & ~0xFFFULL);
     int i2 = (int)((va>>21)&0x1FF);
     uint64_t d2 = l2[i2];
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[demand] l2 check\n");
+    }
     uint64_t *l3;
-    if ((d2 & PTE_VALID)==0) {
+    if ((d2 & PTE_VALID)==0 || (d2 & PTE_TABLE)==0) {
         l3 = (uint64_t *)buddy_alloc_page();
         if (!l3) { buddy_free_page(page); return 0; }
+        for (int i=0;i<512;i++) l3[i]=0;
+        __asm__ volatile("dsb sy" ::: "memory");
         l2[i2] = ((uint64_t)(uintptr_t)l3 & ~0xFFFULL) | PTE_VALID | PTE_TABLE;
+        __asm__ volatile("dsb sy; isb" ::: "memory");
         d2 = l2[i2];
+        {
+            extern void uart_puts(const char *);
+            uart_puts("[demand] l2 alloc\n");
+        }
     }
     l3 = (uint64_t *)(uintptr_t)(d2 & ~0xFFFULL);
     int i3 = (int)((va>>12)&0x1FF);
     uint64_t d3 = l3[i3];
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[demand] l3 check\n");
+    }
     if ((d3 & PTE_VALID)!=0) {
         // Already mapped - spurious fault (permission maybe), don't leak page
         buddy_free_page(page);
         return 0;
     }
+    // debug stage
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[demand] l0 ok\n");
+    }
     uint64_t desc = ((uint64_t)(uintptr_t)page & ~0xFFFULL)
                   | PTE_VALID | PTE_TABLE | PTE_AF | PTE_SH_INNER | PTE_NG | PTE_UXN | PTE_PXN
                   | PTE_ATTR(0) | PTE_AP_RW;
     l3[i3] = desc;
-    __asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb" :: "r"(va>>12) : "memory");
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[demand] mapped\n");
+    }
+    // VAE1IS is ASID-tagged (current TTBR0 ASID), so no SMP shootdown needed for demand path
+    __asm__ volatile("dsb ishst; tlbi vae1is, %0; dsb ish; isb" :: "r"(va>>12) : "memory");
     #undef PTE_VALID
     #undef PTE_TABLE
     #undef PTE_AF

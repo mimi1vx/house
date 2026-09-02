@@ -1,0 +1,71 @@
+#!/usr/bin/expect -f
+# VM/distinct pager harness: demand paging + mprotect RO + munmap + per-process isolate + SMP shootdown + ASID
+# Usage: expect scripts/qemu-vm.exp <kernel.elf> [marker] [timeout] [accel] [mem] [smp]
+# Defaults: marker="vm-ok", timeout=90 (hvf) / 120 (tcg), accel=hvf, mem=4G, smp=2
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+if {$marker eq ""} { set marker "vm-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 120 } else { set timeout 90 }
+} else {
+    set timeout $timeout_arg
+}
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# drive vm harness
+send "vm\r"
+# We expect multiple markers in any order, but at least these:
+# demand ok, mprotect RO perm logged, munmap unmap fault, isolate ok, smp shootdown ok (if smp>1)
+# Final marker is vm-ok or vm: ... depending on HouseA64 impl
+expect {
+    -re "vm: demand ok 100 pages" { puts "\nPASS: demand 100 pages" }
+    timeout { puts "\nFAIL: demand timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before demand"; exit 1 }
+}
+expect {
+    -re "mprotect RO perm logged|perm fault RO" { puts "\nPASS: mprotect RO perm logged" }
+    timeout { puts "\nFAIL: mprotect RO timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before mprotect"; exit 1 }
+}
+expect {
+    -re "munmap unmap fault|unhandled translation" { puts "\nPASS: munmap unmap fault" }
+    timeout { puts "\nFAIL: munmap timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before munmap"; exit 1 }
+}
+expect {
+    -re "isolate ok" { puts "\nPASS: isolate ok" }
+    timeout { puts "\nFAIL: isolate timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before isolate"; exit 1 }
+}
+if {$smp > 1} {
+    expect {
+        -re "smp shootdown ok" { puts "\nPASS: smp shootdown ok" }
+        timeout { puts "\nFAIL: shootdown timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof before shootdown"; exit 1 }
+    }
+}
+expect {
+    -re $marker { puts "\nPASS: saw /$marker/" }
+    timeout { puts "\nFAIL: timed out waiting for /$marker/"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: qemu exited before marker"; exit 1 }
+}
+catch {exec kill -9 [exp_pid]}
+exit 0

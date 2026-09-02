@@ -25,8 +25,8 @@
 #define ATTR_DEVICE 1            /* MAIR attr1: Device-nGnRE */
 
 static uint64_t ttbr1_l0[512] __attribute__((aligned(4096)));
-static uint64_t ttbr0_l0[512] __attribute__((aligned(4096)));
-static uint64_t l1_low[512] __attribute__((aligned(4096)));
+uint64_t ttbr0_l0[512] __attribute__((aligned(4096)));
+uint64_t l1_low[512] __attribute__((aligned(4096)));
 /* RTS arena alias tier: eight level-2 tables of 2MB blocks cover up to
     8GB of VA 0x4200000000+ mapped onto upper-half guest RAM (4G working
     set uses 2GB, 8G/16G hosts use more). */
@@ -159,12 +159,58 @@ void house_mmu_enable_secondary(void)
 
 void house_mmu_set_ttbr0(void *pdir, uint64_t asid) {
     uint64_t v = ((uint64_t)(uintptr_t)pdir & ~0xFFFFULL) | (asid & 0xFFFF);
-    // Avoid using asid 0 reserved for kernel? caller ensures.
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[mmu] set start\n");
+    }
     __asm__ volatile("msr ttbr0_el1, %0" :: "r"(v));
-    __asm__ volatile("dsb ish; tlbi vmalle1is; dsb ish; isb" ::: "memory");
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[mmu] msr done\n");
+    }
+    __asm__ volatile("isb" ::: "memory");
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[mmu] isb done\n");
+    }
+    __asm__ volatile("dsb sy; isb" ::: "memory");
+    {
+        extern void uart_puts(const char *);
+        uart_puts("[mmu] dsb done\n");
+    }
+}
+
+void house_mmu_clone_kernel_l1(void *new_l1) {
+    extern uint64_t l1_low[512];
+    uint64_t *nl1 = (uint64_t *)new_l1;
+    for (int i = 0; i < 512; i++) {
+        uint64_t d = l1_low[i];
+        if (d == 0) continue;
+        if (i <= 3) continue; // user window 0x01000000–0xFFFFFFFF spans L1 0..3 (4×1GB); leave as tables/fault, don't clone kernel blocks
+        nl1[i] = d;
+    }
+    __asm__ volatile("dsb sy; isb" ::: "memory");
+}
+void house_mmu_clone_kernel_l2(void *new_l2) {
+    uint64_t *nl2 = (uint64_t *)new_l2;
+    uint64_t dev_desc_08000000 = (0x08000000ULL) | (1ULL<<0) | (1ULL<<10) | (3ULL<<8) | (1ULL<<2);
+    uint64_t dev_desc_09000000 = (0x09000000ULL) | (1ULL<<0) | (1ULL<<10) | (3ULL<<8) | (1ULL<<2);
+    nl2[64] = dev_desc_08000000;
+    nl2[72] = dev_desc_09000000;
+    __asm__ volatile("dsb sy; isb" ::: "memory");
 }
 
 void house_mmu_map_kernel(uint64_t pa, uint64_t va, uint64_t size, uint64_t attr) {
     (void)pa; (void)va; (void)size; (void)attr;
     // stub for Phase 5 kernel vm: to be implemented when buddy live
+}
+
+void house_get_ttbrs(uint64_t *ttbr0, uint64_t *ttbr1, uint64_t *tcr) {
+    uint64_t a,b,c;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(a));
+    __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(b));
+    __asm__ volatile("mrs %0, tcr_el1" : "=r"(c));
+    if (ttbr0) *ttbr0 = a;
+    if (ttbr1) *ttbr1 = b;
+    if (tcr) *tcr = c;
 }

@@ -18,11 +18,20 @@ where
 -- import Kernel.Debug(putStrLn)
 import Control.Monad
 import Data.Bits
+import Foreign.C.String (withCString)
+import Foreign.C.Types (CChar)
 import H.AdHocMem
 import H.Monad (liftIO)
 import qualified H.Pages as P
 import H.PhysicalMemory (PhysPage, fromPhysPage, toPhysPage)
 import H.Utils
+
+foreign import ccall "uart_puts" c_uart_puts_vm :: Ptr CChar -> IO ()
+
+foreign import ccall unsafe "house_mmu_clone_kernel_l1" c_clone_l1 :: Table -> IO ()
+foreign import ccall unsafe "house_mmu_clone_kernel_l2" c_clone_l2 :: Table -> IO ()
+
+foreign import ccall unsafe "house_puts_after" c_puts_after_vm :: IO ()
 
 ------------------------------- INTERFACE --------------------------------------
 
@@ -31,7 +40,7 @@ type VAddr = Word64
 
 minVAddr, maxVAddr :: VAddr
 minVAddr = 0x01000000
-maxVAddr = 0x3FFFFFFF
+maxVAddr = 0xFFFFFFFF -- 4GB window (0x01000000–0xFFFFFFFF, span 0xFF000000), T0SZ=16 4K; single L0 (512GB) + L1 0..3 (4×1GB) demand-allocated
 
 -- abstract type PageMap  -- Show,Eq,Ord(!)
 
@@ -224,55 +233,80 @@ setPage (PageMap l0) vaddr Nothing | validVAddr vaddr =
 setPage (PageMap l0) vaddr (Just pinfo) | validVAddr vaddr =
   do
     d0 <- peekElemOff l0 (l0Index vaddr)
-    l1 <- case tableFromDesc d0 of
-      Just t -> return t
-      Nothing -> error "L1 missing — allocPageMap should have created L0→L1"
-    d1 <- peekElemOff l1 (l1Index vaddr)
-    l2 <- case tableFromDesc d1 of
-      Just t -> return t
-      Nothing -> error "L2 missing — allocPageMap should have created L1→L2"
-    d2 <- peekElemOff l2 (l2Index vaddr)
-    ml3 <- case tableFromDesc d2 of
+    ml1 <- case tableFromDesc d0 of
       Just t -> return (Just t)
       Nothing -> do
         m <- P.allocPage
         case m of
           Nothing -> return Nothing
-          Just t -> do
-            P.zeroPage t
-            pokeElemOff l2 (l2Index vaddr) (descFromTable t)
-            return (Just t)
-    case ml3 of
+          Just t -> do P.zeroPage t; pokeElemOff l0 (l0Index vaddr) (descFromTable t); return (Just t)
+    case ml1 of
       Nothing -> return False
-      Just l3 -> do
-        pokeElemOff l3 (l3Index vaddr) (pageInfoToDesc pinfo)
-        invalidate l0 vaddr
-        return True
+      Just l1 -> do
+        d1 <- peekElemOff l1 (l1Index vaddr)
+        ml2 <- case tableFromDesc d1 of
+          Just t -> return (Just t)
+          Nothing -> do
+            m <- P.allocPage
+            case m of
+              Nothing -> return Nothing
+              Just t -> do P.zeroPage t; pokeElemOff l1 (l1Index vaddr) (descFromTable t); return (Just t)
+        case ml2 of
+          Nothing -> return False
+          Just l2 -> do
+            d2 <- peekElemOff l2 (l2Index vaddr)
+            ml3 <- case tableFromDesc d2 of
+              Just t -> return (Just t)
+              Nothing -> do
+                m <- P.allocPage
+                case m of
+                  Nothing -> return Nothing
+                  Just t -> do
+                    P.zeroPage t
+                    pokeElemOff l2 (l2Index vaddr) (descFromTable t)
+                    return (Just t)
+            case ml3 of
+              Nothing -> return False
+              Just l3 -> do
+                pokeElemOff l3 (l3Index vaddr) (pageInfoToDesc pinfo)
+                invalidate l0 vaddr
+                return True
 setPage _ vaddr _ | not (validVAddr vaddr) = return False
 setPage _ _ _ = return False
 
 allocPageMap =
   do
+    liftIO $ withCString "allocPageMap start\n" c_uart_puts_vm
     mL0 <- P.allocPage
+    liftIO $ withCString ("allocPageMap mL0 " ++ show (case mL0 of Just _ -> True; Nothing -> False) ++ "\n") c_uart_puts_vm
     case mL0 of
       Nothing -> return Nothing
       Just l0 -> do
         P.zeroPage l0
+        liftIO $ withCString "allocPageMap l0 zero ok\n" c_uart_puts_vm
         mL1 <- P.allocPage
+        liftIO $ withCString ("allocPageMap mL1 " ++ show (case mL1 of Just _ -> True; Nothing -> False) ++ "\n") c_uart_puts_vm
         case mL1 of
           Nothing -> do P.freePage l0; return Nothing
           Just l1 -> do
             P.zeroPage l1
+            liftIO $ withCString "allocPageMap l1 zero ok\n" c_uart_puts_vm
+            liftIO $ c_clone_l1 l1
+            liftIO $ withCString "allocPageMap clone l1 ok\n" c_uart_puts_vm
             mL2 <- P.allocPage
+            liftIO $ withCString ("allocPageMap mL2 " ++ show (case mL2 of Just _ -> True; Nothing -> False) ++ "\n") c_uart_puts_vm
             case mL2 of
               Nothing -> do P.freePage l1; P.freePage l0; return Nothing
               Just l2 -> do
                 P.zeroPage l2
+                liftIO $ c_clone_l2 l2
+                liftIO $ withCString "allocPageMap l2 zero ok\n" c_uart_puts_vm
                 pokeElemOff l0 (l0Index minVAddr) (descFromTable l1)
                 pokeElemOff l1 (l1Index minVAddr) (descFromTable l2)
                 let pm = PageMap l0
-                initPDir l0
                 P.registerPage l0 pm freePDir
+                initPDir l0
+                liftIO c_puts_after_vm
                 return (Just pm)
 
 freePageMap _ = return () -- nop; underlying Pages are freed when corresponding registered PageMap is discovered dead
@@ -288,19 +322,20 @@ freePDir l0 =
         case tableFromDesc d0 of
           Nothing -> P.freePage l0
           Just l1 -> do
-            d1 <- peekElemOff l1 (l1Index minVAddr)
-            case tableFromDesc d1 of
-              Nothing -> do P.freePage l1; P.freePage l0
-              Just l2 -> do
-                -- free any L3 tables
-                forM_ [0 .. pageEntries - 1] $ \i -> do
-                  d2 <- peekElemOff l2 i
-                  case tableFromDesc d2 of
-                    Just l3 | P.validPage l3 -> P.freePage l3
-                    _ -> return ()
-                P.freePage l2
-                P.freePage l1
-                P.freePage l0
+            -- free all L2s reachable via L1 (window now up to 4GB = L1 0..3, but iterate all 512 to be safe)
+            forM_ [0 .. pageEntries - 1] $ \i1 -> do
+              d1 <- peekElemOff l1 i1
+              case tableFromDesc d1 of
+                Just l2 | P.validPage l2 -> do
+                  forM_ [0 .. pageEntries - 1] $ \i2 -> do
+                    d2 <- peekElemOff l2 i2
+                    case tableFromDesc d2 of
+                      Just l3 | P.validPage l3 -> P.freePage l3
+                      _ -> return ()
+                  P.freePage l2
+                _ -> return ()
+            P.freePage l1
+            P.freePage l0
 
 foreign import ccall unsafe "userspace.h init_page_dir" initPDirIO :: PDir -> IO ()
 
