@@ -1,4 +1,4 @@
-FROM debian:12-slim
+FROM debian:13-slim
 
 # Loud failure if the base resolved to x86_64 (apple-container skill guard)
 RUN case "$(uname -m)" in aarch64) ;; *) \
