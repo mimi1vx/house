@@ -24,22 +24,8 @@ impl RawSpinLock {
 
     #[inline]
     pub fn lock(&self) {
-        // SAFETY: LDAXR/STXR loop with DMB SY matches C spinlock.h.
-        unsafe {
-            let ptr = self.v.get();
-            core::arch::asm!(
-                "1: ldaxr {tmp:w}, [{ptr}]",
-                "   cbnz {tmp:w}, 1b",
-                "   mov {res:w}, #1",
-                "   stxr {tmp:w}, {res:w}, [{ptr}]",
-                "   cbnz {tmp:w}, 1b",
-                "   dmb sy",
-                ptr = in(reg) ptr,
-                tmp = out(reg) _,
-                res = out(reg) _,
-                options(nostack),
-            );
-        }
+        // Single-core early boot: use DMB only to avoid LDAR/STLR hang before GIC.
+        unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
     }
 
     #[inline]
@@ -50,16 +36,7 @@ impl RawSpinLock {
 
     #[inline]
     pub fn unlock(&self) {
-        unsafe {
-            let ptr = self.v.get();
-            core::arch::asm!(
-                "dmb sy",
-                "stlr wzr, [{ptr}]",
-                "dmb sy",
-                ptr = in(reg) ptr,
-                options(nostack),
-            );
-        }
+        unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
     }
 }
 

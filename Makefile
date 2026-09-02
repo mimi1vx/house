@@ -25,7 +25,6 @@ container-shell:
 SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
 SMP_N ?= 2
-RUST ?= 1
 HOUSE_RAM_LIMIT ?= $(SPIKE_MEM)
 HOUSE_SMP_LIMIT ?= $(SMP_N)
 # Convert e.g. 512M/4G to bytes for -DHOUSE_RAM_LIMIT_BYTES (unless already given as bytes)
@@ -38,7 +37,7 @@ SMP_DEFS_S := -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
 spike-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) RUST=$(RUST) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 spike-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -57,7 +56,7 @@ spike-check:
 irq-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) RUST=$(RUST) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 irq-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -78,7 +77,7 @@ irq-check:
 house-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) RUST=$(RUST) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
 
 rust-check:
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \

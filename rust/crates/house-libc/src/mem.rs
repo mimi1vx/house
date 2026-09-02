@@ -10,19 +10,14 @@ use core::ptr;
 #[no_mangle]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    // SAFETY: copy_nonoverlapping requires non-overlapping; memcpy contract is non-overlap.
-    // Use byte/word loop preserving C semantics.
+    // Fast 8-byte unaligned copy when n>=8, then byte tail. Avoids alignment check that
+    // previously generated ldrb/and sequence and avoids recursive lowering via copy_nonoverlapping.
     let mut d = dst;
     let mut s = src;
     let mut remaining = n;
-    // 8-byte fast path when both aligned.
-    while remaining >= 8 && (d as usize & 7) == 0 && (s as usize & 7) == 0 {
-        // SAFETY: aligned 8-byte access within validated range.
+    while remaining >= 8 {
         unsafe {
             ptr::write_unaligned(d as *mut u64, ptr::read_unaligned(s as *const u64));
-        }
-        // SAFETY: we checked remaining >=8, pointers in bounds per caller.
-        unsafe {
             d = d.add(8);
             s = s.add(8);
         }
@@ -83,7 +78,7 @@ pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
     let word = (val as u64) * 0x0101010101010101u64;
     let mut d = dst;
     let mut remaining = n;
-    while remaining >= 8 && (d as usize & 7) == 0 {
+    while remaining >= 8 {
         unsafe {
             ptr::write_unaligned(d as *mut u64, word);
             d = d.add(8);

@@ -503,6 +503,14 @@ pub unsafe extern "C" fn house_sched_yield() {
 
 #[no_mangle]
 pub unsafe extern "C" fn house_tls_alloc() -> *mut u8 {
+    extern "C" {
+        fn buddy_alloc_page() -> *mut u8;
+    }
+    let p = unsafe { buddy_alloc_page() as *mut u8 };
+    if !p.is_null() {
+        unsafe { core::ptr::write_bytes(p, 0, 32) };
+        return p;
+    }
     let p = unsafe { malloc(32) };
     if p.is_null() {
         return core::ptr::null_mut();
