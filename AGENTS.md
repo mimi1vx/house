@@ -9,9 +9,9 @@ GHC RTS microkernel (Haskell + tinylibc), aarch64-only, QEMU `virt` on Apple sil
 - `Makefile` — host orchestration; `Containerfile` — build image.
 
 ## Container — build only
-- **All compilation runs inside `house-port:latest`** (Debian 12, GHC 9.14.1 aarch64). QEMU never runs inside the container; host needs `brew install qemu expect`.
+- **All compilation runs inside `house-port:latest`** (Debian 13, Rust stable `aarch64-unknown-none` + GHC 9.14.1 aarch64). QEMU never runs inside the container; host needs `brew install qemu expect`.
 - **Every `container` invocation must pin `--platform linux/arm64`.** Never set `CONTAINER_DEFAULT_PLATFORM` globally. `Containerfile:5` fails if `uname -m != aarch64`; `Makefile:9` asserts `image inspect` arch is `arm64` (no Rosetta/amd64 fallback).
-- Host entrypoints wrap this for you — `make spike-build` / `irq-build` / `house-build` run `container run --platform linux/arm64 --rm -v $PWD:/work -w /work house-port:latest make -C platform/aarch64 ...` with `SMP_N` only (RAM auto-detected).
+- Host entrypoints wrap this for you — `make spike-build` / `irq-build` / `house-build` run `container run --platform linux/arm64 --rm -v $PWD:/work -w /work house-port:latest make -C platform/aarch64 ...` with `SMP_N` only (RAM auto-detected). `RUST=1` default (Rust `house-boot`+`house-hal-aarch64`+`house-libc`), `RUST=0` bisect-only; `make rust-check` = `clippy -D warnings` + `fmt --check` inside `linux/arm64` image; see `rust/ARCHITECTURE.md` for `house-hal-riscv64` extension.
 - One-time setup: `make container-image`
 - Interactive shell: `make container-shell` → `container run --platform linux/arm64 --rm -it -v $PWD:/work -w /work house-port:latest bash`
 - Inside container directly: `make -C kernel` and `make -C platform/aarch64 house SMP_N=2`

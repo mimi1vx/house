@@ -336,6 +336,18 @@ nm rust/target/aarch64-unknown-none/debug/libhouse_libc.a | grep -E "__stack_chk
 `HsFFI.h` / `ghc --print-libdir` RTS archives are unchanged and linked via
 `--start-group $(PRIM_A) ... $(RTS_A) $(FFI_A)` — they are not part of this map.
 
+## Phase 5 note
+
+`house-hal` trait groups existing `#[no_mangle]` symbols — no new names.
+`house-hal-aarch64` `impl Hal* for AArch64Hal` are `#[inline(always)]` adapters
+to the free functions above (no vtable). Verify `riscv64` feature stub without
+breaking `aarch64` gate:
+
+```sh
+cargo build -p house-hal --no-default-features --features riscv64
+cargo metadata --manifest-path rust/Cargo.toml | jq '.packages[] | select(.name=="house-hal") | .features'
+```
+
 ## Rejected alternative
 
 `cbindgen`/`bindgen` from `platform/aarch64/*.h` was rejected: freestanding

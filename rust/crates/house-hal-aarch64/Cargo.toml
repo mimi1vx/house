@@ -7,6 +7,11 @@ license.workspace = true
 [lib]
 crate-type = ["rlib"]
 
+[features]
+aarch64 = ["house-hal/aarch64"]
+riscv64 = ["house-hal/riscv64"]
+default = ["aarch64"]
+
 [dependencies]
 house-hal = { path = "../house-hal" }
 

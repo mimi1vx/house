@@ -99,12 +99,8 @@ VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-# Common base — Phase 4: when RUST=1, TINY is Rust (house-libc), c_start+vm stay C until c_start.rs/vm.rs landing
-ifeq ($(RUST),1)
+# Common base — Phase 4: when RUST=1, TINY is Rust (house-libc) via --allow-multiple-definition, c_start+vm stay C until later (kept for compatibility)
 COMMON_OBJS := $(BOOT_O) build/c_start.o $(TINY_OBJS) $(VM_OBJ)
-else
-COMMON_OBJS := $(BOOT_O) build/c_start.o $(TINY_OBJS) $(VM_OBJ)
-endif
 
 ifeq ($(RUST),1)
 OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
