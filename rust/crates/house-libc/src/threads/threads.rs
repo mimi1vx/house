@@ -5,6 +5,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 #![allow(suspicious_runtime_symbol_definitions)]
+#![allow(unused_assignments)]
+#![allow(unused_mut)]
+#![allow(function_casts_as_integer)]
 
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -79,8 +82,14 @@ pub static mut sched_lock: u32 = 0;
 #[allow(suspicious_runtime_symbol_definitions)]
 unsafe extern "C" {
     fn malloc(n: usize) -> *mut u8;
+    fn free(p: *mut u8);
     static mut house_smp_n: i32;
     static mut house_smp_online_mask: u32;
+    fn house_gic_send_sgi_to_core(sgi: u32, core: u32);
+    fn house_thread_switch(old: *mut HouseThread, new: *mut HouseThread);
+    fn house_uptime_ns() -> u64;
+    fn house_timerfd_due(fd: i32) -> i32;
+    fn house_fd_pipe_readable(fd: i32) -> i32;
 }
 
 #[inline]
@@ -100,6 +109,60 @@ unsafe fn alloc_thread() -> *mut HouseThread {
         }
     }
     core::ptr::null_mut()
+}
+
+unsafe fn enqueue_run_core(core: i32, thr: *mut HouseThread) {
+    if core < 0 || core as usize >= HOUSE_MAX_SMP {
+        return;
+    }
+    let c = core as usize;
+    unsafe {
+        (*thr).next = core::ptr::null_mut();
+        (*thr).state = HOUSE_THR_RUNNABLE;
+        if !RUN_TAIL[c].is_null() {
+            (*RUN_TAIL[c]).next = thr;
+        } else {
+            RUN_HEAD[c] = thr;
+        }
+        RUN_TAIL[c] = thr;
+    }
+}
+
+unsafe fn enqueue_run(thr: *mut HouseThread) {
+    let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
+    let smp = if smp <= 0 { 2 } else { smp };
+    let aff = unsafe { (*thr).affinity };
+    let core = if aff != 0 {
+        aff.trailing_zeros() as i32
+    } else {
+        let tid = unsafe { (*thr).tid };
+        (tid % smp) as i32
+    };
+    let core = if core >= smp { 0 } else { core };
+    unsafe { enqueue_run_core(core, thr) };
+    let cur = unsafe { cpu_id() } as i32;
+    if core != cur {
+        unsafe { house_sched_kick(core) };
+    }
+}
+
+unsafe fn dequeue_run_core(core: i32) -> *mut HouseThread {
+    if core < 0 || core as usize >= HOUSE_MAX_SMP {
+        return core::ptr::null_mut();
+    }
+    let c = core as usize;
+    unsafe {
+        let thr = RUN_HEAD[c];
+        if thr.is_null() {
+            return core::ptr::null_mut();
+        }
+        RUN_HEAD[c] = (*thr).next;
+        if RUN_HEAD[c].is_null() {
+            RUN_TAIL[c] = core::ptr::null_mut();
+        }
+        (*thr).next = core::ptr::null_mut();
+        thr
+    }
 }
 
 #[no_mangle]
@@ -192,9 +255,7 @@ pub unsafe extern "C" fn house_threads_init_secondary(core: u32) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn house_threads_rebalance() {
-    // Simplified: no rebalance needed for spike
-}
+pub unsafe extern "C" fn house_threads_rebalance() {}
 
 #[no_mangle]
 pub unsafe extern "C" fn house_thread_current() -> *mut HouseThread {
@@ -248,42 +309,197 @@ pub unsafe extern "C" fn house_sched_lock_release() {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn house_sched_block() {
-    // For now, just yield
-    unsafe { house_sched_yield() };
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn house_sched_yield() {
-    // Minimal yield: if there's another runnable on this core, switch
-    let core = unsafe { cpu_id() } as usize;
-    if core >= HOUSE_MAX_SMP {
+pub unsafe extern "C" fn house_sched_wake(thr: *mut HouseThread) {
+    if thr.is_null() {
         return;
     }
     unsafe {
-        // In stub, just return; real scheduler would switch.
-        // For spike, no other threads, so no switch needed.
+        house_sched_lock_acquire();
+        if (*thr).state == HOUSE_THR_BLOCKED {
+            enqueue_run(thr);
+        }
+        house_sched_lock_release();
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn house_sched_kick(_core: i32) {
-    // Send IPI if needed - stub for now
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn house_sched_ipi_handler() {
     let core = unsafe { cpu_id() } as usize;
     if core < HOUSE_MAX_SMP {
-        unsafe { house_ipi_pending[core] = 0 };
+        unsafe { house_ipi_pending[core] = 1 };
     }
+    unsafe { core::arch::asm!("dsb sy; sev; isb", options(nostack, preserves_flags)) };
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn house_sched_kick(core: i32) {
+    if core < 0 {
+        return;
+    }
+    let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
+    if core >= smp {
+        return;
+    }
+    if core >= 32 {
+        return;
+    }
+    let mask = unsafe { core::ptr::read_volatile(&raw const house_smp_online_mask) };
+    if (mask & (1u32 << core)) == 0 {
+        return;
+    }
+    unsafe { house_gic_send_sgi_to_core(0, core as u32) };
+    unsafe { core::arch::asm!("dsb sy; sev; isb", options(nostack, preserves_flags)) };
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn house_sched_maybe_preempt_from_isr() {}
 
 #[no_mangle]
-pub unsafe extern "C" fn house_sched_wake(_thr: *mut HouseThread) {}
+pub unsafe extern "C" fn house_sched_block() {
+    let core = unsafe { cpu_id() };
+    let thr = unsafe { house_current_thr[core as usize] };
+    if thr.is_null() {
+        return;
+    }
+    unsafe { house_sched_lock_acquire() };
+    let next = unsafe { dequeue_run_core(core as i32) };
+    if next.is_null() {
+        unsafe { house_sched_lock_release() };
+        unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
+        unsafe { core::arch::asm!("wfe", options(nostack, preserves_flags)) };
+        unsafe { core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags)) };
+        unsafe { house_sched_lock_acquire() };
+        let n2 = unsafe { dequeue_run_core(core as i32) };
+        if n2.is_null() {
+            unsafe { house_sched_lock_release() };
+            unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
+            return;
+        }
+        let cur = unsafe { house_current_thr[core as usize] };
+        if !cur.is_null() {
+            unsafe { (*cur).state = HOUSE_THR_RUNNING };
+            unsafe { house_current_thr[core as usize] = n2 };
+            unsafe { (*n2).state = HOUSE_THR_RUNNING };
+            let old = cur;
+            unsafe { house_sched_lock_release() };
+            unsafe { core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags)) };
+            unsafe { house_thread_switch(old, n2) };
+            unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
+            return;
+        }
+    }
+    let cur = unsafe { house_current_thr[core as usize] };
+    if !cur.is_null() {
+        unsafe { (*cur).state = HOUSE_THR_BLOCKED };
+    }
+    let n = if next.is_null() {
+        unsafe { dequeue_run_core(core as i32) }
+    } else {
+        next
+    };
+    if n.is_null() {
+        unsafe { house_sched_lock_release() };
+        return;
+    }
+    unsafe { (*n).state = HOUSE_THR_RUNNING };
+    unsafe { house_current_thr[core as usize] = n };
+    let old = cur;
+    unsafe { house_sched_lock_release() };
+    unsafe { core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags)) };
+    if !old.is_null() {
+        unsafe { house_thread_switch(old, n) };
+    }
+    unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn house_sched_yield() {
+    let core = unsafe { cpu_id() } as i32;
+    unsafe { core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags)) };
+    // try lock without blocking
+    let mut tmp: u32 = 0;
+    let mut res: u32 = 0;
+    let mut locked: u32 = 0;
+    unsafe {
+        core::arch::asm!(
+            "ldaxr {tmp:w}, [{ptr}]",
+            "cbnz {tmp:w}, 2f",
+            "mov {res:w}, #1",
+            "stxr {tmp:w}, {res:w}, [{ptr}]",
+            "cbnz {tmp:w}, 2f",
+            "dmb sy",
+            "mov {out:w}, #1",
+            "b 3f",
+            "2: mov {out:w}, #0",
+            "3:",
+            ptr = in(reg) &raw mut sched_lock as *mut u32,
+            tmp = out(reg) tmp,
+            res = out(reg) res,
+            out = out(reg) locked,
+            options(nostack),
+        );
+    }
+    if locked == 0 {
+        unsafe {
+            core::arch::asm!(
+                "msr daifclr, #2; isb; yield; msr daifset, #2",
+                options(nostack, preserves_flags)
+            )
+        };
+        return;
+    }
+    let old = unsafe { house_current_thr[core as usize] };
+    if old.is_null() {
+        unsafe {
+            core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+            core::arch::asm!("stlr wzr, [{ptr}]", ptr = in(reg) &raw mut sched_lock as *mut u32, options(nostack, preserves_flags));
+            core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+            core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+        };
+        return;
+    }
+    let old_state = unsafe { (*old).state };
+    if old_state == HOUSE_THR_RUNNING {
+        unsafe { (*old).state = HOUSE_THR_RUNNABLE };
+        unsafe { enqueue_run_core(core, old) };
+    }
+    let mut next = unsafe { dequeue_run_core(core) };
+    if next.is_null() {
+        if old_state == HOUSE_THR_RUNNABLE {
+            next = unsafe { dequeue_run_core(core) };
+            if next.is_null() {
+                next = old;
+            }
+        } else {
+            unsafe {
+                core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+                core::arch::asm!("stlr wzr, [{ptr}]", ptr = in(reg) &raw mut sched_lock as *mut u32, options(nostack, preserves_flags));
+                core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+                core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+            };
+            return;
+        }
+    }
+    if next == old {
+        unsafe { (*old).state = HOUSE_THR_RUNNING };
+        unsafe {
+            core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+            core::arch::asm!("stlr wzr, [{ptr}]", ptr = in(reg) &raw mut sched_lock as *mut u32, options(nostack, preserves_flags));
+            core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+            core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+        };
+        return;
+    }
+    unsafe { (*next).state = HOUSE_THR_RUNNING };
+    unsafe { house_current_thr[core as usize] = next };
+    unsafe {
+        core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+        core::arch::asm!("stlr wzr, [{ptr}]", ptr = in(reg) &raw mut sched_lock as *mut u32, options(nostack, preserves_flags));
+        core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+        core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+    };
+    unsafe { house_thread_switch(old, next) };
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn house_tls_alloc() -> *mut u8 {
@@ -295,20 +511,84 @@ pub unsafe extern "C" fn house_tls_alloc() -> *mut u8 {
     p
 }
 
-// Stubs for pthread etc - keep minimal but functional for tests
+// -- pthread stubs kept minimal --
 #[no_mangle]
 pub unsafe extern "C" fn pthread_create(
     thr: *mut u64,
     _a: *const u8,
-    _f: *const u8,
-    _arg: *mut u8,
+    start: *mut u8,
+    arg: *mut u8,
 ) -> i32 {
     if thr.is_null() {
         return 22;
     }
-    unsafe { *thr = 2 };
+    // simplified: alloc thread and enqueue, don't actually start
+    let t = unsafe { alloc_thread() };
+    if t.is_null() {
+        return 11;
+    }
+    unsafe {
+        let tid = NEXT_TID;
+        NEXT_TID += 1;
+        (*t).tid = tid;
+        (*t).start = start;
+        (*t).arg = arg;
+        (*t).state = HOUSE_THR_RUNNABLE;
+        (*t).detached = 0;
+        (*t).exited = 0;
+        let stack = malloc(HOUSE_THREAD_STACK_BYTES as usize);
+        if stack.is_null() {
+            (*t).state = HOUSE_THR_UNUSED;
+            return 12;
+        }
+        (*t).stack_base = stack;
+        (*t).stack_size = HOUSE_THREAD_STACK_BYTES;
+        (*t).tcb = house_tls_alloc();
+        (*t).tpidr = (*t).tcb as u64;
+        let top = (stack as usize + HOUSE_THREAD_STACK_BYTES) & !15;
+        let sp = (top - 160) as *mut u8;
+        (*t).sp = sp;
+        // setup initial sp with trampoline
+        let sp64 = sp as *mut u64;
+        *sp64.add(9) = house_thread_trampoline as *const () as usize as u64;
+        let smp = core::ptr::read_volatile(&raw const house_smp_n);
+        let smp = if smp <= 0 { 2 } else { smp };
+        let target = if tid < 10 { 0 } else { (tid % smp) as i32 };
+        (*t).affinity = 1u32 << target;
+        enqueue_run(t);
+        *thr = tid as u64;
+        let cur = cpu_id() as i32;
+        if target != cur {
+            house_sched_kick(target);
+        }
+    }
     0
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn house_thread_trampoline() {
+    let core = cpu_id() as usize;
+    let thr = if core < HOUSE_MAX_SMP {
+        house_current_thr[core]
+    } else {
+        core::ptr::null_mut()
+    };
+    if thr.is_null() {
+        loop {
+            unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
+        }
+    }
+    let start = unsafe { (*thr).start };
+    let arg = unsafe { (*thr).arg };
+    let ret = if !start.is_null() {
+        let f: unsafe extern "C" fn(*mut u8) -> *mut u8 = unsafe { core::mem::transmute(start) };
+        unsafe { f(arg) }
+    } else {
+        core::ptr::null_mut()
+    };
+    unsafe { pthread_exit(ret) };
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pthread_join(_t: u64, _r: *mut *mut u8) -> i32 {
     0
@@ -318,14 +598,65 @@ pub unsafe extern "C" fn pthread_detach(_t: u64) -> i32 {
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn pthread_exit(_r: *mut u8) -> ! {
+pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
+    let core = cpu_id() as usize;
+    let cur = house_current_thr[core];
+    if !cur.is_null() {
+        unsafe { (*cur).retval = r };
+        unsafe { (*cur).exited = 1 };
+        unsafe { (*cur).state = 4 }; // EXITED
+                                     // handle joiner
+        let joiner = unsafe { (*cur).joiner };
+        if !joiner.is_null() {
+            unsafe { (*cur).joiner = core::ptr::null_mut() };
+            let target = unsafe { (*joiner).affinity } as i32;
+            let target = if target == 0 {
+                0
+            } else {
+                target.trailing_zeros() as i32
+            };
+            unsafe { enqueue_run(joiner) };
+            let cur_core = cpu_id() as i32;
+            if target != cur_core {
+                unsafe { house_sched_kick(target) };
+            }
+        }
+        if unsafe { (*cur).detached } != 0 {
+            let stack = unsafe { (*cur).stack_base };
+            let tcb = unsafe { (*cur).tcb };
+            if !stack.is_null() {
+                unsafe { free(stack) };
+            }
+            if !tcb.is_null() {
+                unsafe { free(tcb) };
+            }
+            unsafe { (*cur).state = HOUSE_THR_UNUSED };
+        }
+    }
+    let next = unsafe { dequeue_run_core(core as i32) };
+    if next.is_null() {
+        loop {
+            unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
+        }
+    }
+    unsafe { (*next).state = HOUSE_THR_RUNNING };
+    unsafe { house_current_thr[core] = next };
+    let old = cur;
+    if !old.is_null() {
+        unsafe { house_thread_switch(old, next) };
+    }
     loop {
         unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
     }
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_self() -> u64 {
-    1
+    let cur = unsafe { house_thread_current() };
+    if cur.is_null() {
+        1
+    } else {
+        unsafe { (*cur).tid as u64 }
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_kill(_t: u64, _s: i32) -> i32 {
@@ -373,10 +704,12 @@ pub unsafe extern "C" fn pthread_cond_broadcast(_c: *mut u8) -> i32 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_cond_wait(_c: *mut u8, _m: *mut u8) -> i32 {
+    unsafe { house_sched_block() };
     0
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_cond_timedwait(_c: *mut u8, _m: *mut u8, _t: *const u8) -> i32 {
+    unsafe { house_sched_block() };
     0
 }
 #[no_mangle]
@@ -433,10 +766,24 @@ pub unsafe extern "C" fn sched_yield() -> i32 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn sched_getaffinity(_p: i32, _s: usize, _m: *mut u8) -> i32 {
+    if !_m.is_null() && _s >= 8 {
+        let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
+        let m = if smp >= 64 { !0u64 } else { (1u64 << smp) - 1 };
+        unsafe { *(_m as *mut u64) = m };
+        if _s > 8 {
+            unsafe { core::ptr::write_bytes(_m.add(8), 0, _s - 8) };
+        }
+    }
     0
 }
 #[no_mangle]
 pub unsafe extern "C" fn sched_setaffinity(_p: i32, _s: usize, _m: *const u8) -> i32 {
+    if !_m.is_null() {
+        let cur = unsafe { house_thread_current() };
+        if !cur.is_null() {
+            unsafe { (*cur).affinity = *(_m as *const u32) }
+        };
+    }
     0
 }
 #[no_mangle]
@@ -444,26 +791,216 @@ pub unsafe extern "C" fn pthread_sigmask(_h: i32, _s: *const u8, _o: *mut u8) ->
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn nanosleep(_r: *const u8, _m: *mut u8) -> i32 {
+pub unsafe extern "C" fn nanosleep(rq: *const u8, rm: *mut u8) -> i32 {
+    if rq.is_null() {
+        return 0;
+    }
+    let ns = unsafe { *(rq as *const u64).add(0) * 1000000000 + *(rq as *const u64).add(1) };
+    // Actually timespec is tv_sec, tv_nsec as i64
+    let secs = unsafe { *(rq as *const i64).add(0) } as u64;
+    let nsec = unsafe { *(rq as *const i64).add(1) } as u64;
+    let total = secs * 1000000000 + nsec;
+    if total == 0 {
+        unsafe { house_sched_yield() };
+        return 0;
+    }
+    let until = unsafe { house_uptime_ns() } + total;
+    let core = unsafe { cpu_id() } as usize;
+    unsafe { house_sched_lock_acquire() };
+    let cur = unsafe { house_current_thr[core] };
+    if cur.is_null() {
+        unsafe { house_sched_lock_release() };
+        unsafe { house_sched_yield() };
+        return 0;
+    }
+    unsafe {
+        (*cur).wake_ns = until;
+        (*cur).state = HOUSE_THR_BLOCKED
+    };
+    let next = unsafe { dequeue_run_core(core as i32) };
+    if next.is_null() {
+        unsafe { house_sched_lock_release() };
+        while unsafe { house_uptime_ns() } < until {
+            unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
+        }
+        unsafe { house_sched_lock_acquire() };
+        let c = unsafe { house_current_thr[core] };
+        if !c.is_null() {
+            unsafe {
+                (*c).wake_ns = 0;
+                (*c).state = HOUSE_THR_RUNNING
+            };
+        }
+        unsafe { house_sched_lock_release() };
+        return 0;
+    }
+    unsafe { (*next).state = HOUSE_THR_RUNNING };
+    unsafe { house_current_thr[core] = next };
+    let old = cur;
+    unsafe { house_sched_lock_release() };
+    unsafe { house_thread_switch(old, next) };
+    while unsafe { house_uptime_ns() } < until {
+        let rem = until - unsafe { house_uptime_ns() };
+        let secs = rem / 1000000000;
+        let nsec = rem % 1000000000;
+        let mut tmp = [secs as i64, nsec as i64];
+        let r = unsafe { nanosleep(tmp.as_ptr() as *const u8, rm) };
+        if r != 0 {
+            return r;
+        }
+        break;
+    }
+    if !rm.is_null() {
+        unsafe {
+            *(rm as *mut i64).add(0) = 0;
+            *(rm as *mut i64).add(1) = 0
+        };
+    }
     0
 }
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
 #[no_mangle]
-pub unsafe extern "C" fn poll(_f: *mut u8, _n: u64, _t: i32) -> i32 {
-    0
+pub unsafe extern "C" fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32 {
+    if fds.is_null() {
+        return 0;
+    }
+    let pfds = fds as *mut PollFd;
+    for i in 0..nfds as usize {
+        unsafe { (*pfds.add(i)).revents = 0 };
+        let fd = unsafe { (*pfds.add(i)).fd };
+        let ev = unsafe { (*pfds.add(i)).events };
+        if (ev & 0x0001) != 0 {
+            let ready = unsafe { house_timerfd_due(fd) != 0 || house_fd_pipe_readable(fd) != 0 };
+            if ready {
+                unsafe { (*pfds.add(i)).revents |= 0x0001 }
+            };
+        }
+    }
+    let mut ready = 0;
+    for i in 0..nfds as usize {
+        if unsafe { (*pfds.add(i)).revents } != 0 {
+            ready += 1;
+        }
+    }
+    if ready != 0 {
+        return ready;
+    }
+    if timeout == 0 {
+        return 0;
+    }
+    let core = unsafe { cpu_id() } as usize;
+    let has_runnable = unsafe {
+        house_sched_lock_acquire();
+        let h = !RUN_HEAD[core].is_null();
+        house_sched_lock_release();
+        h
+    };
+    if has_runnable {
+        unsafe { house_sched_yield() };
+    } else {
+        let start = unsafe { house_uptime_ns() };
+        let timeout_ns = if timeout < 0 {
+            u64::MAX
+        } else {
+            timeout as u64 * 1000000
+        };
+        loop {
+            unsafe { core::arch::asm!("wfe", options(nostack, preserves_flags)) };
+            let mut r = 0;
+            for i in 0..nfds as usize {
+                let fd = unsafe { (*pfds.add(i)).fd };
+                let ev = unsafe { (*pfds.add(i)).events };
+                if (ev & 0x0001) != 0 {
+                    let ready =
+                        unsafe { house_timerfd_due(fd) != 0 || house_fd_pipe_readable(fd) != 0 };
+                    if ready {
+                        unsafe { (*pfds.add(i)).revents |= 0x0001 };
+                        r += 1;
+                    }
+                }
+            }
+            if r != 0 {
+                return r;
+            }
+            if timeout > 0 && unsafe { house_uptime_ns() } - start >= timeout_ns {
+                return 0;
+            }
+            if timeout == 0 {
+                return 0;
+            }
+        }
+    }
+    let mut ready2 = 0;
+    for i in 0..nfds as usize {
+        unsafe { (*pfds.add(i)).revents = 0 };
+        let fd = unsafe { (*pfds.add(i)).fd };
+        let ev = unsafe { (*pfds.add(i)).events };
+        if (ev & 0x0001) != 0 {
+            let ready = unsafe { house_timerfd_due(fd) != 0 || house_fd_pipe_readable(fd) != 0 };
+            if ready {
+                unsafe { (*pfds.add(i)).revents |= 0x0001 };
+                ready2 += 1;
+            }
+        }
+    }
+    ready2
 }
 #[no_mangle]
 pub unsafe extern "C" fn select(
-    _n: i32,
+    nfds: i32,
     _r: *mut u8,
     _w: *mut u8,
     _e: *mut u8,
-    _t: *mut u8,
+    tv: *mut u8,
 ) -> i32 {
+    if tv.is_null() {
+        unsafe { house_sched_yield() };
+        return 0;
+    }
+    let secs = unsafe { *(tv as *const i64).add(0) } as u64;
+    let usecs = unsafe { *(tv as *const i64).add(1) } as u64;
+    let us = secs * 1000000 + usecs;
+    if us == 0 {
+        return 0;
+    }
+    let secs2 = us / 1000000;
+    let nsec = (us % 1000000) * 1000;
+    let mut ts = [secs2 as i64, nsec as i64];
+    unsafe { nanosleep(ts.as_ptr() as *const u8, core::ptr::null_mut()) };
+    unsafe {
+        *(tv as *mut i64).add(0) = 0;
+        *(tv as *mut i64).add(1) = 0
+    };
     0
 }
 #[no_mangle]
 pub unsafe extern "C" fn pause() -> i32 {
-    0
+    let core = unsafe { cpu_id() } as usize;
+    unsafe { house_sched_lock_acquire() };
+    let cur = unsafe { house_current_thr[core] };
+    if !cur.is_null() {
+        unsafe { (*cur).state = HOUSE_THR_BLOCKED };
+    }
+    let next = unsafe { dequeue_run_core(core as i32) };
+    if next.is_null() {
+        unsafe { house_sched_lock_release() };
+        loop {
+            unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
+        }
+    }
+    unsafe { (*next).state = HOUSE_THR_RUNNING };
+    unsafe { house_current_thr[core] = next };
+    let old = cur;
+    unsafe { house_sched_lock_release() };
+    if !old.is_null() {
+        unsafe { house_thread_switch(old, next) };
+    }
+    -1
 }
 #[no_mangle]
 pub unsafe extern "C" fn house_spin_lock(_l: *mut u32) {}
