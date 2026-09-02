@@ -1,16 +1,7 @@
 #![no_std]
 
-//! Phase 0 stub: tinylibc replacement crate.
-//!
-//! Future single owner of `#[panic_handler]` (Phase 1 will keep this and
-//! remove duplicates from `house-hal-aarch64`/`house-boot`). Also future
+//! Phase 1: tinylibc replacement crate — single owner of `panic handler`
+//! and `__stack_chk_guard`/`__stack_chk_fail` (SOTA Rust 03). Also future
 //! home of `alloc`/`mem`/`sys`/`threads`/`tls`/`stdio` modules.
 
-use core::panic::PanicInfo;
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
-}
+pub mod panic;
