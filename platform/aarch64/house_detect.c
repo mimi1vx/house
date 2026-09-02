@@ -85,13 +85,15 @@ int house_smp_detect_psci(void) {
 }
 
 int house_smp_detect_gicr(void) {
-    // GICR_TYPER at 0x080A0000 + i*0x20000 + 0x08, bit 4 = Last
+    // GICR_TYPER at 0x080A0000 + i*0x20000 + 0x08, bit 4 = Last - use plain LDR to keep ISV=1
     const uint64_t base = 0x080A0000ULL;
     const uint64_t stride = 0x20000ULL;
     int count = 0;
     for (int i = 0; i < HOUSE_MAX_SMP; i++) {
-        volatile uint64_t *typer = (volatile uint64_t *)(uintptr_t)(base + (uint64_t)i * stride + 0x08);
-        uint64_t v = *typer;
+        uint64_t addr = base + (uint64_t)i * stride + 0x08;
+        uint64_t v;
+        __asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(addr) : "memory");
+        __asm__ volatile("" ::: "memory");
         // If reading unmapped GICR returns 0, stop after at least 1
         if (i > 0 && v == 0) break;
         count++;

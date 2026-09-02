@@ -5,10 +5,17 @@
 #include <stddef.h>
 
 static inline uint32_t mmio_r32(uint64_t a) {
-    return *(volatile uint32_t *)(uintptr_t)a;
+    uint32_t v;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(a) : "memory");
+    return v;
 }
 static inline void mmio_w32(uint64_t a, uint32_t v) {
-    *(volatile uint32_t *)(uintptr_t)a = v;
+    __asm__ volatile("str %w0, [%1]" :: "r"(v), "r"(a) : "memory");
+}
+static inline uint8_t mmio_r8(uint64_t a) {
+    uint32_t v;
+    __asm__ volatile("ldrb %w0, [%1]" : "=r"(v) : "r"(a) : "memory");
+    return (uint8_t)v;
 }
 static inline uint64_t slot_base(int slot) {
     return VIRTIO_MMIO_BASE_H + (uint64_t)slot * VIRTIO_MMIO_STRIDE_H;
@@ -90,14 +97,11 @@ int virtio_net_probe_mac(int slot, uint8_t mac[6]) {
     if ((st & (VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK)) != (VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK)) {
         return VIRTIO_ERR_NOT_READY;
     }
-    // MAC at config offset 0x100, 6 bytes
+    // MAC at config offset 0x100, 6 bytes - use ldrb to avoid ISV=0 from bulk loads
     for (int i = 0; i < 6; i++) {
-        // config space is MMIO Device region, byte readable via 32-bit loads
-        // read as byte by reading 32-bit word and shifting (qemu allows byte?)
-        // Use volatile 8-bit read via pointer arithmetic if supported, else word
-        // Try byte load via volatile uint8_t
         uint64_t addr = base + VIRTIO_NET_CFG_OFF_MAC + i;
-        mac[i] = *(volatile uint8_t *)(uintptr_t)addr;
+        mac[i] = mmio_r8(addr);
+        __asm__ volatile("" ::: "memory");
     }
     return VIRTIO_OK;
 }

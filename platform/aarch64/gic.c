@@ -16,8 +16,14 @@
 #define GICR_ICENABLER0 (GICR_SGI_OFF + 0x180)
 
 static inline uint64_t gicr_base(uint32_t core) { return GICR_BASE + (uint64_t)core * GICR_STRIDE; }
-static inline uint32_t mmio_r32(uint64_t a) { return *(volatile uint32_t *)(uintptr_t)a; }
-static inline void mmio_w32(uint64_t a, uint32_t v) { *(volatile uint32_t *)(uintptr_t)a = v; }
+static inline uint32_t mmio_r32(uint64_t a) {
+    uint32_t v;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(a) : "memory");
+    return v;
+}
+static inline void mmio_w32(uint64_t a, uint32_t v) {
+    __asm__ volatile("str %w0, [%1]" :: "r"(v), "r"(a) : "memory");
+}
 
 static void puthex32(uint32_t v) {
     static const char d[] = "0123456789abcdef";

@@ -4,10 +4,12 @@
 #include <stddef.h>
 
 static inline uint32_t mmio_r32(uint64_t a) {
-    return *(volatile uint32_t *)(uintptr_t)a;
+    uint32_t v;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(a) : "memory");
+    return v;
 }
 static inline void mmio_w32(uint64_t a, uint32_t v) {
-    *(volatile uint32_t *)(uintptr_t)a = v;
+    __asm__ volatile("str %w0, [%1]" :: "r"(v), "r"(a) : "memory");
 }
 static inline uint64_t slot_base(int slot) {
     return VIRTIO_MMIO_BASE_H + (uint64_t)slot * VIRTIO_MMIO_STRIDE_H;

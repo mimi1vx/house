@@ -2,7 +2,9 @@
 #include "virtio_probe.h"
 
 static inline uint32_t mmio_r32(uint64_t a) {
-    return *(volatile uint32_t *)(uintptr_t)a;
+    uint32_t v;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(a) : "memory");
+    return v;
 }
 
 int virtio_probe_slot(int slot, uint32_t *device_id, uint32_t *vendor_id, uint32_t *version) {
