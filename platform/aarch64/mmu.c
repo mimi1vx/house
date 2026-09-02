@@ -186,7 +186,7 @@ void house_mmu_clone_kernel_l1(void *new_l1) {
     for (int i = 0; i < 512; i++) {
         uint64_t d = l1_low[i];
         if (d == 0) continue;
-        if (i <= 3) continue; // user window 0x01000000–0xFFFFFFFF spans L1 0..3 (4×1GB); leave as tables/fault, don't clone kernel blocks
+        if (i == 0) continue; // keep L1[0] as table for user window 0x01000000; clone 1..3 as kernel blocks (AP EL1 only) so buddy remains accessible after TTBR0 switch
         nl1[i] = d;
     }
     __asm__ volatile("dsb sy; isb" ::: "memory");

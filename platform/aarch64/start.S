@@ -368,6 +368,63 @@ vec_irq:
     add     sp, sp, #896
     eret
 
+    /* EL0 entry trampoline: sets TTBR0+ASID, spsr 0, elr entry, sp_el0, erets.
+       On svc EXIT, c_handle_sync sets ELR to svc_exit_trampoline and SPSR EL1h,
+       which restores kernel TTBR0 and returns to house_enter_el0 caller. */
+    .global house_enter_el0
+    .type house_enter_el0, %function
+house_enter_el0:
+    // x0=entry, x1=sp, x2=pdir, x3=asid
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+    // set TTBR0 = pdir | asid
+    orr     x9, x2, x3
+    msr     ttbr0_el1, x9
+    dsb     ish
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+    // debug
+    stp     x0, x1, [sp, #-16]!
+    stp     x2, x3, [sp, #-16]!
+    adrp    x0, enter_msg
+    add     x0, x0, :lo12:enter_msg
+    bl      uart_puts
+    ldp     x2, x3, [sp], #16
+    ldp     x0, x1, [sp], #16
+    msr     elr_el1, x0
+    mov     x0, #0
+    msr     spsr_el1, x0
+    msr     sp_el0, x1
+    eret
+    .align 2
+enter_msg:
+    .asciz "[enter] eret to EL0\n"
+    .align 2
+    // EL1 trampoline that SVC EXIT returns to — restores kernel TTBR0 and returns.
+    .global svc_exit_trampoline
+    .type svc_exit_trampoline, %function
+svc_exit_trampoline:
+    // restore kernel TTBR0 (ttbr0_l0 with asid 0)
+    ldr     x9, =ttbr0_l0
+    msr     ttbr0_el1, x9
+    dsb     ish
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+    // debug
+    stp     x0, x1, [sp, #-16]!
+    adrp    x0, exit_msg
+    add     x0, x0, :lo12:exit_msg
+    bl      uart_puts
+    ldp     x0, x1, [sp], #16
+    ldp     x29, x30, [sp], #16
+    ret
+    .align 2
+exit_msg:
+    .asciz "[enter] exit trampoline EL1\n"
+    .align 2
+
 vec_fatal:
     msr     daifset, #0xf
     stp     x29, x30, [sp, #-16]!

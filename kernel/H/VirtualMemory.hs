@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
+
 {-| Virtual Memory (section 3.2 in the paper) — aarch64 4KB granule.
  -}
 module H.VirtualMemory
@@ -29,6 +31,7 @@ import H.Utils
 foreign import ccall "uart_puts" c_uart_puts_vm :: Ptr CChar -> IO ()
 
 foreign import ccall unsafe "house_mmu_clone_kernel_l1" c_clone_l1 :: Table -> IO ()
+
 foreign import ccall unsafe "house_mmu_clone_kernel_l2" c_clone_l2 :: Table -> IO ()
 
 foreign import ccall unsafe "house_puts_after" c_puts_after_vm :: IO ()
@@ -139,8 +142,6 @@ pageInfoToDesc pinfo =
           .|. (1 `shiftL` bAF)
           .|. shInner
           .|. (1 `shiftL` bNG)
-          .|. (1 `shiftL` bUXN)
-          .|. (1 `shiftL` bPXN)
           .|. attrNormal
       apBits = if writable pinfo then apRW else apRO
       sw =
@@ -305,8 +306,7 @@ allocPageMap =
                 pokeElemOff l1 (l1Index minVAddr) (descFromTable l2)
                 let pm = PageMap l0
                 P.registerPage l0 pm freePDir
-                initPDir l0
-                liftIO c_puts_after_vm
+                -- initPDir deferred to Process.runElf after mapping segments, to keep TTBR0 kernel during map
                 return (Just pm)
 
 freePageMap _ = return () -- nop; underlying Pages are freed when corresponding registered PageMap is discovered dead

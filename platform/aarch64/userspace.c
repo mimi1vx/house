@@ -71,12 +71,34 @@ void init_page_dir(void *pdir) {
     house_mmu_set_ttbr0(pdir, asid);
     {
         extern void uart_puts(const char *);
+        extern void uart_putc(char);
         uart_puts("[userspace] init_page_dir done\n");
+        // debug L0/L1
+        uint64_t *l0=(uint64_t*)pdir;
+        uart_puts("[debug] L0[0]="); 
+        for(int i=60;i>=0;i-=4) uart_putc("0123456789abcdef"[(l0[0]>>i)&0xF]);
+        uart_puts(" L1[1]="); 
+        uint64_t l0d=l0[0];
+        if (l0d & 1) {
+            uint64_t *l1=(uint64_t*)(uintptr_t)(l0d & ~0xFFFULL);
+            for(int i=60;i>=0;i-=4) uart_putc("0123456789abcdef"[(l1[1]>>i)&0xF]);
+        } else uart_puts("none");
+        uart_puts("\n");
+        uart_puts("[userspace] ret\n");
     }
 }
 
 void *current_pdir(void) {
     return recorded_pdir;
+}
+
+void house_set_recorded_pdir(void *pdir) {
+    recorded_pdir = pdir;
+}
+
+uint64_t house_asid_for_pdir(void *pdir) {
+    if (!pdir) return 0;
+    return (uint64_t)asid_for_pdir(pdir);
 }
 
 int house_is_ro_page(uint64_t va) {
@@ -121,6 +143,8 @@ void house_tlb_shootdown(uint64_t vaddr) {
 int house_handle_user_fault(uint64_t far) {
     const uint64_t minV = 0x01000000ULL;
     const uint64_t maxV = 0xFFFFFFFFULL;
+    // Don't handle kernel buddy region (0x46000000..0x60000000) as user demand — it's already block-mapped
+    if (far >= 0x46000000ULL && far < 0x60000000ULL) return 0;
     {
         extern void uart_puts(const char *);
         static int cnt=0;

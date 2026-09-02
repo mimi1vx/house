@@ -52,7 +52,7 @@ TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
 
 TINY_ASM := tinylibc/switch.S tinylibc/tls_desc.S
 
-PLATFORM_C := gic.c timer.c irq.c userspace.c psci.c ipc.c virtio_probe.c virtio_transport.c virtio_blk.c virtio_net.c house_dtb.c house_detect.c house_probe.c buddy.c mm/vm.c
+PLATFORM_C := gic.c timer.c irq.c userspace.c svc.c psci.c ipc.c virtio_probe.c virtio_transport.c virtio_blk.c virtio_net.c house_dtb.c house_detect.c house_probe.c buddy.c mm/vm.c
 
 OBJS := build/start.o build/mmu.o build/c_start.o build/uart.o \
          $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) \

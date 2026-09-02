@@ -8,6 +8,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, catch)
 import Control.Monad (forM_, when)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Char (chr, ord)
 import Data.List (isPrefixOf, nub)
 import Data.Word (Word32, Word64, Word8)
 import Foreign.C.String (peekCString, withCString)
@@ -38,6 +39,8 @@ import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
 import qualified Kernel.IPC.Nameservice as NS
 import Kernel.IPC.Types (Message (..))
+import qualified Kernel.Userspace as U
+import qualified Kernel.Userspace.Loader as ULdr
 
 foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 
@@ -79,12 +82,26 @@ foreign import ccall unsafe "userspace.h init_page_dir" c_init_pdir :: Ptr Word6
 
 foreign import ccall unsafe "userspace.h current_pdir" c_current_pdir :: IO (Ptr Word64)
 
+-- Embedded EL0 hello ELF for run demo (static aarch64, svc write/exit). If ramfs missing, write on boot.
+helloBytes :: [Word8]
+helloBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 120, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 128, 210, 193, 0, 0, 16, 226, 1, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 0, 0, 0, 20, 72, 101, 108, 108, 111, 32, 102, 114, 111, 109, 32, 69, 76, 48, 10]
+
 foreign export ccall house_main :: IO ()
 
 house_main :: IO ()
 house_main = do
   withCString "Welcome to the House shell! Enter help to see a list of commands.\n\n" c_uart_puts
   _ <- runH FS.fsInit
+  -- bootstrap /bin/hello from embedded bytes if missing
+  _ <- runH $ do
+    r <- FS.fsStat "/bin/hello"
+    case r of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.fsMkdir "/bin"
+        let txt = map (chr . fromIntegral) helloBytes
+        _ <- FS.fsWrite "/bin/hello" txt
+        return ()
   _ <- runH Dmesg.dmesgInit
   _ <- runH (Dmesg.dmesgLog "House driver framework online")
   -- Link driver GIC/IRQ helpers into closure (probe-only track keeps them unused at runtime)
@@ -188,6 +205,8 @@ house_main = do
       ["detect"] -> handleDetect
       ["vm"] -> handleVm
       ["palloc"] -> handlePalloc
+      ["run", p] -> handleRun p
+      ["run"] -> withCString "usage: run <path>\n" c_uart_puts
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -545,6 +564,25 @@ house_main = do
       case r of
         Nothing -> withCString "palloc fail\n" c_uart_puts
         Just p -> withCString ("palloc ok " ++ show (ptrToIntPtr (castPtr p)) ++ "\n") c_uart_puts
+    handleRun path = do
+      r <- runH $ do
+        mStr <- FS.fsRead path
+        case mStr of
+          Left e -> return (Left (showFsError e))
+          Right s -> do
+            let bytes = map (fromIntegral . ord) s :: [Word8]
+            case ULdr.loadElf bytes of
+              Left le -> return (Left (ULdr.loadErrorToString le))
+              Right elf -> do
+                res <- U.runElf elf
+                case res of
+                  Left le2 -> return (Left (ULdr.loadErrorToString le2))
+                  Right pid -> do
+                    code <- U.waitPid pid
+                    return (Right code)
+      case r of
+        Left e -> withCString (e ++ "\n") c_uart_puts
+        Right code -> withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
     parseIpv4 s = case splitDot s of
       [a, b, c, d] -> case (reads a, reads b, reads c, reads d) of
         ([(av, "")], [(bv, "")], [(cv, "")], [(dv, "")]) -> Just (NetTypes.Ipv4 av bv cv dv)
@@ -660,7 +698,8 @@ house_main = do
           "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)",
           "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)",
           "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B)",
-          "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)"
+          "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)",
+          "       run </path> -- load static aarch64 ELF from ramfs 0x01000000 window, svc write/exit/ipc, EL0 eret (TTBR0/ASID/pager)"
         ]
     seqFib :: Int -> Int
     seqFib n

@@ -1,0 +1,130 @@
+#!/usr/bin/expect -f
+# Userspace EL0 harness: ELF loader + svc write/exit, TTBR0/ASID/pager
+# Usage: expect scripts/qemu-userspace.exp <kernel.elf> [marker] [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+# also support bare accel/mem/smp without marker/timeout?
+if {$marker eq "" || $marker eq "hvf" || $marker eq "tcg"} {
+    # called as: qemu-userspace.exp <elf> hvf 4G 2  -> shift
+    set smp $mem
+    set mem $accel
+    set accel $marker
+    set marker "Hello from EL0"
+}
+if {$marker eq ""} { set marker "Hello from EL0" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 90 } else { set timeout 60 }
+} else {
+    set timeout $timeout_arg
+}
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "free\r"
+expect {
+    -re "buddy" { puts "\nPASS: free buddy" }
+    timeout { puts "\nFAIL: free timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before free"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after free" }
+    timeout { puts "\nFAIL: prompt after free timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after free"; exit 1 }
+}
+send "detect\r"
+expect {
+    -re "ram" { puts "\nPASS: detect ram" }
+    timeout { puts "\nFAIL: detect timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before detect"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after detect" }
+    timeout { puts "\nFAIL: prompt after detect timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after detect"; exit 1 }
+}
+send "run /bin/hello\r"
+expect {
+    -re "Hello from EL0" { puts "\nPASS: first run Hello from EL0" }
+    timeout { puts "\nFAIL: first run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before Hello"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: first run ok exit 0" }
+    timeout { puts "\nFAIL: ok exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before ok exit"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after first run" }
+    timeout { puts "\nFAIL: prompt after first run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after first run"; exit 1 }
+}
+send "run /bin/hello\r"
+expect {
+    -re "Hello from EL0" { puts "\nPASS: second run Hello" }
+    timeout { puts "\nFAIL: second run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before second Hello"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: second run ok exit" }
+    timeout { puts "\nFAIL: second ok exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before second ok exit"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after second run" }
+    timeout { puts "\nFAIL: prompt after second run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after second run"; exit 1 }
+}
+send "free\r"
+expect {
+    -re "buddy" { puts "\nPASS: free after runs buddy" }
+    timeout { puts "\nFAIL: free after runs timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before free after runs"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after free2" }
+    timeout { puts "\nFAIL: prompt after free2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after free2"; exit 1 }
+}
+send "ls /bin\r"
+expect {
+    -re "hello" { puts "\nPASS: ls /bin hello" }
+    timeout { puts "\nFAIL: ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before ls"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after ls" }
+    timeout { puts "\nFAIL: prompt after ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after ls"; exit 1 }
+}
+# Also test bad path: run missing file should give ENOENT without crash
+send "run /no/such\r"
+expect {
+    -re "ENOENT" { puts "\nPASS: run ENOENT" }
+    timeout { puts "\nFAIL: run ENOENT timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before ENOENT"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after bad run" }
+    timeout { puts "\nFAIL: prompt after bad run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after bad run"; exit 1 }
+}
+puts "\nPASS: userspace ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

@@ -94,6 +94,32 @@ uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr,
             }
         }
     }
+    // SVC EC 0x15 dispatch — EL0 svc #imm after probe+pager
+    if (ec == 0x15) {
+        uint64_t spsr_val;
+        __asm__ volatile("mrs %0, spsr_el1" : "=r"(spsr_val));
+        int is_el0 = ((spsr_val & 0xF) == 0);
+        if (is_el0) {
+            uint32_t svc_imm = (uint32_t)(esr & 0xFFFF);
+            extern int64_t house_svc_dispatch(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t *);
+            int64_t r = house_svc_dispatch(svc_imm, gpr[0], gpr[1], gpr[2], gpr[3], gpr);
+            (void)r;
+            if (svc_imm == 0x02) {
+                // EXIT: restore kernel TTBR0 and return to EL1 trampoline
+                extern uint64_t ttbr0_l0[512];
+                extern void svc_exit_trampoline(void);
+                extern void house_set_recorded_pdir(void*);
+                house_set_recorded_pdir((void*)ttbr0_l0);
+                __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)(uintptr_t)ttbr0_l0) : "memory");
+                __asm__ volatile("dsb ish; tlbi vmalle1is; dsb ish; isb" ::: "memory");
+                __asm__ volatile("msr spsr_el1, %0" :: "r"((uint64_t)0x3c5) : "memory");
+                return (uint64_t)(uintptr_t)svc_exit_trampoline;
+            }
+            return elr;
+        }
+        // EL1 SVC unexpected — fall through to fatal after logging
+        uart_puts("[svc] EL1 SVC unexpected imm="); uart_puthex(esr & 0xFFFF); uart_puts("\n");
+    }
     uart_puts("[probe] in_probe="); uart_putc('0'+ (house_in_probe?1:0)); uart_puts(" ec="); uart_puthex(esr); uart_puts(" far="); uart_puthex(far); uart_puts(" elr="); uart_puthex(elr); uart_puts(" rec="); uart_puthex(house_probe_recovery); uart_puts("\n");
 
     uart_puts("\n[house] fatal sync exception ESR=");
