@@ -23,9 +23,6 @@ BOOT_O := $(RUST_BOOT_A)
 $(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A):
 	HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
 
-# legacy boot (RUST=0 kept for bisect until slice 6): start.S moved to start.S.legacy
-build/start.o: start.S.legacy | build
-	$(CC) -c $(ASFLAGS) -o $@ $<
 HOUSE_SMP_LIMIT ?= $(SMP_N)
 HOUSE_RAM_LIMIT_BYTES ?=
 .DEFAULT_GOAL := all

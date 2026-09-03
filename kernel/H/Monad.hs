@@ -55,7 +55,7 @@ instance MonadIO H where liftIO = H.Monad.liftIO
 
 trace = H . cPrint . show
 
-foreign import ccall unsafe "start.h c_print" c_print :: CString -> IO ()
+foreign import ccall unsafe "c_print" c_print :: CString -> IO ()
 
 cPrint :: String -> IO ()
 cPrint str = withCString str c_print
