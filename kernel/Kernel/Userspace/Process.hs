@@ -40,7 +40,7 @@ foreign import ccall unsafe "house_clear_exit" c_clear_exit :: IO ()
 
 foreign import ccall unsafe "house_is_exited" c_is_exited :: IO CInt
 
-foreign import ccall unsafe "userspace.h current_pdir" c_current_pdir :: IO (Ptr Word64)
+foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
 

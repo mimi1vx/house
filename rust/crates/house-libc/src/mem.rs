@@ -10,19 +10,12 @@ use core::ptr;
 #[no_mangle]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    // Fast 8-byte unaligned copy when n>=8, then byte tail. Avoids alignment check that
-    // previously generated ldrb/and sequence and avoids recursive lowering via copy_nonoverlapping.
+    // Byte-wise copy to avoid unaligned 8-byte accesses that may fault on some QEMU/hvf configs
+    // (previously used read_unaligned/write_unaligned for 8-byte fast path, but that triggered
+    // EC 0 faults at 0x405cbcc0 under pure Rust; use simple loop for correctness).
     let mut d = dst;
     let mut s = src;
     let mut remaining = n;
-    while remaining >= 8 {
-        unsafe {
-            ptr::write_unaligned(d as *mut u64, ptr::read_unaligned(s as *const u64));
-            d = d.add(8);
-            s = s.add(8);
-        }
-        remaining -= 8;
-    }
     while remaining > 0 {
         unsafe {
             ptr::write(d, ptr::read(s));
@@ -75,16 +68,8 @@ pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
     let val = c as u8;
-    let word = (val as u64) * 0x0101010101010101u64;
     let mut d = dst;
     let mut remaining = n;
-    while remaining >= 8 {
-        unsafe {
-            ptr::write_unaligned(d as *mut u64, word);
-            d = d.add(8);
-        }
-        remaining -= 8;
-    }
     while remaining > 0 {
         unsafe {
             ptr::write(d, val);

@@ -25,7 +25,7 @@
 //   resolve at `ld -T build/aarch64.ld`.
 core::arch::global_asm!(
     r#"
-    .section .text.boot, "ax"
+    .section .text.vectors, "ax"
     .global vectors
     .type vectors, %object
     .align 11

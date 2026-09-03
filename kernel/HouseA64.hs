@@ -54,9 +54,9 @@ foreign import ccall unsafe "psci_system_off" c_off :: IO ()
 
 foreign import ccall unsafe "psci_system_reset" c_reset :: IO ()
 
-foreign import ccall unsafe "house_detect.h &house_ram_bytes" c_ram_ref :: Ptr Word64
+foreign import ccall unsafe "&house_ram_bytes" c_ram_ref :: Ptr Word64
 
-foreign import ccall unsafe "house_detect.h &house_boot_stack_top" c_stack_top_ref :: Ptr Word64
+foreign import ccall unsafe "&house_boot_stack_top" c_stack_top_ref :: Ptr Word64
 
 foreign import ccall unsafe "house_mem_stats" c_mem_stats :: Ptr Word64 -> Ptr Word64 -> IO ()
 
@@ -78,9 +78,9 @@ foreign import ccall unsafe "house_vm_demand_100" c_demand_100 :: IO CInt
 
 foreign import ccall unsafe "house_puts_after" c_puts_after :: IO ()
 
-foreign import ccall unsafe "userspace.h init_page_dir" c_init_pdir :: Ptr Word64 -> IO ()
+foreign import ccall unsafe "init_page_dir" c_init_pdir :: Ptr Word64 -> IO ()
 
-foreign import ccall unsafe "userspace.h current_pdir" c_current_pdir :: IO (Ptr Word64)
+foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
 -- Embedded EL0 hello ELF for run demo (static aarch64, svc write/exit). If ramfs missing, write on boot.
 helloBytes :: [Word8]

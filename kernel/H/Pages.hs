@@ -37,9 +37,9 @@ freePage a = freePageToList a
 
 -- Following specify absolute range of available pages.
 -- Can safely assume these contain constants.
-foreign import ccall unsafe "userspace.h & min_user_addr" minAddrRef :: Ptr (Ptr a)
+foreign import ccall unsafe "&min_user_addr" minAddrRef :: Ptr (Ptr a)
 
-foreign import ccall unsafe "userspace.h & max_user_addr" maxAddrRef :: Ptr (Ptr a)
+foreign import ccall unsafe "&max_user_addr" maxAddrRef :: Ptr (Ptr a)
 
 minAddr, maxAddr :: Ptr a
 minAddr = unsafePerformH (peek minAddrRef)

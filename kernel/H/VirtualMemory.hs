@@ -337,14 +337,14 @@ freePDir l0 =
             P.freePage l1
             P.freePage l0
 
-foreign import ccall unsafe "userspace.h init_page_dir" initPDirIO :: PDir -> IO ()
+foreign import ccall unsafe "init_page_dir" initPDirIO :: PDir -> IO ()
 
 initPDir :: PDir -> H ()
 initPDir = liftIO . initPDirIO
 
-foreign import ccall unsafe "userspace.h current_pdir" currentPDirIO :: IO PDir
+foreign import ccall unsafe "current_pdir" currentPDirIO :: IO PDir
 
-foreign import ccall unsafe "userspace.h invalidate_page" invalidatePageIO :: VAddr -> IO ()
+foreign import ccall unsafe "invalidate_page" invalidatePageIO :: VAddr -> IO ()
 
 currentPDir :: H PDir
 currentPDir = liftIO currentPDirIO
