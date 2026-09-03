@@ -63,15 +63,9 @@ DEEP_A := $(shell ls $(UNITDIR_deep)/libHSdeepseq-*.a | head -1)
 RTS_A  := $(shell ls $(UNITDIR_rts)/libHSrts-*.a | grep thr | grep -v debug | grep -v eventlog | head -1)
 FFI_A  := $(UNITDIR_rts)/libCffi.a
 
-TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
-          tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
-          tinylibc/mathmin.c tinylibc/c_print.c \
-          tinylibc/threads.c tinylibc/tls.c
-
-TINY_ASM := tinylibc/switch.S tinylibc/tls_desc.S
-
-TINY_OBJS := $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o)))
-# Pure Rust HAL — C tinylibc kept for hs_init until Rust tinylibc fully stable
+# Pure Rust HAL + Rust libc (no C tinylibc) — c-legacy tag preserves hybrid for bisect.
+# Former C sources tinylibc/*.c + switch.S/tls_desc.S + threads.h/spinlock.h removed;
+# build/tiny-*.o rules retired (kept as comment for archive).
 HAL_O := $(RUST_HAL_A)
 
 VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
@@ -79,8 +73,8 @@ VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-# Pure Rust HAL + C tinylibc for hs_init (hybrid until slice 4c complete)
-COMMON_OBJS := $(BOOT_O) $(TINY_OBJS)
+# Pure Rust: boot + HAL + libc (all-Rust, no C fallback)
+COMMON_OBJS := $(BOOT_O)
 OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
 OBJS_IRQ := $(COMMON_OBJS) $(HAL_O) build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
 OBJS_HOUSE_DEPS := $(COMMON_OBJS) $(HAL_O)
@@ -110,12 +104,6 @@ build/aarch64.ld: aarch64.ld | build
 
 build:
 	mkdir -p build build/H build/Kernel/Types build/Util build/Kernel build/mm
-
-build/tiny-%.o: tinylibc/%.c | build
-	$(CC) -c $(CFLAGS) -o $@ $<
-
-build/tiny-%.o: tinylibc/%.S | build
-	$(CC) -c $(ASFLAGS) -o $@ $<
 
 build/%.o: %.c | build
 	@mkdir -p $(dir $@)

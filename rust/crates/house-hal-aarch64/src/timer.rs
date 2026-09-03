@@ -89,20 +89,7 @@ pub unsafe extern "C" fn house_timer_init() {
 
 #[no_mangle]
 pub unsafe extern "C" fn house_timer_init_secondary(core: u32) {
-    if (core as usize) >= HOUSE_MAX_SMP {
-        return;
-    }
-    let now: u64;
-    unsafe {
-        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) now, options(nostack, preserves_flags))
-    }
-    unsafe {
-        HOUSE_BOOT_TICKS[core as usize] = now;
-        house_isr_pending[core as usize] = 0;
-        core::arch::asm!("msr CNTV_CTL_EL0, {0}", in(reg) 0u64, options(nostack, preserves_flags));
-        core::arch::asm!("msr CNTP_CTL_EL0, {0}", in(reg) 0u64, options(nostack, preserves_flags));
-        core::arch::asm!("isb", options(nostack, preserves_flags));
-    }
+    unsafe { timer_init_for_core(core) }
 }
 
 #[no_mangle]
