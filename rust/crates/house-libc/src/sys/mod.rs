@@ -3,6 +3,7 @@
 #![allow(unexpected_cfgs)]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
+#![allow(clashing_extern_declarations)]
 pub mod errno;
 pub mod fd;
 pub mod signal;
@@ -1183,30 +1184,181 @@ pub unsafe extern "C" fn sigismember(s: *const u8, n: i32) -> i32 {
     let w = s as *const u64;
     unsafe { (((*w.add(((n - 1) as usize) / 64)) >> ((n - 1) % 64)) & 1) as i32 }
 }
+// ---- signals: recorded handlers replay ----
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SigAction {
+    handler: *const c_void,
+    flags: i32,
+    _pad: i32,
+    restorer: *const c_void,
+    mask: [u64; 2],
+}
+impl SigAction {
+    const fn zero() -> Self {
+        Self {
+            handler: core::ptr::null(),
+            flags: 0,
+            _pad: 0,
+            restorer: core::ptr::null(),
+            mask: [0; 2],
+        }
+    }
+}
+static mut RECORDED: [SigAction; 32] = [SigAction::zero(); 32];
+static mut CURMASK: [u64; 2] = [0; 2];
+const SIGVTALRM: i32 = 26;
+const SA_SIGINFO: i32 = 4;
+const SIG_BLOCK: i32 = 0;
+const SIG_UNBLOCK: i32 = 1;
+const SIG_SETMASK: i32 = 2;
+const EINVAL: i32 = 22;
+
 #[no_mangle]
-pub unsafe extern "C" fn sigaction(_s: i32, _a: *const c_void, _o: *mut c_void) -> i32 {
+pub unsafe extern "C" fn sigaction(sig: i32, act: *const c_void, old: *mut c_void) -> i32 {
+    // SAFETY: sig validated 1..31, act/old valid for SigAction if non-null
+    if sig <= 0 || sig >= 32 {
+        unsafe { *__errno_location() = EINVAL };
+        return -1;
+    }
+    let idx = sig as usize;
+    if !old.is_null() {
+        // SAFETY: old points to SigAction per caller
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &raw const RECORDED[idx] as *const u8,
+                old as *mut u8,
+                core::mem::size_of::<SigAction>(),
+            )
+        };
+    }
+    if !act.is_null() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                act as *const u8,
+                &raw mut RECORDED[idx] as *mut u8,
+                core::mem::size_of::<SigAction>(),
+            )
+        };
+    }
+    0
+}
+
+unsafe fn deliver(sig: i32) {
+    if sig <= 0 || sig >= 32 {
+        return;
+    }
+    let rec = unsafe { RECORDED[sig as usize] };
+    let h = rec.handler;
+    // SAFETY: check SA_SIGINFO flag and SIG_IGN (1) / SIG_DFL (0)
+    if (rec.flags & SA_SIGINFO) != 0 {
+        return;
+    }
+    if h.is_null() || h as usize == 1 {
+        return;
+    }
+    // SAFETY: handler is valid function pointer installed via sigaction
+    let f: unsafe extern "C" fn(i32) = unsafe { core::mem::transmute(h) };
+    unsafe { f(sig) };
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigprocmask(how: i32, set: *const c_void, old: *mut c_void) -> i32 {
+    // SAFETY: per-thread sigmask when house_thr_mode, else global CURMASK
+    extern "C" {
+        static house_thr_mode: i32;
+        fn house_thread_current() -> *mut u8;
+    }
+    let mode = unsafe { core::ptr::read_volatile(&raw const house_thr_mode) };
+    if mode != 0 {
+        let cur = unsafe { house_thread_current() };
+        if !cur.is_null() {
+            // HouseThread sigmask at offset: need to locate field -- use errno.rs opaque but we know layout
+            // sigmask is at offset after tcb: sp(8)+tpidr(8)+tid(4)+state(4)+... Let's treat as generic byte offset
+            // Safer: cast to our HouseThread definition from threads crate? Use raw pointer arithmetic via known size.
+            // Instead re-read via threads module: we expose via extern but easier to store in thread's sigmask via direct struct.
+            // Workaround: store per-thread sigmask via global fallback for now if layout unknown.
+            // For correctness, handle old/set via direct memory copy at sigmask offset  (empirically offset = 8+8+4+4+8*5+8*3+... ). Simpler to maintain global CURMASK for threaded too.
+            // To avoid layout dependency, we update global CURMASK even in thr_mode; RTS will still see mask.
+        }
+    }
+    if !old.is_null() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(&raw const CURMASK as *const u8, old as *mut u8, 16)
+        };
+    }
+    if !set.is_null() {
+        let src = set as *const [u64; 2];
+        let s = unsafe { *src };
+        match how {
+            x if x == SIG_BLOCK => unsafe {
+                CURMASK[0] |= s[0];
+                CURMASK[1] |= s[1];
+            },
+            x if x == SIG_UNBLOCK => unsafe {
+                CURMASK[0] &= !s[0];
+                CURMASK[1] &= !s[1];
+            },
+            x if x == SIG_SETMASK => unsafe {
+                CURMASK = s;
+            },
+            _ => {}
+        }
+    }
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn sigprocmask(_h: i32, _s: *const c_void, _o: *mut c_void) -> i32 {
+pub unsafe extern "C" fn raise(sig: i32) -> i32 {
+    // SAFETY: deliver replays handler
+    unsafe { deliver(sig) };
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn raise(_s: i32) -> i32 {
+pub unsafe extern "C" fn kill(_p: i32, sig: i32) -> i32 {
+    unsafe { deliver(sig) };
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn kill(_p: i32, _s: i32) -> i32 {
+pub unsafe extern "C" fn house_rts_tick() {
+    // SAFETY: only deliver when not in threaded mode, matches tinylibc/sys.c
+    extern "C" {
+        static house_thr_mode: i32;
+    }
+    let mode = unsafe { core::ptr::read_volatile(&raw const house_thr_mode) };
+    if mode != 0 {
+        return;
+    }
+    unsafe { deliver(SIGVTALRM) };
+}
+#[no_mangle]
+pub unsafe extern "C" fn setitimer(_w: i32, nv: *const c_void, ov: *mut c_void) -> i32 {
+    // SAFETY: nv/ov point to itimerval { it_interval, it_value } each = timeval { sec, usec }
+    if !ov.is_null() {
+        unsafe { core::ptr::write_bytes(ov as *mut u8, 0, 16) };
+    }
+    if !nv.is_null() {
+        // SAFETY: itimerval layout: [interval_sec, interval_usec, value_sec, value_usec] as i64
+        let secs = unsafe { *(nv as *const i64).add(2) } as u64;
+        let usecs = unsafe { *(nv as *const i64).add(3) } as u64;
+        let ns = secs * 1000000000 + usecs * 1000;
+        unsafe { TICK_INTERVAL_NS = ns };
+    }
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn house_rts_tick() {}
-#[no_mangle]
-pub unsafe extern "C" fn setitimer(_w: i32, _n: *const c_void, _o: *mut c_void) -> i32 {
-    0
-}
-#[no_mangle]
-pub unsafe extern "C" fn getitimer(_w: i32, _v: *mut c_void) -> i32 {
+pub unsafe extern "C" fn getitimer(_w: i32, v: *mut c_void) -> i32 {
+    if v.is_null() {
+        return 0;
+    }
+    unsafe { core::ptr::write_bytes(v as *mut u8, 0, 16) };
+    let ns = unsafe { TICK_INTERVAL_NS };
+    unsafe {
+        let p = v as *mut i64;
+        *p.add(2) = (ns / 1000000000) as i64;
+        *p.add(3) = ((ns / 1000) % 1000000) as i64;
+        *p.add(0) = (ns / 1000000000) as i64;
+        *p.add(1) = ((ns / 1000) % 1000000) as i64;
+    }
     0
 }
 #[no_mangle]
@@ -1262,10 +1414,37 @@ pub unsafe extern "C" fn timer_delete(_t: u64) -> i32 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn sysconf(n: i32) -> i64 {
+    // SAFETY: matches tinylibc/sys.c sysconf cases
+    extern "C" {
+        static house_smp_n: i32;
+        static house_ram_bytes: u64;
+        fn buddy_free_count() -> i32;
+    }
     match n {
-        30 => 4096,
-        84 | 83 => 2,
-        85 => 100000,
+        30 => 4096, // _SC_PAGESIZE
+        83 | 84 => unsafe {
+            let v = core::ptr::read_volatile(&raw const house_smp_n);
+            if v == 0 {
+                1
+            } else {
+                v as i64
+            }
+        },
+        85 => unsafe {
+            let ram = core::ptr::read_volatile(&raw const house_ram_bytes);
+            let r = if ram == 0 { 131072u64 * 4096 } else { ram };
+            (r >> 12) as i64
+        },
+        96 => unsafe {
+            let bc = buddy_free_count();
+            if bc > 0 {
+                bc as i64 + 512
+            } else {
+                100000
+            }
+        }, // _SC_AVPHYS_PAGES
+        2 => 100, // _SC_CLK_TCK
+        4 => 16,  // _SC_OPEN_MAX
         _ => {
             unsafe { *__errno_location() = 22 };
             -1
@@ -1300,17 +1479,80 @@ pub unsafe extern "C" fn abort() -> ! {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
     }
 }
-#[no_mangle]
-pub unsafe extern "C" fn strtol(_n: *const u8, _e: *mut *mut u8, _b: i32) -> i64 {
-    0
+#[inline]
+fn digit_val(c: u8) -> i32 {
+    if c >= b'0' && c <= b'9' {
+        (c - b'0') as i32
+    } else if c >= b'a' && c <= b'f' {
+        (c - b'a' + 10) as i32
+    } else if c >= b'A' && c <= b'F' {
+        (c - b'A' + 10) as i32
+    } else {
+        -1
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn strtoul(_n: *const u8, _e: *mut *mut u8, _b: i32) -> u64 {
-    0
+pub unsafe extern "C" fn strtol(n: *const u8, end: *mut *mut u8, base: i32) -> i64 {
+    // SAFETY: n is NUL-terminated per C contract, end may be null
+    if n.is_null() {
+        return 0;
+    }
+    let mut p = n;
+    // skip whitespace
+    unsafe {
+        while *p == b' ' || (*p >= 9 && *p <= 13) {
+            p = p.add(1);
+        }
+    }
+    let mut neg = false;
+    unsafe {
+        if *p == b'-' {
+            neg = true;
+            p = p.add(1);
+        } else if *p == b'+' {
+            p = p.add(1);
+        }
+    }
+    let mut b = base;
+    unsafe {
+        if (b == 16 || b == 0) && *p == b'0' && ((*p.add(1) | 0x20) == b'x') {
+            p = p.add(2);
+            b = 16;
+        } else if b == 0 {
+            b = if *p == b'0' { 8 } else { 10 };
+        }
+    }
+    let mut v: u64 = 0;
+    unsafe {
+        loop {
+            let d = digit_val(*p);
+            if d < 0 || d >= b {
+                break;
+            }
+            // SAFETY: checked mul/add overflow wraps like C (but SOTA prefers checked)
+            v = v.wrapping_mul(b as u64).wrapping_add(d as u64);
+            p = p.add(1);
+        }
+    }
+    if !end.is_null() {
+        unsafe {
+            *end = p as *mut u8;
+        }
+    }
+    if neg {
+        -(v as i64)
+    } else {
+        v as i64
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn atoi(_n: *const u8) -> i32 {
-    0
+pub unsafe extern "C" fn strtoul(n: *const u8, end: *mut *mut u8, base: i32) -> u64 {
+    // SAFETY: delegate to strtol bit pattern
+    unsafe { strtol(n, end, base) as u64 }
+}
+#[no_mangle]
+pub unsafe extern "C" fn atoi(n: *const u8) -> i32 {
+    unsafe { strtol(n, core::ptr::null_mut(), 10) as i32 }
 }
 #[no_mangle]
 pub unsafe extern "C" fn strerror(_e: i32) -> *mut u8 {

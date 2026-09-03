@@ -674,8 +674,32 @@ pub unsafe extern "C" fn pthread_kill(_t: u64, _s: i32) -> i32 {
 pub unsafe extern "C" fn pthread_setname_np(_t: u64, _n: *const u8) -> i32 {
     0
 }
+#[repr(C)]
+struct HouseMutex {
+    locked: i32,
+    owner: *mut HouseThread,
+    wait_head: *mut HouseThread,
+    wait_tail: *mut HouseThread,
+}
+#[repr(C)]
+struct HouseCond {
+    wait_head: *mut HouseThread,
+    wait_tail: *mut HouseThread,
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn pthread_mutex_init(_m: *mut u8, _a: *const u8) -> i32 {
+pub unsafe extern "C" fn pthread_mutex_init(m: *mut u8, _a: *const u8) -> i32 {
+    // SAFETY: m points to HouseMutex per caller
+    if m.is_null() {
+        return 22;
+    }
+    let mu = m as *mut HouseMutex;
+    unsafe {
+        (*mu).locked = 0;
+        (*mu).owner = core::ptr::null_mut();
+        (*mu).wait_head = core::ptr::null_mut();
+        (*mu).wait_tail = core::ptr::null_mut();
+    }
     0
 }
 #[no_mangle]
@@ -683,19 +707,124 @@ pub unsafe extern "C" fn pthread_mutex_destroy(_m: *mut u8) -> i32 {
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn pthread_mutex_lock(_m: *mut u8) -> i32 {
+pub unsafe extern "C" fn pthread_mutex_lock(m: *mut u8) -> i32 {
+    // SAFETY: spin_lock with dmb sy, queue wait_next + SGI0 kick mirrors tinylibc/threads.c
+    if m.is_null() {
+        return 22;
+    }
+    let mu = m as *mut HouseMutex;
+    loop {
+        unsafe {
+            house_sched_lock_acquire();
+        }
+        let locked = unsafe { (*mu).locked };
+        if locked == 0 {
+            unsafe {
+                (*mu).locked = 1;
+                (*mu).owner = house_thread_current();
+                house_sched_lock_release();
+            }
+            return 0;
+        }
+        let cur = unsafe { house_thread_current() };
+        if cur.is_null() {
+            unsafe {
+                house_sched_lock_release();
+            }
+            return 22;
+        }
+        unsafe {
+            (*cur).state = HOUSE_THR_BLOCKED;
+            (*cur).wait_next = core::ptr::null_mut();
+        }
+        unsafe {
+            if !(*mu).wait_tail.is_null() {
+                (*(*mu).wait_tail).wait_next = cur;
+            } else {
+                (*mu).wait_head = cur;
+            }
+            (*mu).wait_tail = cur;
+            house_sched_lock_release();
+            house_sched_block();
+        }
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut u8) -> i32 {
+    if m.is_null() {
+        return 22;
+    }
+    let mu = m as *mut HouseMutex;
+    unsafe {
+        house_sched_lock_acquire();
+    }
+    let locked = unsafe { (*mu).locked };
+    if locked == 0 {
+        unsafe {
+            (*mu).locked = 1;
+            (*mu).owner = house_thread_current();
+            house_sched_lock_release();
+        }
+        0
+    } else {
+        unsafe {
+            house_sched_lock_release();
+        }
+        16
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut u8) -> i32 {
+    if m.is_null() {
+        return 22;
+    }
+    let mu = m as *mut HouseMutex;
+    unsafe {
+        house_sched_lock_acquire();
+    }
+    unsafe {
+        (*mu).locked = 0;
+        (*mu).owner = core::ptr::null_mut();
+    }
+    let w = unsafe { (*mu).wait_head };
+    if !w.is_null() {
+        unsafe {
+            (*mu).wait_head = (*w).wait_next;
+            if (*mu).wait_head.is_null() {
+                (*mu).wait_tail = core::ptr::null_mut();
+            }
+            (*w).wait_next = core::ptr::null_mut();
+            (*w).state = HOUSE_THR_RUNNABLE;
+            let aff = (*w).affinity;
+            let target = if aff != 0 {
+                aff.trailing_zeros() as i32
+            } else {
+                0
+            };
+            let smp = core::ptr::read_volatile(&raw const house_smp_n);
+            let t = if target >= smp { 0 } else { target };
+            enqueue_run_core(t, w);
+            let cur = cpu_id() as i32;
+            if t != cur {
+                house_sched_kick(t);
+            }
+        }
+    }
+    unsafe {
+        house_sched_lock_release();
+    }
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn pthread_mutex_trylock(_m: *mut u8) -> i32 {
-    0
-}
-#[no_mangle]
-pub unsafe extern "C" fn pthread_mutex_unlock(_m: *mut u8) -> i32 {
-    0
-}
-#[no_mangle]
-pub unsafe extern "C" fn pthread_cond_init(_c: *mut u8, _a: *const u8) -> i32 {
+pub unsafe extern "C" fn pthread_cond_init(c: *mut u8, _a: *const u8) -> i32 {
+    if c.is_null() {
+        return 22;
+    }
+    let cond = c as *mut HouseCond;
+    unsafe {
+        (*cond).wait_head = core::ptr::null_mut();
+        (*cond).wait_tail = core::ptr::null_mut();
+    }
     0
 }
 #[no_mangle]
@@ -703,22 +832,329 @@ pub unsafe extern "C" fn pthread_cond_destroy(_c: *mut u8) -> i32 {
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn pthread_cond_signal(_c: *mut u8) -> i32 {
+pub unsafe extern "C" fn pthread_cond_signal(c: *mut u8) -> i32 {
+    if c.is_null() {
+        return 22;
+    }
+    let cond = c as *mut HouseCond;
+    unsafe {
+        house_sched_lock_acquire();
+    }
+    let w = unsafe { (*cond).wait_head };
+    if !w.is_null() {
+        unsafe {
+            (*cond).wait_head = (*w).wait_next;
+            if (*cond).wait_head.is_null() {
+                (*cond).wait_tail = core::ptr::null_mut();
+            }
+            (*w).wait_next = core::ptr::null_mut();
+            (*w).state = HOUSE_THR_RUNNABLE;
+            let aff = (*w).affinity;
+            let target = if aff != 0 {
+                aff.trailing_zeros() as i32
+            } else {
+                0
+            };
+            let smp = core::ptr::read_volatile(&raw const house_smp_n);
+            let t = if target >= smp { 0 } else { target };
+            enqueue_run_core(t, w);
+            if (cpu_id() as i32) != t {
+                house_sched_kick(t);
+            }
+        }
+    }
+    unsafe {
+        house_sched_lock_release();
+    }
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn pthread_cond_broadcast(_c: *mut u8) -> i32 {
+pub unsafe extern "C" fn pthread_cond_broadcast(c: *mut u8) -> i32 {
+    if c.is_null() {
+        return 22;
+    }
+    let cond = c as *mut HouseCond;
+    unsafe {
+        house_sched_lock_acquire();
+    }
+    while unsafe { !(*cond).wait_head.is_null() } {
+        let w = unsafe { (*cond).wait_head };
+        unsafe {
+            (*cond).wait_head = (*w).wait_next;
+            (*w).wait_next = core::ptr::null_mut();
+            (*w).state = HOUSE_THR_RUNNABLE;
+            let aff = (*w).affinity;
+            let target = if aff != 0 {
+                aff.trailing_zeros() as i32
+            } else {
+                0
+            };
+            let smp = core::ptr::read_volatile(&raw const house_smp_n);
+            let t = if target >= smp { 0 } else { target };
+            enqueue_run_core(t, w);
+            if (cpu_id() as i32) != t {
+                house_sched_kick(t);
+            }
+        }
+    }
+    unsafe {
+        (*cond).wait_tail = core::ptr::null_mut();
+        house_sched_lock_release();
+    }
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn pthread_cond_wait(_c: *mut u8, _m: *mut u8) -> i32 {
-    unsafe { house_sched_block() };
+pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> i32 {
+    // SAFETY: mirrors tinylibc/threads.c pthread_cond_wait with mutex handoff and queue
+    if c.is_null() || m.is_null() {
+        return 22;
+    }
+    let cond = c as *mut HouseCond;
+    let mu = m as *mut HouseMutex;
+    unsafe {
+        house_sched_lock_acquire();
+    }
+    let cur = unsafe { house_thread_current() };
+    if cur.is_null() {
+        unsafe {
+            house_sched_lock_release();
+        }
+        return 22;
+    }
+    unsafe {
+        (*cur).state = HOUSE_THR_BLOCKED;
+        (*cur).wait_next = core::ptr::null_mut();
+    }
+    unsafe {
+        if !(*cond).wait_tail.is_null() {
+            (*(*cond).wait_tail).wait_next = cur;
+        } else {
+            (*cond).wait_head = cur;
+        }
+        (*cond).wait_tail = cur;
+        (*mu).locked = 0;
+        (*mu).owner = core::ptr::null_mut();
+        // wake one mutex waiter if any
+        let mw = (*mu).wait_head;
+        if !mw.is_null() {
+            (*mu).wait_head = (*mw).wait_next;
+            if (*mu).wait_head.is_null() {
+                (*mu).wait_tail = core::ptr::null_mut();
+            }
+            (*mw).wait_next = core::ptr::null_mut();
+            (*mw).state = HOUSE_THR_RUNNABLE;
+            let aff = (*mw).affinity;
+            let target = if aff != 0 {
+                aff.trailing_zeros() as i32
+            } else {
+                0
+            };
+            let smp = core::ptr::read_volatile(&raw const house_smp_n);
+            let t = if target >= smp { 0 } else { target };
+            enqueue_run_core(t, mw);
+            if (cpu_id() as i32) != t {
+                house_sched_kick(t);
+            }
+        }
+        let core_id = cpu_id();
+        let old = cur;
+        let next = dequeue_run_core(core_id as i32);
+        if next.is_null() {
+            house_sched_lock_release();
+            // spin until signaled
+            while (*cur).state == HOUSE_THR_BLOCKED {
+                core::arch::asm!("wfi", options(nostack, preserves_flags));
+            }
+            house_sched_lock_acquire();
+        } else {
+            (*next).state = HOUSE_THR_RUNNING;
+            house_current_thr[core_id as usize] = next;
+            house_sched_lock_release();
+            house_thread_switch(old, next);
+            house_sched_lock_acquire();
+        }
+        // reacquire mutex
+        while (*mu).locked != 0 {
+            (*cur).state = HOUSE_THR_BLOCKED;
+            (*cur).wait_next = core::ptr::null_mut();
+            if !(*mu).wait_tail.is_null() {
+                (*(*mu).wait_tail).wait_next = cur;
+            } else {
+                (*mu).wait_head = cur;
+            }
+            (*mu).wait_tail = cur;
+            let old2 = cur;
+            let c2 = cpu_id();
+            let n2 = dequeue_run_core(c2 as i32);
+            if n2.is_null() {
+                house_sched_lock_release();
+                core::arch::asm!("wfi", options(nostack, preserves_flags));
+                house_sched_lock_acquire();
+                continue;
+            }
+            (*n2).state = HOUSE_THR_RUNNING;
+            house_current_thr[c2 as usize] = n2;
+            house_sched_lock_release();
+            house_thread_switch(old2, n2);
+            house_sched_lock_acquire();
+        }
+        (*mu).locked = 1;
+        (*mu).owner = house_thread_current();
+        house_sched_lock_release();
+    }
     0
 }
 #[no_mangle]
-pub unsafe extern "C" fn pthread_cond_timedwait(_c: *mut u8, _m: *mut u8, _t: *const u8) -> i32 {
-    unsafe { house_sched_block() };
-    0
+pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *const u8) -> i32 {
+    if t.is_null() {
+        return unsafe { pthread_cond_wait(c, m) };
+    }
+    let abs_secs = unsafe { *(t as *const i64).add(0) } as u64;
+    let abs_nsec = unsafe { *(t as *const i64).add(1) } as u64;
+    let abs_ns = abs_secs * 1000000000 + abs_nsec;
+    let now = unsafe { house_uptime_ns() };
+    // handle FAKE_EPOCH adjustment like C
+    let mut abs_adj = abs_ns;
+    if abs_secs > 1000000000 && abs_ns >= 1785000000u64 * 1000000000 {
+        abs_adj -= 1785000000u64 * 1000000000;
+    }
+    if abs_adj <= now {
+        return 110;
+    } // ETIMEDOUT
+      // enqueue with timeout and block, checking wake
+    let cond = c as *mut HouseCond;
+    let mu = m as *mut HouseMutex;
+    unsafe {
+        house_sched_lock_acquire();
+    }
+    let cur = unsafe { house_thread_current() };
+    if cur.is_null() {
+        unsafe {
+            house_sched_lock_release();
+        }
+        return 22;
+    }
+    unsafe {
+        (*cur).wake_ns = abs_adj;
+        (*cur).state = HOUSE_THR_BLOCKED;
+        (*cur).wait_next = core::ptr::null_mut();
+        if !(*cond).wait_tail.is_null() {
+            (*(*cond).wait_tail).wait_next = cur;
+        } else {
+            (*cond).wait_head = cur;
+        }
+        (*cond).wait_tail = cur;
+        (*mu).locked = 0;
+        (*mu).owner = core::ptr::null_mut();
+        let mw = (*mu).wait_head;
+        if !mw.is_null() {
+            (*mu).wait_head = (*mw).wait_next;
+            if (*mu).wait_head.is_null() {
+                (*mu).wait_tail = core::ptr::null_mut();
+            }
+            (*mw).wait_next = core::ptr::null_mut();
+            (*mw).state = HOUSE_THR_RUNNABLE;
+            let aff = (*mw).affinity;
+            let target = if aff != 0 {
+                aff.trailing_zeros() as i32
+            } else {
+                0
+            };
+            let smp = core::ptr::read_volatile(&raw const house_smp_n);
+            let t2 = if target >= smp { 0 } else { target };
+            enqueue_run_core(t2, mw);
+            if (cpu_id() as i32) != t2 {
+                house_sched_kick(t2);
+            }
+        }
+        let core_id = cpu_id();
+        let old = cur;
+        let next = dequeue_run_core(core_id as i32);
+        if next.is_null() {
+            house_sched_lock_release();
+            // busy-wait with timeout check like C wfi loop
+            loop {
+                let now2 = house_uptime_ns();
+                if now2 >= abs_adj {
+                    house_sched_lock_acquire();
+                    // remove from cond queue if still queued
+                    let mut prev: *mut HouseThread = core::ptr::null_mut();
+                    let mut it = (*cond).wait_head;
+                    while !it.is_null() {
+                        if it == cur {
+                            if prev.is_null() {
+                                (*cond).wait_head = (*it).wait_next;
+                            } else {
+                                (*prev).wait_next = (*it).wait_next;
+                            }
+                            if (*cond).wait_tail == it {
+                                (*cond).wait_tail = prev;
+                            }
+                            (*it).wait_next = core::ptr::null_mut();
+                            if (*it).state == HOUSE_THR_BLOCKED {
+                                (*it).state = HOUSE_THR_RUNNABLE;
+                            }
+                            break;
+                        }
+                        prev = it;
+                        it = (*it).wait_next;
+                    }
+                    if (*cur).state == HOUSE_THR_BLOCKED {
+                        (*cur).state = HOUSE_THR_RUNNABLE;
+                        (*cur).wake_ns = 0;
+                    }
+                    house_sched_lock_release();
+                    break;
+                }
+                if (*cur).state != HOUSE_THR_BLOCKED {
+                    break;
+                }
+                core::arch::asm!("wfi", options(nostack, preserves_flags));
+            }
+            house_sched_lock_acquire();
+        } else {
+            (*next).state = HOUSE_THR_RUNNING;
+            house_current_thr[core_id as usize] = next;
+            house_sched_lock_release();
+            house_thread_switch(old, next);
+            house_sched_lock_acquire();
+            (*cur).wake_ns = 0;
+        }
+        // reacquire mutex same as wait
+        while (*mu).locked != 0 {
+            (*cur).state = HOUSE_THR_BLOCKED;
+            (*cur).wait_next = core::ptr::null_mut();
+            if !(*mu).wait_tail.is_null() {
+                (*(*mu).wait_tail).wait_next = cur;
+            } else {
+                (*mu).wait_head = cur;
+            }
+            (*mu).wait_tail = cur;
+            let old2 = cur;
+            let c2 = cpu_id();
+            let n2 = dequeue_run_core(c2 as i32);
+            if n2.is_null() {
+                house_sched_lock_release();
+                core::arch::asm!("wfi", options(nostack, preserves_flags));
+                house_sched_lock_acquire();
+                continue;
+            }
+            (*n2).state = HOUSE_THR_RUNNING;
+            house_current_thr[c2 as usize] = n2;
+            house_sched_lock_release();
+            house_thread_switch(old2, n2);
+            house_sched_lock_acquire();
+        }
+        (*mu).locked = 1;
+        (*mu).owner = house_thread_current();
+        let timed_out = house_uptime_ns() >= abs_adj;
+        house_sched_lock_release();
+        if timed_out {
+            110
+        } else {
+            0
+        }
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_condattr_init(_a: *mut u8) -> i32 {

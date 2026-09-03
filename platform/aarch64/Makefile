@@ -63,6 +63,7 @@ DEEP_A := $(shell ls $(UNITDIR_deep)/libHSdeepseq-*.a | head -1)
 RTS_A  := $(shell ls $(UNITDIR_rts)/libHSrts-*.a | grep thr | grep -v debug | grep -v eventlog | head -1)
 FFI_A  := $(UNITDIR_rts)/libCffi.a
 
+RUST ?=1
 TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
           tinylibc/stdio.c tinylibc/getopt.c tinylibc/compat.c \
           tinylibc/mathmin.c tinylibc/c_print.c \
@@ -70,17 +71,24 @@ TINY := tinylibc/mem.c tinylibc/alloc.c tinylibc/sys.c \
 
 TINY_ASM := tinylibc/switch.S tinylibc/tls_desc.S
 
-TINY_OBJS := $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o)))
-# Pure Rust HAL — C tinylibc kept for hs_init until Rust tinylibc fully stable
+ifeq ($(RUST),1)
+TINY_OBJS :=
 HAL_O := $(RUST_HAL_A)
+else
+TINY_OBJS := $(addprefix build/tiny-,$(notdir $(TINY:.c=.o))) $(addprefix build/tiny-,$(notdir $(TINY_ASM:.S=.o)))
+HAL_O := $(RUST_HAL_A)
+endif
 
 VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
          H/Concurrency Kernel/Types/Console Kernel/Console Kernel/Debug \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
-# Pure Rust HAL + C tinylibc for hs_init (hybrid until slice 4c complete)
-COMMON_OBJS := $(BOOT_O) $(TINY_OBJS)
+ifeq ($(RUST),1)
+COMMON_OBJS := $(BOOT_O) $(HAL_O)
+else
+COMMON_OBJS := $(BOOT_O) $(TINY_OBJS) $(HAL_O)
+endif
 OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
 OBJS_IRQ := $(COMMON_OBJS) $(HAL_O) build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
 OBJS_HOUSE_DEPS := $(COMMON_OBJS) $(HAL_O)
