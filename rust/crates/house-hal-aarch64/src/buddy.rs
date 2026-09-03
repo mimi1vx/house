@@ -1,6 +1,6 @@
 //! Buddy allocator — `buddy.c` transliteration (intrusive free-list+bump).
 //!
-//! Over `__heap_base+64M .. house_boot_stack_top-16*16K` whole RAM window.
+//! Over `__heap_base+64M .. house_boot_stack_top-16*64K` whole RAM window.
 
 use crate::spinlock::RawSpinLock;
 

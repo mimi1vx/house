@@ -36,12 +36,35 @@ static mut MALLOC_CUR: *mut u8 = core::ptr::null_mut();
 static mut ALLOC_LOCK: u32 = 0;
 
 #[inline]
-unsafe fn spin_lock(_ptr: *mut u32) {
-    unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
+unsafe fn spin_lock(ptr: *mut u32) {
+    // SAFETY: LDAXR/STXR spin on ALLOC_LOCK; matches C house_spin_lock.
+    unsafe {
+        core::arch::asm!(
+            "1: ldaxr {res:w}, [{ptr}]",
+            "   cbnz {res:w}, 1b",
+            "   mov {tmp:w}, #1",
+            "   stxr {res:w}, {tmp:w}, [{ptr}]",
+            "   cbnz {res:w}, 1b",
+            "   dmb sy",
+            ptr = in(reg) ptr,
+            res = out(reg) _,
+            tmp = out(reg) _,
+            options(nostack, preserves_flags),
+        )
+    };
 }
 #[inline]
-unsafe fn spin_unlock(_ptr: *mut u32) {
-    unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
+unsafe fn spin_unlock(ptr: *mut u32) {
+    // SAFETY: STLR release; matches C house_spin_unlock.
+    unsafe {
+        core::arch::asm!(
+            "dmb sy",
+            "stlr wzr, [{ptr}]",
+            "dmb sy",
+            ptr = in(reg) ptr,
+            options(nostack, preserves_flags),
+        )
+    };
 }
 
 unsafe fn pool_top() -> *mut u8 {
@@ -126,15 +149,6 @@ unsafe fn pool_alloc(n: usize, align: usize) -> *mut u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn malloc(n: usize) -> *mut u8 {
-    extern "C" {
-        fn buddy_alloc_page() -> *mut u8;
-    }
-    if n <= 128 {
-        let p = unsafe { buddy_alloc_page() as *mut u8 };
-        if !p.is_null() {
-            return p;
-        }
-    }
     unsafe { pool_alloc(n, 16) }
 }
 

@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use crate::virtio_transport::{virtio_transport_ack, virtio_transport_interrupt_status};
+
 const RING_SZ: usize = 256;
 const RING_MASK: usize = 255;
 
@@ -49,6 +51,18 @@ pub unsafe extern "C" fn house_irq_init() {
 #[no_mangle]
 pub unsafe extern "C" fn house_irq_push(intid: u32) {
     // SAFETY: producer is c_handle_irq (IRQ masked, single core) — lock-free, no races on head.
+    // Ack a pending virtio used-ring interrupt at the source first: the level
+    // stays asserted until acked, and an unacked completion refires instantly,
+    // starving the interrupted thread (livelock — polled drivers never run to
+    // consume the ring). The Endpoint forward below still delivers one message
+    // per completion; the used ring itself is consumed by the driver's poll.
+    // Slot SPIs are 48..56 (32 + 16 + slot); MMIO only, no locks, no alloc.
+    if (48..56).contains(&intid) {
+        let slot = (intid - 48) as i32;
+        if unsafe { virtio_transport_interrupt_status(slot) } & 1 != 0 {
+            unsafe { virtio_transport_ack(slot, 1) };
+        }
+    }
     unsafe {
         let h = RING_HEAD;
         let t = RING_TAIL;

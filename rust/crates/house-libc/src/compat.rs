@@ -12,15 +12,24 @@ pub unsafe extern "C" fn __getauxval(_t: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn stat64(_p: *const u8, _s: *mut c_void) -> i32 {
-    -1
+    extern "C" {
+        fn stat(p: *const u8, s: *mut c_void) -> i32;
+    }
+    unsafe { stat(_p, _s) }
 }
 #[no_mangle]
 pub unsafe extern "C" fn fstat64(_f: i32, _s: *mut c_void) -> i32 {
-    -1
+    extern "C" {
+        fn fstat(f: i32, s: *mut c_void) -> i32;
+    }
+    unsafe { fstat(_f, _s) }
 }
 #[no_mangle]
 pub unsafe extern "C" fn lstat64(_p: *const u8, _s: *mut c_void) -> i32 {
-    -1
+    extern "C" {
+        fn lstat(p: *const u8, s: *mut c_void) -> i32;
+    }
+    unsafe { lstat(_p, _s) }
 }
 #[no_mangle]
 pub unsafe extern "C" fn dlopen(_f: *const u8, _fl: i32) -> *mut c_void {
@@ -166,10 +175,34 @@ pub unsafe extern "C" fn __assert_fail(_a: *const u8, _f: *const u8, _l: u32, _f
 }
 #[no_mangle]
 pub unsafe extern "C" fn getrlimit(_r: i32, _rl: *mut c_void) -> i32 {
+    // SAFETY: matches C compat.c getrlimit: generous 1TB limits.
+    if !_rl.is_null() {
+        unsafe {
+            *(_rl as *mut u64) = 1u64 << 40;
+            *(_rl as *mut u64).add(1) = 1u64 << 40;
+        }
+    }
     0
 }
 #[no_mangle]
 pub unsafe extern "C" fn getrusage(_w: i32, _r: *mut c_void) -> i32 {
+    // SAFETY: matches C compat.c getrusage: zeroed rusage with uptime + maxrss.
+    extern "C" {
+        fn house_uptime_ns() -> u64;
+    }
+    if _r.is_null() {
+        return 0;
+    }
+    let ns = unsafe { house_uptime_ns() };
+    unsafe {
+        core::ptr::write_bytes(_r as *mut u8, 0, 144);
+        let p = _r as *mut i64;
+        *p.add(0) = (ns / 1000000000) as i64;
+        *p.add(1) = ((ns / 1000) % 1000000) as i64;
+        *p.add(2) = (ns / 1000000000) as i64;
+        *p.add(3) = ((ns / 1000) % 1000000) as i64;
+        *p.add(4) = 1 << 16; // ru_maxrss
+    }
     0
 }
 #[no_mangle]
@@ -239,6 +272,27 @@ pub unsafe extern "C" fn iconv(
     _out: *mut *mut u8,
     _ol: *mut usize,
 ) -> usize {
+    // SAFETY: byte copy passthrough like C compat.c iconv.
+    extern "C" {
+        fn __errno_location() -> *mut i32;
+    }
+    if _in.is_null() || unsafe { (*_in).is_null() } {
+        return 0;
+    }
+    let il = unsafe { *_il };
+    let ol = unsafe { *_ol };
+    let n = if il < ol { il } else { ol };
+    unsafe {
+        core::ptr::copy_nonoverlapping(*_in, *_out, n);
+        *_in = (*_in).add(n);
+        *_out = (*_out).add(n);
+        *_il -= n;
+        *_ol -= n;
+    }
+    if unsafe { *_il } != 0 {
+        unsafe { *__errno_location() = 7 };
+        return usize::MAX;
+    }
     0
 }
 #[no_mangle]

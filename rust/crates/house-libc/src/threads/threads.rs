@@ -165,6 +165,24 @@ unsafe fn dequeue_run_core(core: i32) -> *mut HouseThread {
     }
 }
 
+// SAFETY: call with sched_lock held. Spin-exit paths (cond_wait/timedwait wfi)
+// can leave a RUNNABLE thread already queued; re-enqueueing duplicates the entry
+// and a later dequeue may switch to a recycled slot. Scan before enqueueing.
+unsafe fn queued_anywhere(thr: *mut HouseThread) -> bool {
+    for c in 0..HOUSE_MAX_SMP {
+        let mut q = unsafe { RUN_HEAD[c] };
+        let mut k = 0;
+        while !q.is_null() && k <= HOUSE_MAX_THREADS {
+            if q == thr {
+                return true;
+            }
+            q = unsafe { (*q).next };
+            k += 1;
+        }
+    }
+    false
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn house_threads_init() {
     for i in 0..HOUSE_MAX_THREADS {
@@ -228,6 +246,9 @@ pub unsafe extern "C" fn house_threads_init_secondary(core: u32) {
         unsafe { house_sched_lock_release() };
         return;
     }
+    // SAFETY: claim the slot while holding the lock like C init_secondary,
+    // so a concurrent pthread_create cannot grab the same thread.
+    unsafe { (*thr).state = HOUSE_THR_RUNNING };
     let tid = unsafe {
         let t = NEXT_TID;
         NEXT_TID += 1;
@@ -236,7 +257,6 @@ pub unsafe extern "C" fn house_threads_init_secondary(core: u32) {
     unsafe { house_sched_lock_release() };
     unsafe {
         (*thr).tid = tid;
-        (*thr).state = HOUSE_THR_RUNNING;
         (*thr).detached = 0;
         (*thr).exited = 0;
         (*thr).stack_base = core::ptr::null_mut();
@@ -496,6 +516,11 @@ pub unsafe extern "C" fn house_sched_yield() {
     if old_state == HOUSE_THR_RUNNING {
         unsafe { (*old).state = HOUSE_THR_RUNNABLE };
         unsafe { enqueue_run_core(core, old) };
+    } else if old_state == HOUSE_THR_RUNNABLE {
+        // SAFETY: under sched_lock; spin-exit may have left old queued already.
+        if !unsafe { queued_anywhere(old) } {
+            unsafe { enqueue_run_core(core, old) };
+        }
     }
     let mut next = unsafe { dequeue_run_core(core) };
     if next.is_null() {
@@ -768,7 +793,9 @@ pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
         unsafe { (*cur).retval = r };
         unsafe { (*cur).exited = 1 };
         unsafe { (*cur).state = 4 }; // EXITED
-                                     // handle joiner
+                                     // SAFETY: scheduler mutations below need sched_lock like C pthread_exit.
+        unsafe { house_sched_lock_acquire() };
+        // handle joiner
         let joiner = unsafe { (*cur).joiner };
         if !joiner.is_null() {
             unsafe { (*cur).joiner = core::ptr::null_mut() };
@@ -794,6 +821,23 @@ pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
                 unsafe { free(tcb) };
             }
             unsafe { (*cur).state = HOUSE_THR_UNUSED };
+        }
+        let next = unsafe { dequeue_run_core(core as i32) };
+        if next.is_null() {
+            unsafe { house_sched_lock_release() };
+            loop {
+                unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
+            }
+        }
+        unsafe { (*next).state = HOUSE_THR_RUNNING };
+        unsafe { house_current_thr[core] = next };
+        unsafe { house_sched_lock_release() };
+        let old = cur;
+        if !old.is_null() {
+            unsafe { house_thread_switch(old, next) };
+        }
+        loop {
+            unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
         }
     }
     let next = unsafe { dequeue_run_core(core as i32) };
@@ -1348,6 +1392,21 @@ pub unsafe extern "C" fn pthread_attr_setaffinity_np(
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_attr_getaffinity_np(_a: *mut u8, _sz: usize, _m: *mut u8) -> i32 {
+    // SAFETY: matches C pthread_attr_getaffinity_np: all-SMP mask.
+    if !_m.is_null() && _sz >= 8 {
+        let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
+        let m = if smp >= 64 {
+            !0u64
+        } else if smp <= 0 {
+            1u64
+        } else {
+            (1u64 << smp) - 1
+        };
+        unsafe { *(_m as *mut u64) = m };
+        if _sz > 8 {
+            unsafe { core::ptr::write_bytes(_m.add(8), 0, _sz - 8) };
+        }
+    }
     0
 }
 #[no_mangle]

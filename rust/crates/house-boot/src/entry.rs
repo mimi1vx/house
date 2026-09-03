@@ -10,8 +10,8 @@
 //   `sp` — no interrupt window before `VBAR` install (SOTA Security: keep DAIF masked).
 // - `CurrentEL` check covers all entry ELs; `eret` to EL1 only after `HCR_EL2.RW=1`,
 //   `CNTHCTL_EL2`, `CNTVOFF_EL2`, `ICC_SRE_EL2`, `SPSR_EL2=0x3c5`/`SPSR_EL3=0x3c9`.
-// - `sp` per-core `house_boot_stack_top - core*16K` (or `__early_stacks_top` fallback)
-//   is valid per `aarch64.ld` `HOUSE_MAX_SMP*16K` reservation; `TLBI VMALLE1IS` not
+// - `sp` per-core `house_boot_stack_top - core*64K` (or `__early_stacks_top` fallback)
+//   is valid per `aarch64.ld` `HOUSE_MAX_SMP*64K` reservation; `TLBI VMALLE1IS` not
 //   needed until later `TTBR0` switch (done in `exception.rs`).
 // - `R_AARCH64_RELATIVE` loop processes host `.rela.dyn` entries with `cmp x5,#1027`
 //   exactly as C `start.S:73-85`; primary only (secondary skips relocs/BSS).
@@ -99,7 +99,7 @@ el1_setup:
 3:  add     x0, x0, #24
     b       1b
 2:
-    /* Per-core SP: house_boot_stack_top - core*16K if set else early stacks.
+    /* Per-core SP: house_boot_stack_top - core*64K if set else early stacks.
        Early boot uses low __early_stacks_top (after BSS) which is safe
        for both 512M and 4G QEMU; c_start rebases to runtime top after
        detect (so same ELF works at 512M/4G without stack fault). */
@@ -107,7 +107,7 @@ el1_setup:
     ldr     x1, [x1]
     cbnz    x1, 10f
     ldr     x1, =__early_stacks_top
-10: mov     x2, #16384
+10: mov     x2, #65536
     mul     x3, x19, x2
     sub     x1, x1, x3
     mov     sp, x1
@@ -198,7 +198,7 @@ sec_el1:
     ldr     x1, [x1]
     cbnz    x1, 11f
     ldr     x1, =__early_stacks_top
-11: mov     x2, #16384
+11: mov     x2, #65536
     mul     x3, x19, x2
     sub     x1, x1, x3
     mov     sp, x1

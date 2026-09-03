@@ -24,19 +24,60 @@ impl RawSpinLock {
 
     #[inline]
     pub fn lock(&self) {
-        // Single-core early boot: use DMB only to avoid LDAR/STLR hang before GIC.
-        unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
+        // SAFETY: LDAXR/STXR exclusive monitor on shared lock word; DMB SY orders.
+        unsafe {
+            core::arch::asm!(
+                "1: ldaxr {res:w}, [{ptr}]",
+                "   cbnz {res:w}, 1b",
+                "   mov {tmp:w}, #1",
+                "   stxr {res:w}, {tmp:w}, [{ptr}]",
+                "   cbnz {res:w}, 1b",
+                "   dmb sy",
+                ptr = in(reg) self.v.get(),
+                res = out(reg) _,
+                tmp = out(reg) _,
+                options(nostack, preserves_flags),
+            )
+        };
     }
 
     #[inline]
     pub fn try_lock(&self) -> bool {
-        // Stub: not used in HAL hot paths; return false to avoid complex stxr.
-        false
+        // SAFETY: single LDAXR/STXR attempt; returns true on acquire.
+        let mut res: u32;
+        unsafe {
+            core::arch::asm!(
+                "   ldaxr {res:w}, [{ptr}]",
+                "   cbnz {res:w}, 1f",
+                "   mov {tmp:w}, #1",
+                "   stxr {res:w}, {tmp:w}, [{ptr}]",
+                "   cbnz {res:w}, 1f",
+                "   dmb sy",
+                "   mov {res:w}, #0",
+                "   b 2f",
+                "1: mov {res:w}, #1",
+                "2:",
+                ptr = in(reg) self.v.get(),
+                res = out(reg) res,
+                tmp = out(reg) _,
+                options(nostack, preserves_flags),
+            )
+        };
+        res == 0
     }
 
     #[inline]
     pub fn unlock(&self) {
-        unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
+        // SAFETY: STLR releases exclusive ownership; DMB SY pairs with lock.
+        unsafe {
+            core::arch::asm!(
+                "dmb sy",
+                "stlr wzr, [{ptr}]",
+                "dmb sy",
+                ptr = in(reg) self.v.get(),
+                options(nostack, preserves_flags),
+            )
+        };
     }
 }
 

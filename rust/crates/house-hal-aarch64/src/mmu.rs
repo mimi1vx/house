@@ -61,7 +61,7 @@ unsafe fn build_rts_alias(span: u64) {
         // SAFETY: house_smp_n is volatile but stable after detect; read via volatile.
         let smp_n: u64 = core::ptr::read_volatile(&raw const house_smp_n) as u64;
         let smp_n = if smp_n == 0 { 2 } else { smp_n };
-        let stack_reserve: u64 = 0x200000 + smp_n * 16384;
+        let stack_reserve: u64 = 0x200000 + smp_n * 65536;
         let half = span >> 1;
         let usable_half = if half > stack_reserve {
             half - stack_reserve

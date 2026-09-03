@@ -417,8 +417,10 @@ pub unsafe extern "C" fn c_start() {
             puthex(__boot_dtb);
             uart_puts(b"\n\0".as_ptr());
             let core = cpu_id() as u64;
+            // Per-core 64 KiB stacks: measured primary depth ~18.5K during
+            // RTS bringup exceeds the old 16K and corrupts the neighbor core.
             let new_sp = core::ptr::read_volatile(&raw const house_boot_stack_top)
-                .wrapping_sub(core * 16384);
+                .wrapping_sub(core * 65536);
             core::arch::asm!("mov sp, {0}", in(reg) new_sp, options(nostack, preserves_flags));
         }
         {
@@ -433,8 +435,8 @@ pub unsafe extern "C" fn c_start() {
             let pool_top = (&raw mut __heap_base as *mut u8 as u64).wrapping_add(64 << 20);
             let b_start = (pool_top.checked_add(4095).unwrap_or(u64::MAX)) & !4095u64;
             let mut b_end = core::ptr::read_volatile(&raw const house_boot_stack_top);
-            if b_end > (HOUSE_MAX_SMP as u64 * 16384) {
-                b_end -= HOUSE_MAX_SMP as u64 * 16384;
+            if b_end > (HOUSE_MAX_SMP as u64 * 65536) {
+                b_end -= HOUSE_MAX_SMP as u64 * 65536;
             }
             b_end &= !4095u64;
             if b_end > b_start {

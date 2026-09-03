@@ -61,7 +61,7 @@ SECTIONS
     __bss_end = .;
   } :data
 
-  /* Per-core early stacks: max 16*16K=256K, runtime uses house_boot_stack_top.
+  /* Per-core early stacks: max 16*64K=1M, runtime uses house_boot_stack_top.
       Old HOUSE_SMP_N kept as compat alias for HOUSE_MAX_SMP. */
 #ifndef HOUSE_MAX_SMP
 #ifdef HOUSE_SMP_N
@@ -76,9 +76,9 @@ SECTIONS
   __early_stacks_base = .;
   __early_stack = .;
   . = ALIGN(16);
-  . += HOUSE_MAX_SMP * 16384;
+  . += HOUSE_MAX_SMP * 65536;
   __early_stacks_top = .;
-  __early_stack_top = __early_stacks_base + 16384;
+  __early_stack_top = __early_stacks_base + 65536;
   __early_stack_top_core0 = __early_stack_top;
   __early_stacks_max_top = __early_stacks_top;
 

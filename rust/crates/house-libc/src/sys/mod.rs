@@ -485,7 +485,9 @@ fn fd_slot(fd: i32) -> Option<usize> {
 static mut TICK_INTERVAL_NS: u64 = 0;
 
 #[no_mangle]
-pub static mut environ: *mut *mut u8 = core::ptr::null_mut();
+pub static mut environ: *mut *mut u8 = &raw mut EMPTY_ENV as *mut *mut u8;
+
+static mut EMPTY_ENV: *mut u8 = core::ptr::null_mut();
 
 #[inline]
 fn counter_hz() -> u64 {
@@ -749,6 +751,8 @@ struct EpollEvent {
     data: u64,
 }
 
+const EPOLLIN: u32 = 0x001;
+
 #[no_mangle]
 pub unsafe extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, ev: *mut c_void) -> i32 {
     let Some(s) = fd_slot(epfd) else {
@@ -837,17 +841,11 @@ pub unsafe extern "C" fn epoll_wait(
     maxevents: i32,
     timeout: i32,
 ) -> i32 {
-    return epoll_pwait(epfd, events, maxevents, timeout, core::ptr::null());
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn epoll_pwait(
-    epfd: i32,
-    events: *mut c_void,
-    maxevents: i32,
-    _timeout: i32,
-    _sigmask: *const c_void,
-) -> i32 {
+    // SAFETY: blocking yield/wfi matches tinylibc/sys.c epoll_wait; no locks held.
+    extern "C" {
+        fn house_sched_yield();
+        static house_thr_mode: i32;
+    }
     if events.is_null() || maxevents <= 0 {
         return 0;
     }
@@ -855,27 +853,89 @@ pub unsafe extern "C" fn epoll_pwait(
         unsafe { *__errno_location() = 9 };
         return -1;
     };
-    let ep = unsafe { &FDT[s] };
-    if ep.kind != FdKind::Epoll {
+    if unsafe { FDT[s].kind } != FdKind::Epoll {
         unsafe { *__errno_location() = 9 };
         return -1;
     }
-    let mut n = 0;
     let out = events as *mut EpollEvent;
-    for i in 0..ep.ep_n {
-        if n >= maxevents as usize {
-            break;
-        }
-        let fd = ep.ep_fd[i];
-        if unsafe { fd_ready(fd) } {
-            unsafe {
-                (*out.add(n)).events = ep.ep_events[i];
-                (*out.add(n)).data = ep.ep_data[i];
+    loop {
+        let mut n = 0usize;
+        let ep_n = unsafe { FDT[s].ep_n };
+        for i in 0..ep_n {
+            if n >= maxevents as usize {
+                break;
             }
-            n += 1;
+            let fd = unsafe { FDT[s].ep_fd[i] };
+            let want = unsafe { FDT[s].ep_events[i] };
+            if (want & EPOLLIN) != 0 && unsafe { fd_ready(fd) } {
+                unsafe {
+                    (*out.add(n)).events = EPOLLIN;
+                    (*out.add(n)).data = FDT[s].ep_data[i];
+                }
+                n += 1;
+            }
+        }
+        if n != 0 {
+            return n as i32;
+        }
+        if timeout == 0 {
+            return 0;
+        }
+        if timeout < 0 {
+            let mode = unsafe { core::ptr::read_volatile(&raw const house_thr_mode) };
+            if mode != 0 {
+                unsafe { house_sched_yield() };
+            } else {
+                unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
+            }
+        } else {
+            let start = unsafe { house_uptime_ns_raw() };
+            let to_ns = timeout as u64 * 1_000_000;
+            loop {
+                let mode = unsafe { core::ptr::read_volatile(&raw const house_thr_mode) };
+                if mode != 0 {
+                    unsafe { house_sched_yield() };
+                } else {
+                    unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
+                }
+                let mut n2 = 0usize;
+                let ep_n2 = unsafe { FDT[s].ep_n };
+                for i in 0..ep_n2 {
+                    if n2 >= maxevents as usize {
+                        break;
+                    }
+                    let fd = unsafe { FDT[s].ep_fd[i] };
+                    let want = unsafe { FDT[s].ep_events[i] };
+                    if (want & EPOLLIN) != 0 && unsafe { fd_ready(fd) } {
+                        unsafe {
+                            (*out.add(n2)).events = EPOLLIN;
+                            (*out.add(n2)).data = FDT[s].ep_data[i];
+                        }
+                        n2 += 1;
+                    }
+                }
+                if n2 != 0 {
+                    return n2 as i32;
+                }
+                let now = unsafe { house_uptime_ns_raw() };
+                if now.wrapping_sub(start) >= to_ns {
+                    return 0;
+                }
+            }
         }
     }
-    n as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn epoll_pwait(
+    epfd: i32,
+    events: *mut c_void,
+    maxevents: i32,
+    timeout: i32,
+    sigmask: *const c_void,
+) -> i32 {
+    let _ = sigmask;
+    unsafe { epoll_wait(epfd, events, maxevents, timeout) }
 }
 
 #[no_mangle]
@@ -883,10 +943,17 @@ pub unsafe extern "C" fn epoll_pwait2(
     epfd: i32,
     events: *mut c_void,
     maxevents: i32,
-    _ts: *const c_void,
+    ts: *const c_void,
     sigmask: *const c_void,
 ) -> i32 {
-    return epoll_pwait(epfd, events, maxevents, 0, sigmask);
+    let mut to: i32 = -1;
+    if !ts.is_null() {
+        let secs = unsafe { *(ts as *const i64) };
+        let nsec = unsafe { *(ts as *const i64).add(1) };
+        let ms = secs * 1000 + nsec / 1_000_000;
+        to = ms as i32;
+    }
+    unsafe { epoll_pwait(epfd, events, maxevents, to, sigmask) }
 }
 
 #[no_mangle]
@@ -1018,6 +1085,16 @@ pub unsafe extern "C" fn isatty(fd: i32) -> i32 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn fstat(_fd: i32, _st: *mut u8) -> i32 {
+    // SAFETY: matches tinylibc/sys.c fstat: zeroed stat, S_IFCHR|0666, blksize 4096.
+    if !_st.is_null() {
+        unsafe { core::ptr::write_bytes(_st, 0, 128) };
+        unsafe {
+            *(_st as *mut u64) = 1; // st_dev
+            *(_st.add(8) as *mut u64) = _fd as u64 + 1; // st_ino
+            *(_st.add(16) as *mut u32) = 0o020000 | 0o666; // S_IFCHR | 0666
+            *(_st.add(48) as *mut i64) = 4096; // st_blksize
+        }
+    }
     0
 }
 #[no_mangle]

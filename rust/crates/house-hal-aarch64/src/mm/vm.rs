@@ -110,7 +110,7 @@ unsafe fn vm_committable(lo: *mut u8, n: usize) -> bool {
     let alias_base = RTS_ALIAS_BASE;
     let smp_n = unsafe { core::ptr::read_volatile(&raw const house_smp_n) } as u64;
     let smp_n = if smp_n == 0 { 2 } else { smp_n };
-    let stack_reserve: u64 = 0x200000 + smp_n * 16384;
+    let stack_reserve: u64 = 0x200000 + smp_n * 65536;
     let ram = unsafe { runtime_ram_bytes() };
     let half = ram >> 1;
     let mut span = if half > stack_reserve {
