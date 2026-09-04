@@ -10,6 +10,8 @@ module Kernel.Driver.Virtio.Blk.Server
     blkReadBlocks,
     blkWriteBlocks,
     blkGetCapacity,
+    blkReadBlockBytes,
+    blkWriteBlockBytes,
   )
 where
 
@@ -232,3 +234,66 @@ blkWriteBlocks slot lba txt = do
 -- | Get capacity (sectors) for shell status.
 blkGetCapacity :: Int -> H (Either BlkError Word64)
 blkGetCapacity = blkProbeCapacity
+
+-- | Binary-safe full 4K block read (no zero truncation).
+blkReadBlockBytes :: Int -> Word64 -> H (Either BlkError [Word8])
+blkReadBlockBytes slot lba = do
+  mDev <- withQSem blkSem $ do m <- readRef blkMap; return (Map.lookup slot m)
+  case mDev of
+    Nothing -> return (Left (BlkInvalidArg "not initialized"))
+    Just _dev -> do
+      capRes <- blkProbeCapacity slot
+      case capRes of
+        Left e -> return (Left e)
+        Right cap -> case validateLba lba 1 cap of
+          Left e -> return (Left e)
+          Right () -> do
+            mg <- G.grantAlloc
+            case mg of
+              Left _ -> return (Left BlkNoSpace)
+              Right g -> do
+                let ptr = grantPage g
+                sub <- blkSubmitRead slot lba ptr
+                case sub of
+                  Left e -> do G.grantFree g; return (Left e)
+                  Right reqId -> do
+                    res <- waitForCompletion slot reqId g
+                    case res of
+                      Left e -> do G.grantFree g; return (Left e)
+                      Right () -> do
+                        bytes <- liftIO $ mapM (\i -> peek (ptr `plusPtr` i) :: IO Word8) [0 .. 4095]
+                        G.grantFree g
+                        return (Right bytes)
+
+-- | Binary-safe full 4K block write (zero-padded).
+blkWriteBlockBytes :: Int -> Word64 -> [Word8] -> H (Either BlkError ())
+blkWriteBlockBytes slot lba bytes = do
+  mDev <- withQSem blkSem $ do m <- readRef blkMap; return (Map.lookup slot m)
+  case mDev of
+    Nothing -> return (Left (BlkInvalidArg "not initialized"))
+    Just _dev -> do
+      capRes <- blkProbeCapacity slot
+      case capRes of
+        Left e -> return (Left e)
+        Right cap -> case validateLba lba 1 cap of
+          Left e -> return (Left e)
+          Right () -> do
+            mg <- G.grantAlloc
+            case mg of
+              Left _ -> return (Left BlkNoSpace)
+              Right g -> do
+                let ptr = grantPage g
+                liftIO $ do
+                  let n = min (length bytes) 4096
+                  mapM_ (\(i, b) -> poke (ptr `plusPtr` i) b) (zip [0 ..] (take n bytes))
+                  mapM_ (\i -> poke (ptr `plusPtr` i) (0 :: Word8)) [n .. 4095]
+                liftIO $ c_dc_flush (c_pagePa ptr) 4096
+                sub <- blkSubmitWrite slot lba ptr
+                case sub of
+                  Left e -> do G.grantFree g; return (Left e)
+                  Right reqId -> do
+                    res <- waitForCompletion slot reqId g
+                    G.grantFree g
+                    case res of
+                      Left e -> return (Left e)
+                      Right () -> return (Right ())

@@ -12,6 +12,7 @@ module H.FileSystem
     fsLs,
     fsRm,
     fsStat,
+    fsReadBytes,
     freePageCount,
   )
 where
@@ -276,6 +277,30 @@ fsRead path = case splitPath path of
       Just (File ps sz _) -> do
         s <- readBytesFromPages ps sz
         return (Right s)
+
+-- | Binary-safe read: raw bytes via peek, no Char round-trip.
+fsReadBytes :: FilePath -> H (Either FsError [Word8])
+fsReadBytes path = case splitPath path of
+  Left e -> return (Left e)
+  Right cs -> withQSem fsSem $ do
+    root <- readRef fsRoot
+    case resolve cs root of
+      Nothing -> return (Left ENOENT)
+      Just (Dir _) -> return (Left EISDIR)
+      Just (File ps sz _) -> do
+        bs <- readRawBytesFromPages ps sz
+        return (Right bs)
+
+readRawBytesFromPages :: [P.Page Word8] -> Int -> H [Word8]
+readRawBytesFromPages pages sz = collect pages sz
+  where
+    collect [] _ = return []
+    collect _ 0 = return []
+    collect (p : ps) n = do
+      let takeN = min n 4096
+      chunk <- sequence [peek (p `plusPtr` i) :: H Word8 | i <- [0 .. takeN - 1]]
+      rest <- collect ps (n - takeN)
+      return (chunk ++ rest)
 
 fsLs :: FilePath -> H (Either FsError [String])
 fsLs path = case splitPath path of

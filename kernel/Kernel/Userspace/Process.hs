@@ -8,12 +8,15 @@ module Kernel.Userspace.Process
   ( runElf,
     waitPid,
     killPid,
+    procBrkGrow,
+    stackTop,
   )
 where
 
 import Control.Concurrent (tryPutMVar, tryTakeMVar)
 import Control.Monad (forM_, when)
-import Data.Bits ((.&.))
+import Data.Bits (complement, shiftR, (.&.))
+import Data.Char (ord)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word32, Word64, Word8)
 import Foreign.C.String (withCString)
@@ -52,8 +55,8 @@ stackTop = 0x3FFFE000
 pfW :: Word32
 pfW = 2
 
-runElf :: Elf -> H (Either LoadError Pid)
-runElf elf = withQSem userSem $ do
+runElf :: Elf -> [String] -> H (Either LoadError Pid)
+runElf elf argv = withQSem userSem $ do
   pidInt <- readRef pidNext
   writeRef pidNext (pidInt + 1)
   let pid = Pid pidInt
@@ -71,21 +74,85 @@ runElf elf = withQSem userSem $ do
           freePDir pdir
           return (Left err)
         Right () -> do
-          asid <- liftIO (c_asid_for pdirPtr)
-          _ <- liftIO (withCString "[run] got asid\n" c_uart_puts)
-          modifyRef procMap (Map.insert pid (Process pid pdir (elfEntry elf) stackTop))
-          _ <- liftIO (withCString "[run] before fork\n" c_uart_puts)
-          _ <- forkH $ do
-            _ <- liftIO (withCString "[run] fork enter\n" c_uart_puts)
-            liftIO (c_set_pdir pdirPtr)
-            liftIO (c_enter_el0 (elfEntry elf) stackTop pdirPtr asid)
-            _ <- liftIO (withCString "[run] fork after enter\n" c_uart_puts)
-            code <- liftIO c_get_exit
-            _ <- liftIO c_clear_exit
-            _ <- liftIO (tryPutMVar processExitVar (fromIntegral code) >> return ())
-            return ()
-          _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
-          return (Right pid)
+          let initBrk = initBreak elf
+          mStack <- HPages.allocPage :: H (Maybe (Ptr Word8))
+          case mStack of
+            Nothing -> do freePDir pdir; return (Left NoSpace)
+            Just stk -> do
+              HPages.zeroPage stk
+              eSp <- setupArgStack stk argv
+              case eSp of
+                Left err -> do HPages.freePage stk; freePDir pdir; return (Left err)
+                Right sp -> do
+                  let stackBase = stackTop - 4096
+                  okStk <- VM.setPage pdir stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False}))
+                  if not okStk
+                    then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
+                    else do
+                      asid <- liftIO (c_asid_for pdirPtr)
+                      _ <- liftIO (withCString "[run] got asid\n" c_uart_puts)
+                      modifyRef procMap (Map.insert pid (Process pid pdir (elfEntry elf) initBrk))
+                      _ <- liftIO (withCString "[run] before fork\n" c_uart_puts)
+                      _ <- forkH $ do
+                        _ <- liftIO (withCString "[run] fork enter\n" c_uart_puts)
+                        liftIO (c_set_pdir pdirPtr)
+                        liftIO (c_enter_el0 (elfEntry elf) sp pdirPtr asid)
+                        _ <- liftIO (withCString "[run] fork after enter\n" c_uart_puts)
+                        code <- liftIO c_get_exit
+                        _ <- liftIO c_clear_exit
+                        _ <- liftIO (tryPutMVar processExitVar (fromIntegral code) >> return ())
+                        return ()
+                      _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
+                      return (Right pid)
+
+-- | Initial break: end of highest loaded segment, 16-byte aligned.
+initBreak :: Elf -> Word64
+initBreak elf = case elfSegs elf of
+  [] -> VM.minVAddr
+  segs -> align16 (maximum (map segEnd segs))
+  where
+    segEnd s = segVaddr s + fromIntegral (segMemSz s)
+    align16 w = (w + 15) .&. complement 15
+
+-- | Lay argc/argv on the stack page. Returns adjusted sp (16-byte aligned).
+setupArgStack :: Ptr Word8 -> [String] -> H (Either LoadError Word64)
+setupArgStack stk argv
+  | length argv > 64 = return (Left NoSpace)
+  | any (\a -> length a > 1024) argv = return (Left NoSpace)
+  | otherwise = do
+      let argBlobs = map (\a -> map (\c -> fromIntegral (ord c `mod` 256) :: Word8) a ++ [0]) argv
+          stringsLen = sum (map length argBlobs)
+          argc = length argv
+          ptrsLen = (argc + 1) * 8
+          total = 8 + ptrsLen + stringsLen
+          aligned = ((total + 15) `div` 16) * 16
+      if aligned > 4000
+        then return (Left NoSpace)
+        else do
+          let sp = stackTop - fromIntegral aligned
+              base = stackTop - 4096
+              off = fromIntegral (sp - base) :: Int
+              strBase = sp + 8 + fromIntegral ptrsLen
+          pokeWord64LE stk off (fromIntegral argc)
+          let go _ [] _ = return ()
+              go idx (b : rest) va = do
+                pokeWord64LE stk (off + 8 + idx * 8) va
+                mapM_ (\(i, byte) -> poke (stk `plusPtr` (fromIntegral (va - base) + i)) byte) (zip [0 ..] b)
+                go (idx + 1) rest (va + fromIntegral (length b))
+          go 0 argBlobs strBase
+          pokeWord64LE stk (off + 8 + argc * 8) 0
+          return (Right sp)
+
+pokeWord64LE :: Ptr Word8 -> Int -> Word64 -> H ()
+pokeWord64LE p o w = do
+  poke (p `plusPtr` o) (fromIntegral w :: Word8)
+  poke (p `plusPtr` (o + 1)) (fromIntegral (w `shiftR` 8) :: Word8)
+  poke (p `plusPtr` (o + 2)) (fromIntegral (w `shiftR` 16) :: Word8)
+  poke (p `plusPtr` (o + 3)) (fromIntegral (w `shiftR` 24) :: Word8)
+  poke (p `plusPtr` (o + 4)) (fromIntegral (w `shiftR` 32) :: Word8)
+  poke (p `plusPtr` (o + 5)) (fromIntegral (w `shiftR` 40) :: Word8)
+  poke (p `plusPtr` (o + 6)) (fromIntegral (w `shiftR` 48) :: Word8)
+  poke (p `plusPtr` (o + 7)) (fromIntegral (w `shiftR` 56) :: Word8)
 
 waitPid :: Pid -> H Int
 waitPid pid = do
@@ -129,6 +196,43 @@ pollExit = loop
             Nothing -> do
               threadDelay 1000
               loop
+
+-- | Grow a process break within the user window. Maps zero pages for
+-- [oldBrk, newBrk); over-window yields OutOfWindow, OOM yields NoSpace.
+procBrkGrow :: Pid -> Word64 -> H (Either LoadError Word64)
+procBrkGrow pid newBrk = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup pid mp of
+    Nothing -> return (Left (BadSegment "no such pid"))
+    Just pr -> do
+      let oldBrk = procBrk pr
+      if newBrk <= oldBrk
+        then return (Right oldBrk)
+        else
+          if newBrk > VM.maxVAddr || oldBrk < VM.minVAddr
+            then return (Left (OutOfWindow newBrk))
+            else do
+              let lo = (oldBrk + 4095) `div` 4096 * 4096
+                  hi = (newBrk + 4095) `div` 4096 * 4096
+              r <- growPages (procPdir pr) lo hi
+              case r of
+                Left e -> return (Left e)
+                Right () -> do
+                  writeRef procMap (Map.insert pid pr {procBrk = newBrk} mp)
+                  return (Right newBrk)
+  where
+    growPages pdir lo hi
+      | lo >= hi = return (Right ())
+      | otherwise = do
+          mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
+          case mp of
+            Nothing -> return (Left NoSpace)
+            Just pg -> do
+              HPages.zeroPage pg
+              ok <- VM.setPage pdir lo (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False}))
+              if not ok
+                then do HPages.freePage pg; return (Left NoSpace)
+                else growPages pdir (lo + 4096) hi
 
 mapSegments :: VM.PageMap -> Elf -> H (Either LoadError ())
 mapSegments pdir elf = go (elfSegs elf) []

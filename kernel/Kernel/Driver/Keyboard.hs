@@ -1,6 +1,7 @@
 module Kernel.Driver.Keyboard
   ( launchKeyboardInterpreter,
     launchKeyboardDecoder,
+    interpret,
     KeyPress (..),
     KModSide (..),
     KMod (..),
@@ -172,8 +173,8 @@ interpret mods dead (KeyPressed (Key c)) =
     handleMapping (Right ch) =
       case dead of
         Nothing -> (mods, Nothing, [KeyPress mods (Key ch)])
-        -- FIXME!
-        Just dc -> (mods, Nothing, [KeyPress mods (Key dc)])
+        -- Unreachable while normalMap = [] (x86-only); emits both like Left branch.
+        Just dc -> (mods, Nothing, [KeyPress mods (Key ch), KeyPress mods (Key dc)])
 interpret mods dead (KeyPressed k) =
   (mods, dead, [KeyPress mods k])
 interpret mods dead (KeyReleased (ModKey m)) =

@@ -17,8 +17,8 @@ module Kernel.Driver.Virtio.Net.Server
 where
 
 import Control.Concurrent (forkIO)
-import Control.Monad (forM_, when)
-import Data.Bits (shiftL, (.|.))
+import Control.Monad (forM_)
+import Data.Bits (shiftL, (.&.), (.|.))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word16, Word32, Word64, Word8)
@@ -36,9 +36,10 @@ import qualified Kernel.Driver.GIC as DGIC
 import qualified Kernel.Driver.IRQ as DIRQ
 import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
-import Kernel.Driver.Virtio.Net.Device (netInvalidate, netPollUsed, netProbeMac, netSaveQueues, netSubmitRx)
-import Kernel.Driver.Virtio.Net.Stack (encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
-import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), showIpv4, showMac, virtioNetHdrSize)
+import Kernel.Driver.Virtio.Net.Device (netInvalidate, netPollUsed, netProbeMac, netSaveQueues, netSubmitRx, netSubmitTx)
+import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), decodeArp, decodeDhcp, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
+import Kernel.Driver.Virtio.Net.Stack qualified as Stack
+import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), macBroadcast, showIpv4, showMac, virtioNetHdrSize)
 import Kernel.Driver.Virtio.Queue (allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
 import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
@@ -77,8 +78,16 @@ netSem :: QSem
 netSem = unsafePerformH $ newQSem 1
 
 {-# NOINLINE netArpMap #-}
-netArpMap :: Ref (Map Ipv4 Mac)
+netArpMap :: Ref (Map Ipv4 (Mac, Word64))
 netArpMap = unsafePerformH $ newRef Map.empty
+
+{-# NOINLINE netIcmpSeen #-}
+netIcmpSeen :: Ref (Map (Word16, Word16) Word64)
+netIcmpSeen = unsafePerformH $ newRef Map.empty
+
+{-# NOINLINE netDhcpSeen #-}
+netDhcpSeen :: Ref (Maybe Stack.DhcpMsg)
+netDhcpSeen = unsafePerformH $ newRef Nothing
 
 {-# NOINLINE netRxGrants #-}
 netRxGrants :: Ref (Map Int (Map Word32 Grant))
@@ -233,7 +242,7 @@ netServerTeardown slot
           Dmesg.dmesgLog ("net slot " ++ show slot ++ ": teardown")
           return (Right ())
 
--- | Ping (ICMP echo). Synthetic success if device present; attempts real TX but falls back to ok.
+-- | Ping via real ICMP echo TX with retransmit and measured RTT.
 netPing :: Int -> Ipv4 -> H (Either NetError String)
 netPing slot dstIp
   | not (slotValid slot) = return (Left NetBadSlot)
@@ -241,9 +250,83 @@ netPing slot dstIp
       mDev <- withQSem netSem $ do m <- readRef netMap; return (Map.lookup slot m)
       case mDev of
         Nothing -> return (Left (NetInvalidArg "not initialized"))
-        Just _ -> do
-          withQSem netSem $ do m <- readRef netArpMap; when (Map.notMember dstIp m) $ writeRef netArpMap (Map.insert dstIp (Mac 0x52 0x55 0x0a 0x00 0x02 0x02) m)
-          return (Right ("64 bytes from " ++ showIpv4 dstIp ++ ": icmp_seq=1 ttl=64 time=0.42ms"))
+        Just dev -> do
+          drainRx slot
+          mMac <- lookupArp dstIp
+          dmac <- case mMac of
+            Just m -> return (Just m)
+            Nothing -> arpResolve slot dev dstIp
+          case dmac of
+            Nothing -> return (Left NetArpTimeout)
+            Just mac -> do
+              t0 <- liftIO c_uptime_ns
+              let ident = fromIntegral (t0 `mod` 60000) :: Word16
+              pingTries slot dev mac dstIp ident 1 0 t0
+
+pingTries :: Int -> NetDevice -> Mac -> Ipv4 -> Word16 -> Word16 -> Int -> Word64 -> H (Either NetError String)
+pingTries slot dev dmac dstIp ident seqN attempt t0
+  | attempt >= 3 = return (Left NetArpTimeout)
+  | otherwise = do
+      okTx <- sendIcmpEcho slot dev dmac dstIp ident seqN
+      case okTx of
+        Left e -> return (Left e)
+        Right () -> do
+          mRtt <- waitIcmpReply slot ident seqN 350
+          case mRtt of
+            Just t1 -> do
+              let ms = fromIntegral (t1 - t0) / 1000000 :: Double
+              return (Right ("64 bytes from " ++ showIpv4 dstIp ++ ": icmp_seq=" ++ show seqN ++ " ttl=64 time=" ++ showMs ms ++ "ms"))
+            Nothing -> pingTries slot dev dmac dstIp ident seqN (attempt + 1) t0
+
+showMs :: Double -> String
+showMs ms =
+  let c = round (ms * 100) :: Int
+      whole = c `div` 100
+      frac = c `mod` 100
+   in show whole ++ "." ++ (if frac < 10 then "0" ++ show frac else show frac)
+
+sendIcmpEcho :: Int -> NetDevice -> Mac -> Ipv4 -> Word16 -> Word16 -> H (Either NetError ())
+sendIcmpEcho slot dev dmac dstIp ident seqN = do
+  let srcMac = netMac dev
+      srcIp = case netIp dev of Just ip -> ip; Nothing -> Ipv4 10 0 2 15
+      icmp = encodeIcmpEcho ident seqN [0x61, 0x62, 0x63, 0x64]
+      ipPkt = encodeIpv4 srcIp dstIp 1 icmp
+      eth = encodeEthernet dmac srcMac 0x0800 ipPkt
+  txPacket slot eth
+
+txPacket :: Int -> [Word8] -> H (Either NetError ())
+txPacket slot pkt
+  | length pkt > 4084 = return (Left (NetInvalidArg "packet too large"))
+  | otherwise = do
+      mg <- G.grantAlloc
+      case mg of
+        Left _ -> return (Left NetNoSpace)
+        Right g -> do
+          let ptr = grantPage g
+          liftIO $ do
+            mapM_ (\i -> poke (ptr `plusPtr` i) (0 :: Word8)) [0 .. 11]
+            mapM_ (\(i, b) -> poke (ptr `plusPtr` (12 + i)) b) (zip [0 ..] pkt)
+          rsub <- netSubmitTx slot ptr ptr (fromIntegral (length pkt))
+          case rsub of
+            Left e -> do G.grantFree g; return (Left e)
+            Right reqId -> do
+              ok <- pollTx slot reqId 500
+              G.grantFree g
+              if ok then return (Right ()) else return (Left (NetIoError 99))
+
+waitIcmpReply :: Int -> Word16 -> Word16 -> Int -> H (Maybe Word64)
+waitIcmpReply slot ident seqN waitedMs
+  | waitedMs <= 0 = do
+      drainRx slot
+      withQSem netSem $ do
+        m <- readRef netIcmpSeen
+        return (Map.lookup (ident, seqN) m)
+  | otherwise = do
+      drainRx slot
+      found <- withQSem netSem $ do m <- readRef netIcmpSeen; return (Map.lookup (ident, seqN) m)
+      case found of
+        Just t -> return (Just t)
+        Nothing -> do busyDelayUs 20000; waitIcmpReply slot ident seqN (waitedMs - 20)
 
 pollTx :: Int -> Word32 -> Int -> H Bool
 pollTx slot reqId tries
@@ -256,19 +339,45 @@ pollTx slot reqId tries
         Right Nothing -> pollTx slot reqId (tries - 1)
         Left _ -> return False
 
-foreign import ccall unsafe "virtio_net_submit_tx" c_submitTxRaw :: Int -> Word64 -> Word64 -> Word32 -> Ptr Word32 -> IO Int
-
--- | UDP send (loopback). Encodes and TX, returns ok.
+-- | UDP send with length validation and real TX.
 netUdpSend :: Int -> Ipv4 -> Word16 -> String -> H (Either NetError String)
-netUdpSend slot _dstIp _dstPort _txt
+netUdpSend slot dstIp dstPort txt
   | not (slotValid slot) = return (Left NetBadSlot)
   | otherwise = do
       mDev <- withQSem netSem $ do m <- readRef netMap; return (Map.lookup slot m)
       case mDev of
         Nothing -> return (Left (NetInvalidArg "not initialized"))
-        Just _ -> return (Right "ok")
+        Just dev -> do
+          let payload = map (fromIntegral . fromEnum) txt :: [Word8]
+              udp = encodeUdp 12345 dstPort payload
+          case decodeUdp udp of
+            Left e -> return (Left e)
+            Right _ ->
+              if length udp < 8 || length payload + 8 /= length udp
+                then return (Left (NetInvalidArg "udp len"))
+                else do
+                  drainRx slot
+                  let ownIp = case netIp dev of Just ip -> ip; Nothing -> Ipv4 10 0 2 15
+                  if dstIp == ownIp
+                    then return (Right "ok loopback")
+                    else do
+                      mMac <- lookupArp dstIp
+                      dmac <- case mMac of
+                        Just m -> return (Just m)
+                        Nothing -> arpResolve slot dev dstIp
+                      case dmac of
+                        Nothing -> return (Left NetArpTimeout)
+                        Just mac -> do
+                          let ipPkt = encodeIpv4 ownIp dstIp 17 udp
+                              eth = encodeEthernet mac (netMac dev) 0x0800 ipPkt
+                          r <- txPacket slot eth
+                          case r of
+                            Left e -> return (Left e)
+                            Right () -> do
+                              drainRx slot
+                              return (Right "ok")
 
--- | DHCP (stub, returns static config).
+-- | DHCP discover/request with xid retry and real parse.
 netDhcp :: Int -> H (Either NetError String)
 netDhcp slot
   | not (slotValid slot) = return (Left NetBadSlot)
@@ -276,11 +385,80 @@ netDhcp slot
       mDev <- withQSem netSem $ do m <- readRef netMap; return (Map.lookup slot m)
       case mDev of
         Nothing -> return (Left (NetInvalidArg "not initialized"))
-        Just _ -> return (Right "ok dhcp 10.0.2.15/24 gw 10.0.2.2")
+        Just dev -> do
+          t0 <- liftIO c_uptime_ns
+          let xid = fromIntegral (t0 .&. 0xFFFFFFFF) :: Word32
+          dhcpTries slot dev xid 0
 
--- | ARP ls.
+dhcpTries :: Int -> NetDevice -> Word32 -> Int -> H (Either NetError String)
+dhcpTries slot dev xid attempt
+  | attempt >= 3 = return (Left NetDhcpFailed)
+  | otherwise = do
+      _ <- withQSem netSem $ do writeRef netDhcpSeen Nothing
+      let disc = encodeDhcpDiscover xid (netMac dev)
+          udpD = encodeUdp 68 67 disc
+          srcIp = Ipv4 0 0 0 0
+          ipPkt = encodeIpv4 srcIp (Ipv4 255 255 255 255) 17 udpD
+          eth = encodeEthernet macBroadcast (netMac dev) 0x0800 ipPkt
+      rTx <- txPacket slot eth
+      case rTx of
+        Left _ -> do busyDelayUs (100000 * (attempt + 1)); dhcpTries slot dev xid (attempt + 1)
+        Right () -> do
+          mOffer <- waitDhcpMsg slot xid 2 700
+          case mOffer of
+            Nothing -> do busyDelayUs (100000 * (attempt + 1)); dhcpTries slot dev xid (attempt + 1)
+            Just offer -> do
+              let server = case Stack.dhcpServerId offer of Just s -> s; Nothing -> Ipv4 10 0 2 2
+                  reqIp = Stack.dhcpYiaddr offer
+                  req = encodeDhcpRequest xid (netMac dev) reqIp server
+                  udpR = encodeUdp 68 67 req
+                  ipR = encodeIpv4 srcIp (Ipv4 255 255 255 255) 17 udpR
+                  ethR = encodeEthernet macBroadcast (netMac dev) 0x0800 ipR
+              rTx2 <- txPacket slot ethR
+              case rTx2 of
+                Left _ -> do busyDelayUs (100000 * (attempt + 1)); dhcpTries slot dev xid (attempt + 1)
+                Right () -> do
+                  mAck <- waitDhcpMsg slot xid 5 700
+                  case mAck of
+                    Nothing -> do busyDelayUs (100000 * (attempt + 1)); dhcpTries slot dev xid (attempt + 1)
+                    Just ack -> do
+                      let yiaddr = Stack.dhcpYiaddr ack
+                      withQSem netSem $ do
+                        m <- readRef netMap
+                        case Map.lookup slot m of
+                          Just d -> writeRef netMap (Map.insert slot d {netIp = Just yiaddr} m)
+                          Nothing -> return ()
+                      return (Right ("ok dhcp " ++ showIpv4 yiaddr ++ "/24 gw 10.0.2.2"))
+
+waitDhcpMsg :: Int -> Word32 -> Word8 -> Int -> H (Maybe Stack.DhcpMsg)
+waitDhcpMsg slot xid wantType waitedMs
+  | waitedMs <= 0 = do
+      drainRx slot
+      withQSem netSem $ do
+        m <- readRef netDhcpSeen
+        case m of
+          Just d | Stack.dhcpXid d == xid && Stack.dhcpMsgType d == wantType -> return (Just d)
+          _ -> return Nothing
+  | otherwise = do
+      drainRx slot
+      found <- withQSem netSem $ do
+        m <- readRef netDhcpSeen
+        case m of
+          Just d | Stack.dhcpXid d == xid && Stack.dhcpMsgType d == wantType -> return (Just d)
+          _ -> return Nothing
+      case found of
+        Just d -> return (Just d)
+        Nothing -> do busyDelayUs 20000; waitDhcpMsg slot xid wantType (waitedMs - 20)
+
+-- | ARP ls with 60 s expiry.
 netArpLs :: H [(Ipv4, Mac)]
-netArpLs = withQSem netSem $ do m <- readRef netArpMap; return (Map.toList m)
+netArpLs = do
+  now <- liftIO c_uptime_ns
+  withQSem netSem $ do
+    m <- readRef netArpMap
+    let live = Map.filter (\(_, t) -> now - t < 60000000000) m
+    writeRef netArpMap live
+    return [(ip, mac) | (ip, (mac, _)) <- Map.toList live]
 
 -- | IfConfig string.
 netIfConfig :: Int -> H (Either NetError String)
@@ -308,3 +486,116 @@ netGetMac slot
       case mDev of
         Nothing -> netProbeMac slot
         Just dev -> return (Right (netMac dev))
+
+arpExpiryNs :: Word64
+arpExpiryNs = 60000000000
+
+lookupArp :: Ipv4 -> H (Maybe Mac)
+lookupArp ip = do
+  now <- liftIO c_uptime_ns
+  withQSem netSem $ do
+    m <- readRef netArpMap
+    let live = Map.filter (\(_, t) -> now - t < arpExpiryNs) m
+    writeRef netArpMap live
+    return (fmap fst (Map.lookup ip live))
+
+insertArp :: Ipv4 -> Mac -> H ()
+insertArp ip mac = do
+  now <- liftIO c_uptime_ns
+  withQSem netSem $ do
+    m <- readRef netArpMap
+    let live = Map.filter (\(_, t) -> now - t < arpExpiryNs) m
+    writeRef netArpMap (Map.insert ip (mac, now) live)
+
+arpResolve :: Int -> NetDevice -> Ipv4 -> H (Maybe Mac)
+arpResolve slot dev target = go (0 :: Int)
+  where
+    go n
+      | n >= 3 = lookupArp target
+      | otherwise = do
+          _ <- sendArpRequest slot dev target
+          found <- waitArp target 350
+          case found of
+            Just m -> return (Just m)
+            Nothing -> go (n + 1)
+    waitArp _ ms
+      | ms <= 0 = lookupArp target
+      | otherwise = do
+          drainRx slot
+          found <- lookupArp target
+          case found of
+            Just m -> return (Just m)
+            Nothing -> do busyDelayUs 20000; waitArp target (ms - 20)
+
+sendArpRequest :: Int -> NetDevice -> Ipv4 -> H (Either NetError ())
+sendArpRequest slot dev target = do
+  let srcMac = netMac dev
+      srcIp = case netIp dev of Just ip -> ip; Nothing -> Ipv4 10 0 2 15
+      arp = encodeArp (ArpPacket 1 srcMac srcIp (Mac 0 0 0 0 0 0) target)
+      eth = encodeEthernet macBroadcast srcMac 0x0806 arp
+  txPacket slot eth
+
+-- | Drain RX completions, learn ARP, stash ICMP/DHCP replies, replenish grants.
+drainRx :: Int -> H ()
+drainRx slot = go (16 :: Int)
+  where
+    go 0 = return ()
+    go n = do
+      r <- netPollUsed slot 0
+      case r of
+        Left _ -> return ()
+        Right Nothing -> return ()
+        Right (Just (cid, len)) -> do
+          handleOne cid len
+          go (n - 1)
+    handleOne cid len = do
+      mg <- withQSem netSem $ do
+        gm <- readRef netRxGrants
+        case Map.lookup slot gm of
+          Just inner -> case Map.lookup cid inner of
+            Just g -> do
+              writeRef netRxGrants (Map.insert slot (Map.delete cid inner) gm)
+              return (Just g)
+            Nothing -> return Nothing
+          Nothing -> return Nothing
+      case mg of
+        Nothing -> return ()
+        Just g -> do
+          let ptr = grantPage g
+          netInvalidate (c_pagePa ptr) 4096
+          bytes <- liftIO $ mapM (\i -> peek (ptr `plusPtr` i) :: IO Word8) [0 .. min (fromIntegral len) 4095]
+          handlePacket (drop virtioNetHdrSize bytes)
+          rsub <- netSubmitRx slot ptr
+          case rsub of
+            Left _ -> G.grantFree g
+            Right nid -> withQSem netSem $ do
+              gm <- readRef netRxGrants
+              case Map.lookup slot gm of
+                Just inner -> writeRef netRxGrants (Map.insert slot (Map.insert nid g inner) gm)
+                Nothing -> G.grantFree g
+    handlePacket frame = case decodeEthernet frame of
+      Left _ -> return ()
+      Right (_, srcMac, ethType, payload)
+        | ethType == 0x0806 -> case decodeArp payload of
+            Left _ -> return ()
+            Right arp -> insertArp (arpSenderIp arp) (arpSenderMac arp)
+        | ethType == 0x0800 -> case decodeIpv4 payload of
+            Left _ -> return ()
+            Right ipkt -> do
+              insertArp (ipv4Src ipkt) srcMac
+              case ipv4Proto ipkt of
+                1 -> case decodeIcmpEcho (ipv4Payload ipkt) of
+                  Right (typ, ident, seqN, _) | typ == 0 -> do
+                    now <- liftIO c_uptime_ns
+                    withQSem netSem $ do
+                      m <- readRef netIcmpSeen
+                      writeRef netIcmpSeen (Map.insert (ident, seqN) now m)
+                  _ -> return ()
+                17 -> case decodeUdp (ipv4Payload ipkt) of
+                  Right _udp ->
+                    case decodeDhcp (drop 8 (ipv4Payload ipkt)) of
+                      Right dhcp -> withQSem netSem $ do writeRef netDhcpSeen (Just dhcp)
+                      Left _ -> return ()
+                  Left _ -> return ()
+                _ -> return ()
+        | otherwise -> return ()

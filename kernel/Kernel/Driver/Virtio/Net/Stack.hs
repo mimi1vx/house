@@ -19,6 +19,7 @@ module Kernel.Driver.Virtio.Net.Stack
     decodeIcmpEcho,
     encodeDhcpDiscover,
     encodeDhcpRequest,
+    decodeDhcp,
     ipv4Checksum,
     udpChecksum,
     macBroadcast,
@@ -281,3 +282,41 @@ encodeDhcp msgType xid mac mReq mServer =
 -- | ARP table lookup capped 32.
 arpTableLookup :: Ipv4 -> [(Ipv4, Mac)] -> Maybe Mac
 arpTableLookup ip tbl = lookup ip (take 32 tbl)
+
+-- | Decode minimal DHCP BOOTREPLY. Total; options TLV walk bounded by packet length.
+decodeDhcp :: [Word8] -> Either NetError DhcpMsg
+decodeDhcp bytes
+  | length bytes < 240 = Left (NetInvalidArg "dhcp short")
+  | otherwise =
+      let op = bytes !! 0
+          xid =
+            (fromIntegral (bytes !! 4) `shiftL` 24)
+              .|. (fromIntegral (bytes !! 5) `shiftL` 16)
+              .|. (fromIntegral (bytes !! 6) `shiftL` 8)
+              .|. fromIntegral (bytes !! 7) ::
+              Word32
+          yiaddr = Ipv4 (bytes !! 16) (bytes !! 17) (bytes !! 18) (bytes !! 19)
+          siaddr = Ipv4 (bytes !! 20) (bytes !! 21) (bytes !! 22) (bytes !! 23)
+          cookie = take 4 (drop 236 bytes)
+       in if op /= 2 || cookie /= [0x63, 0x82, 0x53, 0x63]
+            then Left (NetInvalidArg "dhcp header")
+            else case parseOpts (drop 240 bytes) Nothing Nothing of
+              Nothing -> Left (NetInvalidArg "dhcp opts")
+              Just (mtype, server) -> case mtype of
+                Nothing -> Left (NetInvalidArg "dhcp no type")
+                Just t -> Right (DhcpMsg xid yiaddr siaddr t server)
+  where
+    parseOpts [] mt sv = Just (mt, sv)
+    parseOpts (255 : _) mt sv = Just (mt, sv)
+    parseOpts (0 : rest) mt sv = parseOpts rest mt sv
+    parseOpts (tag : len : rest) mt sv
+      | tag == 53 && len == 1 && not (null rest) = parseOpts (drop 1 rest) (Just (rest !! 0)) sv
+      | tag == 54 && len == 4 && length rest >= 4 =
+          let svIp = Ipv4 (rest !! 0) (rest !! 1) (rest !! 2) (rest !! 3)
+           in parseOpts (drop 4 rest) mt (Just svIp)
+      | otherwise =
+          let n = fromIntegral len
+           in if n < 0 || length rest < n
+                then Nothing
+                else parseOpts (drop n rest) mt sv
+    parseOpts [_] mt sv = Just (mt, sv)

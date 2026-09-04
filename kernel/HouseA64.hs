@@ -30,6 +30,7 @@ import qualified H.VirtualMemory as VM
 import qualified Kernel.Driver.Dmesg as Dmesg
 import qualified Kernel.Driver.GIC as DGIC
 import qualified Kernel.Driver.IRQ as DIRQ
+import qualified Kernel.Driver.PL011 as PL011
 import qualified Kernel.Driver.PL011Server as PL011S
 import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (showDriverInfo)
@@ -41,19 +42,17 @@ import qualified Kernel.Driver.Virtio.Queue as VQueue
 import qualified Kernel.Driver.Virtio.Transport as VTrans
 import qualified Kernel.Driver.Virtio.Types as VTypes
 import qualified Kernel.Driver.VirtioProbe as VProbe
+import qualified Kernel.FileSystem.BlkPersist as BlkPersist
 import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
 import qualified Kernel.IPC.Nameservice as NS
 import Kernel.IPC.Types (Message (..))
+import qualified Kernel.LineEditor as LE
 import qualified Kernel.Userspace as U
 import qualified Kernel.Userspace.Loader as ULdr
 import System.Timeout (timeout)
 
 foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
-
-foreign import ccall "uart_getc_nonblock" c_getc_nonblock :: IO CInt
-
-foreign import ccall "uart_putc" c_putc :: CChar -> IO ()
 
 foreign import ccall unsafe "house_uptime_secs" c_uptime :: IO Word64
 
@@ -102,6 +101,9 @@ foreign export ccall house_main :: IO ()
 house_main :: IO ()
 house_main = do
   withCString "Welcome to the House shell! Enter help to see a list of commands.\n\n" c_uart_puts
+  console <- runH PL011.launchConsoleDriver
+  kbd <- runH PL011.launchPL011KeyboardDriver
+  editor <- runH (LE.newEditor kbd console)
   _ <- runH FS.fsInit
   -- bootstrap /bin/hello from embedded bytes if missing
   _ <- runH $ do
@@ -117,29 +119,12 @@ house_main = do
   _ <- runH (Dmesg.dmesgLog "House driver framework online")
   -- Link driver GIC/IRQ helpers into closure (probe-only track keeps them unused at runtime)
   _ <- runH (return (DGIC.enableSpi, DGIC.disableSpi, DIRQ.registerIrqForwarding) >> return ())
-  loop
+  loop editor
   where
-    loop = do
-      withCString "> " c_uart_puts
-      line <- shellGetLine
+    loop ed = do
+      line <- runH (LE.getLine ed "> ")
       handle line
-      loop
-    shellGetLine = allocaBytes 256 $ \buf -> go buf 0
-      where
-        go b n = do
-          c <- c_getc_nonblock
-          if c == -1
-            then go b n
-            else
-              if c == 13 || c == 10
-                then do poke (b `plusPtr` n) (0 :: CChar); withCString "\n" c_uart_puts; peekCString b
-                else
-                  if c == 127 || c == 8
-                    then if n == 0 then go b n else do c_putc 8; c_putc 32; c_putc 8; go b (n - 1)
-                    else
-                      if n >= 255
-                        then go b n
-                        else do c_putc (fromIntegral c); poke (b `plusPtr` n) (fromIntegral c :: CChar); go b (n + 1)
+      loop ed
     handle line = case words line of
       [] -> return ()
       ("help" : _) -> withCString usage c_uart_puts
@@ -200,7 +185,10 @@ house_main = do
       ["blk", "write", s, lba, txt] -> handleBlkWrite s lba txt
       ["blk", "write", s, lba] -> handleBlkWrite s lba ""
       ["blk", "teardown", s] -> handleBlkTeardown s
-      ["blk"] -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot>\n" c_uart_puts
+      ["blk", "sync"] -> handleBlkSync Nothing
+      ["blk", "sync", s] -> handleBlkSync (Just s)
+      ["blk", "mount", s] -> handleBlkMount s
+      ["blk"] -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot>\n" c_uart_puts
       ["net", "init", s] -> handleNetInit s
       ["net", "status", s] -> handleNetStatus s
       ["net", "teardown", s] -> handleNetTeardown s
@@ -216,8 +204,8 @@ house_main = do
       ["detect"] -> handleDetect
       ["vm"] -> handleVm
       ["palloc"] -> handlePalloc
-      ["run", p] -> handleRun p
-      ["run"] -> withCString "usage: run <path>\n" c_uart_puts
+      ["run"] -> withCString "usage: run <path> [args...]\n" c_uart_puts
+      ("run" : p : args) -> handleRun p args
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -413,6 +401,29 @@ house_main = do
           Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
           Right () -> withCString "teardown ok\n" c_uart_puts
       _ -> withCString "usage: blk teardown <slot>\n" c_uart_puts
+    handleBlkSync mSlot = do
+      slot <- case mSlot of
+        Just s -> case reads s of [(n, "")] -> return n; _ -> return (-1)
+        Nothing -> do
+          xs <- runH NS.nsList
+          return (findBlkSlot xs)
+      if slot < 0
+        then withCString "usage: blk sync [slot]|mount <slot>\n" c_uart_puts
+        else do
+          r <- runH (BlkPersist.persistSave slot)
+          case r of
+            Left e -> withCString (BlkPersist.persistErrorToString e ++ "\n") c_uart_puts
+            Right () -> withCString "sync ok\n" c_uart_puts
+    handleBlkMount s = case reads s of
+      [(n, "")] -> do
+        r <- runH (BlkPersist.persistRestore n)
+        case r of
+          Left e -> withCString (BlkPersist.persistErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "mount ok\n" c_uart_puts
+      _ -> withCString "usage: blk mount <slot>\n" c_uart_puts
+    findBlkSlot xs = case filter ("virtio-blk" `isPrefixOf`) xs of
+      (x : _) -> case reads (drop (length "virtio-blk") x) of [(n, "")] -> n; _ -> 0
+      [] -> 0
     handleNetInit s = case reads s of
       [(n, "")] -> do
         r <- runH (Net.netServerInit n)
@@ -633,19 +644,18 @@ house_main = do
       case r of
         Nothing -> withCString "palloc fail\n" c_uart_puts
         Just p -> withCString ("palloc ok " ++ show (ptrToIntPtr (castPtr p)) ++ "\n") c_uart_puts
-    handleRun path = do
+    handleRun path args = do
       r <- runH $ do
-        mStr <- FS.fsRead path
-        case mStr of
+        mBytes <- FS.fsReadBytes path
+        case mBytes of
           Left e -> return (Left (showFsError e))
-          Right s -> do
-            let bytes = map (fromIntegral . ord) s :: [Word8]
+          Right bytes -> do
             case ULdr.loadElf bytes of
-              Left le -> return (Left (ULdr.loadErrorToString le))
+              Left le -> return (Left (toExecError le))
               Right elf -> do
-                res <- U.runElf elf
+                res <- U.runElf elf args
                 case res of
-                  Left le2 -> return (Left (ULdr.loadErrorToString le2))
+                  Left le2 -> return (Left (toExecError le2))
                   Right pid -> do
                     code <- U.waitPid pid
                     return (Right code)
@@ -738,6 +748,11 @@ house_main = do
       FS.EISDIR -> "EISDIR: Is a directory"
       FS.ENOSPC -> "ENOSPC: No space left on device"
       FS.EINVAL s -> "EINVAL: " ++ s
+    toExecError le = case le of
+      ULdr.BadMagic -> "EBADEXEC: not ELF64 LE"
+      ULdr.BadArch -> "EBADEXEC: need AArch64"
+      ULdr.BadType -> "EBADEXEC: need ET_EXEC"
+      _ -> ULdr.loadErrorToString le
     usage =
       unlines
         [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname [-asnrvmio] | uptime | shutdown [-h|-r] -- halt or reboot the machine",
@@ -766,9 +781,9 @@ house_main = do
           "       ipc grant -- alloc one page and send to pl011",
           "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)",
           "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)",
-          "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B)",
+          "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; ramfs volatile, sync persists HFS1, mount restores)",
           "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)",
-          "       run </path> -- load static aarch64 ELF from ramfs 0x01000000 window, svc write/exit/ipc, EL0 eret (TTBR0/ASID/pager)"
+          "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)"
         ]
     seqFib :: Int -> Int
     seqFib n

@@ -11,7 +11,7 @@ import Kernel.IPC.Endpoint (trySend)
 import Kernel.IPC.Types (Endpoint, Message (..))
 
 -- | Forward GIC INTID as message tag to endpoint. Non-blocking.
--- Uses trySend so ISR dispatcher (busyDelay 20ms + drainBounded 64) never blocks on full queue.
+-- Uses trySend so ISR dispatcher (threadDelay 20ms + drainBounded 64) never blocks on full queue.
 -- Tag encodes IntId (Word32 -> Word64).
 irqForward :: IntId -> Endpoint -> H ()
 irqForward (IntId n) ep = do

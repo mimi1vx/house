@@ -22,3 +22,8 @@ syscallWrite, syscallExit, syscallBrk :: Int
 syscallWrite = 0x01
 syscallExit = 0x02
 syscallBrk = 0x03
+
+-- | brk contract: EL0 svc 0x03 traps to C dispatch, which owns trap-time
+-- behavior. Haskell 'procBrkGrow' extends the caller's page map with zero
+-- pages inside 0x01000000-0xFFFFFFFF; over-window yields OutOfWindow.
+-- Env passing is deferred; argv is placed on the EL0 stack by runElf.

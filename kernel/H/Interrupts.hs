@@ -17,29 +17,15 @@ module H.Interrupts
   )
 where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (SomeException, catch)
 import Data.Array.IO (IOArray, newArray, readArray, writeArray)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Ix (Ix)
-import Data.Word
-  ( Word32,
-    Word64,
-  )
+import Data.Word (Word32)
 import Foreign.StablePtr (StablePtr, deRefStablePtr, newStablePtr)
 import H.Monad (H, liftIO, runH)
 import System.IO.Unsafe (unsafePerformIO)
-
-foreign import ccall unsafe "house_uptime_ns" c_uptime :: IO Word64
-
-busyDelay :: Int -> IO ()
-busyDelay us = do
-  t0 <- c_uptime
-  let target = t0 + fromIntegral us * 1000
-  let loop = do
-        t <- c_uptime
-        if t < target then loop else return ()
-  loop
 
 -- | GIC INTID (interrupt identifier). PPIs 16-31, SPIs 32+.
 newtype IntId = IntId Word32
@@ -116,14 +102,13 @@ installHandler (IntId n) handler = liftIO $ do
   return ()
 
 -- Dispatcher: drains the SPSC ring the ISR fills and runs the matching handler.
--- Uses busyDelay via house_uptime_ns instead of threadDelay to avoid
--- dependence on the RTS ticker which faults at schedule+0x488 under
--- tcg with the cooperative threaded RTS.
+-- Sleeps with threadDelay (not a busy spin) so threads sharing the
+-- cooperative scheduler still run; the old busyDelay spin starved them.
 dispatcherLoop :: IO ()
 dispatcherLoop = loop
   where
     loop = do
-      busyDelay 20000
+      threadDelay 20000
       c_irqPipeDrain
       drainBounded (64 :: Int)
       loop

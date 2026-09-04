@@ -24,6 +24,7 @@ module Kernel.Userspace
     Kernel.Userspace.Process.runElf,
     Kernel.Userspace.Process.waitPid,
     Kernel.Userspace.Process.killPid,
+    Kernel.Userspace.Process.procBrkGrow,
 
     -- * Syscall numbers
     Kernel.Userspace.Syscall.syscallWrite,

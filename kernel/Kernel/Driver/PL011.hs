@@ -73,9 +73,45 @@ launchPL011KeyboardDriver = do
               loop
             else do
               let c = chr (fromIntegral ci)
-                  kp = charToKeyPress c
-              writeChan chan kp
+              if c == '\ESC'
+                then handleEscape
+                else do
+                  writeChan chan (charToKeyPress c)
+                  loop
+        -- After ESC, wait briefly for '[' + final byte; bare ESC yields EscapeKey.
+        handleEscape = do
+          m2 <- waitByte 5
+          case m2 of
+            Nothing -> do
+              writeChan chan (KeyPress Set.empty EscapeKey)
               loop
+            Just '[' -> do
+              m3 <- waitByte 5
+              case m3 of
+                Just 'A' -> writeChan chan (KeyPress Set.empty UpKey) >> loop
+                Just 'B' -> writeChan chan (KeyPress Set.empty DownKey) >> loop
+                Just 'C' -> writeChan chan (KeyPress Set.empty RightKey) >> loop
+                Just 'D' -> writeChan chan (KeyPress Set.empty LeftKey) >> loop
+                Just 'H' -> writeChan chan (KeyPress Set.empty HomeKey) >> loop
+                Just 'F' -> writeChan chan (KeyPress Set.empty EndKey) >> loop
+                Just c3 -> do
+                  writeChan chan (KeyPress Set.empty EscapeKey)
+                  writeChan chan (charToKeyPress c3)
+                  loop
+                Nothing -> do
+                  writeChan chan (KeyPress Set.empty EscapeKey)
+                  loop
+            Just c2 -> do
+              writeChan chan (KeyPress Set.empty EscapeKey)
+              writeChan chan (charToKeyPress c2)
+              loop
+        waitByte :: Int -> H (Maybe Char)
+        waitByte 0 = return Nothing
+        waitByte n = do
+          ci <- liftIO c_uart_getc_nonblock
+          if ci == -1
+            then do threadDelay 2000; waitByte (n - 1)
+            else return (Just (chr (fromIntegral ci)))
 
     charToKeyPress :: Char -> KeyPress
     charToKeyPress c
