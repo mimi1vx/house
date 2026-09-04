@@ -61,12 +61,12 @@ make house-shell-check  # -> prompt, help->Usage, lambda, wastemem 10->55, hvf+t
 make house-posix-check  # -> help descriptions (-- ), echo, uname, uptime, shutdown -r (reboot) / -h (halt), hvf+tcg
 make house-fs-check     # -> ramfs: write/cat/ls/mkdir/rm + echo > /path over H.FileSystem (2 MiB pool), hvf+tcg
 make smp-check          # -> N cores online + caps N + parfib 20=6765 + mvar ok, hvf+tcg (default N=2; SMP_N=4 for >2 gate)
-make smp-check-8        # -> smp-check at SMP_N=8/SPIKE_MEM=4G (scaling gate, ceiling 32)
+make smp-check-8        # -> smp-check at SMP_N=8/SPIKE_MEM=4G (scaling gate, ceiling 32; nightly, N=2 per-commit)
 make smp-hotplug-check  # -> smp down 1/up 1 cycle at N=2, caps mirror, parfib each step (hvf+tcg)
 make vm-check           # -> demand 100 pages + mprotect RO + munmap + isolate + asid + smp shootdown, one build booted at 512M/2+4G/4+6G/4+8G/4+16G/4 + mem buddy free/total at each geometry
 make house-ipc-check house-driver-check
-make house-virtio-transport-check house-virtio-blk-check house-virtio-net-check
-make house-userspace-check  # -> run /bin/hello -> Hello from EL0, TTBR0/ASID/pager (tcg)
+make house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check
+make house-userspace-check  # -> run /bin/hello -> Hello from EL0, TTBR0/ASID/pager, argv+env on EL0 stack (hvf+tcg)
 make rust-check         # -> cargo clippy + cargo fmt --check inside linux/arm64
 
 # parametrised SMP + RAM

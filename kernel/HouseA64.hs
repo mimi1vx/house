@@ -802,6 +802,7 @@ house_main = do
       case r of
         Nothing -> withCString "palloc fail\n" c_uart_puts
         Just p -> withCString ("palloc ok " ++ show (ptrToIntPtr (castPtr p)) ++ "\n") c_uart_puts
+    defaultEnv = ["HOUSE=1", "PATH=/bin"]
     handleRun path args = do
       r <- runH $ do
         mBytes <- FS.fsReadBytes path
@@ -811,7 +812,7 @@ house_main = do
             case ULdr.loadElf bytes of
               Left le -> return (Left (toExecError le))
               Right elf -> do
-                res <- U.runElf elf args
+                res <- U.runElf elf args defaultEnv
                 case res of
                   Left le2 -> return (Left (toExecError le2))
                   Right pid -> do
@@ -942,7 +943,7 @@ house_main = do
           "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; ramfs volatile, sync persists HFS1, mount restores)",
           "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)",
           "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)",
-          "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)"
+          "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)"
         ]
     seqFib :: Int -> Int
     seqFib n

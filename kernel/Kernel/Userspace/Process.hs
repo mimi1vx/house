@@ -55,8 +55,8 @@ stackTop = 0x3FFFE000
 pfW :: Word32
 pfW = 2
 
-runElf :: Elf -> [String] -> H (Either LoadError Pid)
-runElf elf argv = withQSem userSem $ do
+runElf :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
+runElf elf argv envp = withQSem userSem $ do
   pidInt <- readRef pidNext
   writeRef pidNext (pidInt + 1)
   let pid = Pid pidInt
@@ -80,7 +80,7 @@ runElf elf argv = withQSem userSem $ do
             Nothing -> do freePDir pdir; return (Left NoSpace)
             Just stk -> do
               HPages.zeroPage stk
-              eSp <- setupArgStack stk argv
+              eSp <- setupArgStack stk argv envp
               case eSp of
                 Left err -> do HPages.freePage stk; freePDir pdir; return (Left err)
                 Right sp -> do
@@ -114,16 +114,23 @@ initBreak elf = case elfSegs elf of
     segEnd s = segVaddr s + fromIntegral (segMemSz s)
     align16 w = (w + 15) .&. complement 15
 
--- | Lay argc/argv on the stack page. Returns adjusted sp (16-byte aligned).
-setupArgStack :: Ptr Word8 -> [String] -> H (Either LoadError Word64)
-setupArgStack stk argv
+-- | Lay argc/argv+envp on the stack page. Returns adjusted sp (16-byte aligned).
+-- Layout: argc, argv[argc+1] (NULL-terminated), envp[envc+1] (NULL-terminated),
+-- then NUL-terminated strings. Bounds: 64 entries and 1024 bytes per string.
+setupArgStack :: Ptr Word8 -> [String] -> [String] -> H (Either LoadError Word64)
+setupArgStack stk argv envp
   | length argv > 64 = return (Left NoSpace)
+  | length envp > 64 = return (Left NoSpace)
   | any (\a -> length a > 1024) argv = return (Left NoSpace)
+  | any (\e -> length e > 1024) envp = return (Left NoSpace)
   | otherwise = do
-      let argBlobs = map (\a -> map (\c -> fromIntegral (ord c `mod` 256) :: Word8) a ++ [0]) argv
-          stringsLen = sum (map length argBlobs)
+      let toBlob s = map (\c -> fromIntegral (ord c `mod` 256) :: Word8) s ++ [0]
+          argBlobs = map toBlob argv
+          envBlobs = map toBlob envp
+          stringsLen = sum (map length argBlobs) + sum (map length envBlobs)
           argc = length argv
-          ptrsLen = (argc + 1) * 8
+          envc = length envp
+          ptrsLen = (argc + 1) * 8 + (envc + 1) * 8
           total = 8 + ptrsLen + stringsLen
           aligned = ((total + 15) `div` 16) * 16
       if aligned > 4000
@@ -132,15 +139,20 @@ setupArgStack stk argv
           let sp = stackTop - fromIntegral aligned
               base = stackTop - 4096
               off = fromIntegral (sp - base) :: Int
+              argvOff = off + 8
+              envOff = argvOff + (argc + 1) * 8
               strBase = sp + 8 + fromIntegral ptrsLen
           pokeWord64LE stk off (fromIntegral argc)
           let go _ [] _ = return ()
-              go idx (b : rest) va = do
-                pokeWord64LE stk (off + 8 + idx * 8) va
+              go o (b : rest) va = do
+                pokeWord64LE stk o va
                 mapM_ (\(i, byte) -> poke (stk `plusPtr` (fromIntegral (va - base) + i)) byte) (zip [0 ..] b)
-                go (idx + 1) rest (va + fromIntegral (length b))
-          go 0 argBlobs strBase
-          pokeWord64LE stk (off + 8 + argc * 8) 0
+                go (o + 8) rest (va + fromIntegral (length b))
+          go argvOff argBlobs strBase
+          pokeWord64LE stk (argvOff + argc * 8) 0
+          let envStrBase = strBase + fromIntegral (sum (map length argBlobs))
+          go envOff envBlobs envStrBase
+          pokeWord64LE stk (envOff + envc * 8) 0
           return (Right sp)
 
 pokeWord64LE :: Ptr Word8 -> Int -> Word64 -> H ()
