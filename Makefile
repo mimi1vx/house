@@ -162,9 +162,11 @@ house-virtio-blk-check: house-build
 # Virtio-net (Track 5): virtio-net server, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user netdev 10.0.2.0/24
 house-virtio-net-check: house-build
 	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
+	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 
 # Userspace EL0 (Track 6): ELF loader 0x01000000 window, svc write/exit/brk + IPC 0x10..0x14 via Endpoint, TTBR0/ASID/pager
 house-userspace-check: house-build
+	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # VM/demand pager (PR2): 4K demand paging 0x01000000–0xFFFFFFFF, mprotect RO→perm fault, munmap→translation fault, isolate, ASID+shootdown

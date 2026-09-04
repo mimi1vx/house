@@ -232,10 +232,43 @@ pub unsafe extern "C" fn house_mmu_clone_kernel_l2(new_l2: *mut u64) {
     }
 }
 
+/// Clear stale early-boot 1GB RAM blocks beyond detected RAM.
+///
+/// `house_mmu_early` runs before RAM is known and maps up to 4GB of 1GB
+/// identity blocks. After detect, entries past detected RAM alias physical
+/// addresses that do not exist; on hvf such accesses silently sink (reads 0)
+/// instead of faulting, which breaks the demand pager and `mprotect` walks.
+/// Only block descriptors are cleared — table entries (user-window root at
+/// idx 0, RTS alias at 264+) are preserved.
+/// # Safety
+/// Single core (secondaries not up yet), EL1, `L1_LOW` live. `dsb`/`tlbi`/`isb`
+/// ordered; idx 0 and table entries never touched.
+unsafe fn trim_ram_blocks() {
+    unsafe {
+        let mut span = get_ram_bytes();
+        if span == 0 {
+            span = 4u64 << 30;
+        }
+        let blocks = ((span + (1u64 << 30) - 1) >> 30) as usize;
+        let l1_low_ptr = L1_LOW.0.as_mut_ptr();
+        for idx in (blocks + 1)..256 {
+            let d = *l1_low_ptr.wrapping_add(idx);
+            if d & PTE_VALID != 0 && d & PTE_TABLE == 0 {
+                *l1_low_ptr.wrapping_add(idx) = 0;
+            }
+        }
+        core::arch::asm!(
+            "dsb sy; tlbi vmalle1is; dsb sy; isb",
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
 /// void house_mmu_update_alias(void)
 #[no_mangle]
 pub unsafe extern "C" fn house_mmu_update_alias() {
     unsafe {
+        trim_ram_blocks();
         let span = get_ram_bytes();
         build_rts_alias(span);
     }

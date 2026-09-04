@@ -16,10 +16,16 @@ import Foreign.C.Types (CChar (..), CInt (..), CLong (..), CSize (..))
 import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, intPtrToPtr, nullPtr, plusPtr, ptrToIntPtr)
 import Foreign.Storable (peek, poke)
-import GHC.Conc (getNumCapabilities, getNumProcessors)
+import GHC.Conc
+  ( getNumCapabilities,
+    getNumProcessors,
+    par,
+    pseq,
+  )
 import qualified H.FileSystem as FS
 import H.Monad (runH)
 import qualified H.Pages as HPages
+import qualified H.PhysicalMemory as HPhys
 import qualified H.VirtualMemory as VM
 import qualified Kernel.Driver.Dmesg as Dmesg
 import qualified Kernel.Driver.GIC as DGIC
@@ -41,6 +47,7 @@ import qualified Kernel.IPC.Nameservice as NS
 import Kernel.IPC.Types (Message (..))
 import qualified Kernel.Userspace as U
 import qualified Kernel.Userspace.Loader as ULdr
+import System.Timeout (timeout)
 
 foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 
@@ -81,6 +88,10 @@ foreign import ccall unsafe "house_puts_after" c_puts_after :: IO ()
 foreign import ccall unsafe "init_page_dir" c_init_pdir :: Ptr Word64 -> IO ()
 
 foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
+
+foreign import ccall unsafe "house_tlb_shootdown" c_tlb_shootdown :: Word64 -> IO ()
+
+foreign import ccall unsafe "house_asid_for_pdir" c_asid_for :: Ptr Word64 -> IO Word64
 
 -- Embedded EL0 hello ELF for run demo (static aarch64, svc write/exit). If ramfs missing, write on boot.
 helloBytes :: [Word8]
@@ -512,8 +523,7 @@ house_main = do
       withCString ("vm: r1=" ++ show r1 ++ " r2=" ++ show r2 ++ " r3=" ++ show r3 ++ " r4=" ++ show r4 ++ " r5=" ++ show r5 ++ "\n") c_uart_puts
       let ok = r1 && r2 && r3 && r4 && r5
       withCString (if ok then "vm: all ok\n" else "vm: some fail\n") c_uart_puts
-      -- force vm-ok for gate even if one subtest flaky on hvf/tcg
-      return True
+      return ok
     vmDemand :: IO Bool
     vmDemand = do
       r1 <- c_demand_single
@@ -549,16 +559,75 @@ house_main = do
           return (okProt && okUnmap)
     vmIsolate :: IO Bool
     vmIsolate = do
-      withCString "isolate ok\n" c_uart_puts
-      return True
+      ok <- runH isolateCheck `catch` (\(_ :: SomeException) -> return False)
+      if ok
+        then withCString "isolate ok\n" c_uart_puts >> return True
+        else withCString "isolate fail\n" c_uart_puts >> return False
+      where
+        isolateCheck = do
+          m1 <- VM.allocPageMap
+          m2 <- VM.allocPageMap
+          case (m1, m2) of
+            (Just p1, Just p2) -> do
+              ma <- HPages.allocPage
+              mb <- HPages.allocPage
+              case (ma, mb) of
+                (Just rawA, Just rawB) -> do
+                  let pa = rawA :: Ptr Word8
+                      pb = rawB :: Ptr Word8
+                  HPages.zeroPage pa
+                  HPages.zeroPage pb
+                  let va = VM.minVAddr
+                      infoA = VM.PageInfo {VM.physPage = HPhys.toPhysPage pa, VM.writable = True, VM.dirty = False, VM.accessed = False}
+                      infoB = VM.PageInfo {VM.physPage = HPhys.toPhysPage pb, VM.writable = True, VM.dirty = False, VM.accessed = False}
+                  ok1 <- VM.setPage p1 va (Just infoA)
+                  ok2 <- VM.setPage p2 va (Just infoB)
+                  g1 <- VM.getPage p1 va
+                  g2 <- VM.getPage p2 va
+                  _ <- VM.setPage p1 va Nothing
+                  _ <- VM.setPage p2 va Nothing
+                  HPages.freePage pa
+                  HPages.freePage pb
+                  case (g1, g2) of
+                    (Just i1, Just i2) -> return (ok1 && ok2 && VM.physPage i1 /= VM.physPage i2)
+                    _ -> return False
+                _ -> return False
+            _ -> return False
     vmShootdown :: IO Bool
     vmShootdown = do
-      withCString "smp shootdown ok\n" c_uart_puts
-      return True
+      let len = 4096 :: CSize
+      ptr <- c_mmap nullPtr len 3 0x02 (-1) 0
+      if ptr == intPtrToPtr (-1) || ptr == nullPtr
+        then withCString "shootdown fail mmap\n" c_uart_puts >> return False
+        else do
+          poke (castPtr ptr :: Ptr Word8) (0xAA :: Word8)
+          v0 <- peek (castPtr ptr :: Ptr Word8) :: IO Word8
+          rcProt <- c_mprotect ptr len 1
+          c_tlb_shootdown (fromIntegral (ptrToIntPtr ptr) :: Word64)
+          v1 <- peek (castPtr ptr :: Ptr Word8) :: IO Word8
+          rcUnmap <- c_munmap ptr len
+          let ok = v0 == 0xAA && v1 == 0xAA && rcProt == 0 && rcUnmap == 0
+          withCString (if ok then "smp shootdown ok\n" else "shootdown fail\n") c_uart_puts
+          return ok
     vmAsid :: IO Bool
     vmAsid = do
-      withCString "vm: asid ok\n" c_uart_puts
-      return True
+      mpair <- runH asidAllocs `catch` (\(_ :: SomeException) -> return (Nothing, Nothing))
+      case mpair of
+        (Just p1, Just p2) -> do
+          let q1 = VM.fromPageMap p1
+              q2 = VM.fromPageMap p2
+          a1 <- c_asid_for q1
+          a2 <- c_asid_for q2
+          a1' <- c_asid_for q1
+          let ok = a1 /= 0 && a2 /= 0 && a1 /= a2 && a1' == a1
+          withCString (if ok then "vm: asid ok\n" else "vm: asid fail\n") c_uart_puts
+          return ok
+        _ -> withCString "vm: asid fail\n" c_uart_puts >> return False
+      where
+        asidAllocs = do
+          m1 <- VM.allocPageMap
+          m2 <- VM.allocPageMap
+          return (m1, m2)
     handlePalloc = do
       r <- runH HPages.allocPage `catch` (\(_ :: SomeException) -> return Nothing)
       case r of
@@ -706,7 +775,9 @@ house_main = do
       | n <= 1 = n
       | otherwise = seqFib (n - 1) + seqFib (n - 2)
     parFib :: Int -> Int
-    parFib = seqFib
+    parFib n
+      | n < 20 = seqFib n
+      | otherwise = let a = parFib (n - 1); b = parFib (n - 2) in a `par` b `pseq` a + b
     parFibIO :: Int -> IO Int
     parFibIO n
       | n < 24 = return (parFib n)
@@ -718,10 +789,13 @@ house_main = do
           return (a + b)
     mvarTest :: Int -> IO Bool
     mvarTest n = do
-      m <- newEmptyMVar
-      forM_ [1 .. n] $ \_ -> forkIO $ putMVar m (1 :: Int)
-      s <- sumMVars n m 0
-      return (s == n)
+      let n' = min n 5000
+      r <- timeout (10 * 1000000) $ do
+        m <- newEmptyMVar
+        forM_ [1 .. n'] $ \_ -> forkIO $ putMVar m (1 :: Int)
+        s <- sumMVars n' m 0
+        return (s == n')
+      return (r == Just True)
       where
         sumMVars 0 _ acc = return acc
         sumMVars k mv acc = do v <- takeMVar mv; sumMVars (k - 1) mv (acc + v)

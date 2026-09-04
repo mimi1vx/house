@@ -11,6 +11,7 @@ set accel [lindex $argv 2]
 set mem [lindex $argv 3]
 set smp [lindex $argv 4]
 set qemu_extra [lrange $argv 5 end]
+set has_netdev [string match "*-netdev*" [join $qemu_extra " "]]
 if {$accel eq ""} { set accel hvf }
 if {$mem eq ""} { set mem 4G }
 if {$smp eq ""} { set smp 2 }
@@ -49,21 +50,27 @@ sleep 1
 send "virtio scan\r"
 expect {
     -re "device_id=1" { puts "\nPASS: virtio scan device_id=1" }
-    -re "virtio slot" { puts "\nINFO: virtio scan no net device (maybe no -netdev)"; }
+    -re "virtio slot" {
+        if {$has_netdev} { puts "\nFAIL: virtio scan no net device with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: virtio scan no net device (maybe no -netdev)" }
+    }
     timeout { puts "\nFAIL: virtio scan2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 set netSlot 7
 send "net init $netSlot\r"
 expect {
     -re "ok.*mac=52:54:00:12:34:56" { puts "\nPASS: net init $netSlot ok mac" }
-    -re "NetBadSlot|NetNotNet|BadSlot|BadVersion" { puts "\nINFO: net init $netSlot no device (empty slot)"; }
+    -re "NetBadSlot|NetNotNet|BadSlot|BadVersion" {
+        if {$has_netdev} { puts "\nFAIL: net init $netSlot no device with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: net init $netSlot no device (empty slot)" }
+    }
     timeout { puts "\nFAIL: net init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
 send "ifconfig\r"
 expect {
     -re "10.0.2.15" { puts "\nPASS: ifconfig 10.0.2.15" }
-    -re "Net" { puts "\nINFO: ifconfig returned error (expected if no net)" }
+    -re "Net" {
+        if {$has_netdev} { puts "\nFAIL: ifconfig error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: ifconfig returned error (expected if no net)" }
+    }
     timeout { puts "\nFAIL: ifconfig timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
@@ -72,7 +79,9 @@ expect { -re ">" { puts "\nPASS: arp ls" } timeout { puts "\nFAIL: arp ls timeou
 send "ping 10.0.2.2\r"
 expect {
     -re "64 bytes from 10.0.2.2|bytes from|ok" { puts "\nPASS: ping 10.0.2.2" }
-    -re "Net" { puts "\nINFO: ping returned error" }
+    -re "Net" {
+        if {$has_netdev} { puts "\nFAIL: ping error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: ping returned error" }
+    }
     timeout { puts "\nFAIL: ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
@@ -98,14 +107,18 @@ expect { -re ">" { puts "\nPASS: ns ls after net" } timeout { puts "\nFAIL: ns l
 send "net teardown $netSlot\r"
 expect {
     -re "teardown ok|ok" { puts "\nPASS: net teardown $netSlot" }
-    -re "Net" { puts "\nINFO: net teardown error" }
+    -re "Net" {
+        if {$has_netdev} { puts "\nFAIL: net teardown error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: net teardown error" }
+    }
     timeout { puts "\nFAIL: net teardown timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
 send "net init $netSlot\r"
 expect {
     -re "ok.*mac" { puts "\nPASS: net re-init $netSlot ok" }
-    -re "Net" { puts "\nINFO: net re-init failed" }
+    -re "Net" {
+        if {$has_netdev} { puts "\nFAIL: net re-init error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: net re-init failed" }
+    }
     timeout { puts "\nFAIL: net re-init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1

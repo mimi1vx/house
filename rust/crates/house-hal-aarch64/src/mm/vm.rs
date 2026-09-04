@@ -17,7 +17,12 @@ const PROT_WRITE: i32 = 0x2;
 const PROT_EXEC: i32 = 0x4;
 
 const HOUSE_USER_VA_MIN: u64 = 0x01000000;
-const HOUSE_USER_VA_MAX: u64 = 0xFFFFFFFF;
+// Demand/mmap window extends to 64GB: anon base (17GB) and demand-test VAs
+// (32GB) sit above the highest possible 1GB RAM identity block (16GB RAM
+// reaches L1 idx 16 = 17GB), so test traffic always fault-allocates fresh
+// pages instead of aliasing live RAM. Stays below the RTS alias (264GB) so
+// alias unmaps keep release-only behavior.
+const HOUSE_USER_VA_MAX: u64 = 0x1000000000;
 
 const PTE_VALID: u64 = 1 << 0;
 const PTE_TABLE: u64 = 1 << 1;
@@ -40,6 +45,7 @@ extern "C" {
     static mut house_ram_bytes: u64;
     static mut house_smp_n: i32;
     fn __errno_location() -> *mut i32;
+    fn buddy_alloc_page() -> *mut u8;
     fn buddy_free_page(p: *mut u8);
     fn current_pdir() -> *mut u8;
     fn house_tlb_shootdown(vaddr: u64);
@@ -196,23 +202,90 @@ unsafe fn vm_l3_entry(va: u64) -> *mut u64 {
     if l1.is_null() {
         return core::ptr::null_mut();
     }
-    let d1 = unsafe { *l1.add(((va >> 30) & 0x1FF) as usize) };
+    let s1 = unsafe { l1.add(((va >> 30) & 0x1FF) as usize) };
+    let d1 = unsafe { *s1 };
     if d1 & PTE_VALID == 0 {
         return core::ptr::null_mut();
     }
+    if d1 & PTE_TABLE == 0 {
+        if !unsafe { vm_split_slot(s1, 1) } {
+            return core::ptr::null_mut();
+        }
+    }
+    let d1 = unsafe { *s1 };
     let l2 = (d1 & !0xFFF) as *mut u64;
     if l2.is_null() {
         return core::ptr::null_mut();
     }
-    let d2 = unsafe { *l2.add(((va >> 21) & 0x1FF) as usize) };
+    let s2 = unsafe { l2.add(((va >> 21) & 0x1FF) as usize) };
+    let d2 = unsafe { *s2 };
     if d2 & PTE_VALID == 0 {
         return core::ptr::null_mut();
     }
+    if d2 & PTE_TABLE == 0 {
+        if !unsafe { vm_split_slot(s2, 2) } {
+            return core::ptr::null_mut();
+        }
+    }
+    let d2 = unsafe { *s2 };
     let l3 = (d2 & !0xFFF) as *mut u64;
     if l3.is_null() {
         return core::ptr::null_mut();
     }
     unsafe { l3.add(((va >> 12) & 0x1FF) as usize) }
+}
+
+/// Split a block descriptor in place into a table of smaller mappings.
+///
+/// `slot` points at an L1 entry (`level` 1, 1GB block → L2 table of 2MB
+/// blocks) or an L2 entry (`level` 2, 2MB block → L3 table of 4K pages).
+/// Attribute bits (AttrIndx/NS/AP/SH/AF/nG/UXN/PXN) and the output address
+/// are preserved per chunk, so the translation is unchanged — only the
+/// granularity is refined, giving later walks a real slot to operate on.
+/// Already-table or invalid entries are a no-op returning true; OOM false.
+/// # Safety
+/// `slot` must be a writable table entry; caller serializes against other
+/// table writers for the same entry (VM_LOCK, or exception-context for the
+/// pager fast path as with the existing lock-free table fills).
+pub(crate) unsafe fn vm_split_slot(slot: *mut u64, level: u8) -> bool {
+    if slot.is_null() || (level != 1 && level != 2) {
+        return false;
+    }
+    let d = unsafe { *slot };
+    if d & PTE_VALID == 0 || d & PTE_TABLE != 0 {
+        return true;
+    }
+    let child = unsafe { buddy_alloc_page() } as *mut u64;
+    if child.is_null() {
+        return false;
+    }
+    for i in 0..512 {
+        unsafe { *child.add(i) = 0 };
+    }
+    if level == 1 {
+        let base = d & 0xFFFFC0000000u64;
+        let keep = d & 0xFFFF000000000FFFu64;
+        for i in 0..512 {
+            let chunk = base.wrapping_add((i as u64) << 21) & 0xFFFFFE00000u64;
+            unsafe { *child.add(i as usize) = keep | chunk };
+        }
+    } else {
+        let base = d & 0xFFFFFE00000u64;
+        let keep = (d & 0xFFFF000000000FFFu64) | PTE_TABLE;
+        for i in 0..512 {
+            let chunk = base.wrapping_add((i as u64) << 12) & 0x0000FFFFFFFFF000u64;
+            unsafe { *child.add(i as usize) = keep | chunk };
+        }
+    }
+    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+    unsafe { *slot = ((child as u64) & !0xFFF) | PTE_VALID | PTE_TABLE };
+    unsafe {
+        core::arch::asm!(
+            "dsb sy; tlbi vmalle1is; dsb sy; isb",
+            options(nostack, preserves_flags)
+        )
+    };
+    true
 }
 
 // # Safety: caller must ensure addr/len valid, fd/off checked.
@@ -285,9 +358,9 @@ pub unsafe extern "C" fn house_vm_mmap(
         VM_LOCK.unlock();
         return usize::MAX as *mut u8;
     }
-    // anonymous: bump through 0x81000000
+    // anonymous: bump through 0x44000000 (17GB, above any RAM identity block)
     {
-        let anon_base = 0x81000000usize as *mut u8;
+        let anon_base = 0x44000000usize as *mut u8;
         let cur = unsafe { VM_MMAP_CUR };
         let p = if !cur.is_null() {
             let cur_u = cur as usize;
@@ -448,7 +521,10 @@ pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32)
 #[no_mangle]
 pub unsafe extern "C" fn house_vm_demand_single() -> i32 {
     unsafe { uart_puts(b"[vm] demand single start\n\0".as_ptr()) };
-    let p = 0x80000000u64 as *mut u32;
+    // 32GB: above any RAM identity block, so the access truly faults and the
+    // pager allocates a fresh page (aliasing live RAM would silently sink on
+    // hvf and corrupt buddy memory).
+    let p = 0x800000000u64 as *mut u32;
     unsafe {
         core::ptr::write_volatile(p, 0xdeadbeef);
         uart_puts(b"[vm] demand single store done\n\0".as_ptr());
@@ -466,12 +542,12 @@ pub unsafe extern "C" fn house_vm_demand_single() -> i32 {
 pub unsafe extern "C" fn house_vm_demand_100() -> i32 {
     unsafe { uart_puts(b"[vm] demand 100 start\n\0".as_ptr()) };
     for i in 0..100 {
-        let p = (0x80000000u64 + i as u64 * 4096) as *mut u8;
+        let p = (0x800000000u64 + i as u64 * 4096) as *mut u8;
         unsafe { core::ptr::write_volatile(p, i as u8) };
     }
     unsafe { uart_puts(b"[vm] demand 100 store done\n\0".as_ptr()) };
     for i in 0..100 {
-        let p = (0x80000000u64 + i as u64 * 4096) as *mut u8;
+        let p = (0x800000000u64 + i as u64 * 4096) as *mut u8;
         let v = unsafe { core::ptr::read_volatile(p) };
         if v != i as u8 {
             return 0;

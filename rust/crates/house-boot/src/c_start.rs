@@ -150,11 +150,11 @@ pub unsafe extern "C" fn c_handle_sync(
         }
         return elr.wrapping_add(4);
     }
-    // demand pager: EL1 faults on TTBR0 user VA 0x01000000..0xFFFFFFFF
+    // demand pager: EL1 faults on TTBR0 user VA (see mm/vm.rs HOUSE_USER_VA_MAX)
     {
         let is_data_abort = ec == 0x24 || ec == 0x25;
         let is_insn_abort = ec == 0x20 || ec == 0x21;
-        if (is_data_abort || is_insn_abort) && (0x01000000u64..=0xFFFFFFFFu64).contains(&far) {
+        if (is_data_abort || is_insn_abort) && (0x01000000u64..=0x1000000000u64).contains(&far) {
             // SAFETY: house_handle_user_fault allocates via buddy, sets PTE, uses dsb/isb.
             let handled = unsafe { house_handle_user_fault(far) };
             if handled != 0 {
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn c_handle_sync(
         let is_permission = (0x0C..=0x0F).contains(&dfsc);
         let wnr = ((esr >> 6) & 1) != 0;
         if (is_data_abort || is_insn_abort) && is_permission && wnr {
-            if (0x01000000u64..=0xFFFFFFFFu64).contains(&far) {
+            if (0x01000000u64..=0x1000000000u64).contains(&far) {
                 // SAFETY: checks PTE AP bits.
                 let is_ro = unsafe { house_is_ro_page(far) } != 0;
                 if is_ro {
