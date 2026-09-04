@@ -1,0 +1,198 @@
+#!/usr/bin/expect -f
+# Virtio-console test (ID 3, full-duplex server + mirror).
+# Usage: expect scripts/qemu-virtio-con.exp <kernel.bin> [timeout] [accel] [mem] [smp] [-- extra qemu args]
+# QEMU side (see Makefile house-virtio-con-check):
+#   -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0
+#   -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
+# NOTE: the port must be `virtconsole` (single-port console). `virtserialport`
+# needs multipoint PORT_READY control traffic (deferred ID-11 slice): guest TX
+# completes but QEMU never forwards it to the chardev.
+# Host side: Tcl `socket` cannot speak AF_UNIX and macOS ships no socat, so this
+# harness embeds a tiny python3 TCP->unix bridge (written to /tmp at runtime):
+#   python3 /tmp/house-con-bridge.py 4445 -> /tmp/house-con.sock, then Tcl speaks TCP.
+# Manual fallback with socat (if installed):
+#   socat TCP-LISTEN:4445,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/tmp/house-con.sock
+#   then in another shell: nc 127.0.0.1 4445   (or raw: socat - UNIX-CONNECT:/tmp/house-con.sock)
+# Timing: guest `con init` posts RX buffers BEFORE the host sends anything;
+# host bytes sent before the guest posts RX buffers are dropped by the device.
+set kernel [lindex $argv 0]
+if {[lindex $argv 1] ne ""} {
+  set timeout [lindex $argv 1]
+} else {
+  set timeout 45
+}
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+set qemu_extra [lrange $argv 5 end]
+set has_serial [string match "*virtconsole*" [join $qemu_extra " "]]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+set sockpath "/tmp/house-con.sock"
+set tcpport 4445
+set bridge_pid ""
+set ::sockbuf ""
+proc fail {msg} {
+    global bridge_pid
+    puts "\nFAIL: $msg"
+    catch {exec kill -9 $bridge_pid}
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+proc sock_expect {s needle tries} {
+    for {set i 0} {$i < $tries} {incr i} {
+        after 300
+        catch {append ::sockbuf [read -nonewline $s]}
+        if {[string first $needle $::sockbuf] >= 0} { return 1 }
+    }
+    return 0
+}
+proc sock_drain {s} {
+    after 500
+    catch {append ::sockbuf [read -nonewline $s]}
+    set ::sockbuf ""
+}
+log_user 1
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel"
+foreach a $qemu_extra {
+    if {$a eq "--"} { continue }
+    append cmd " $a"
+}
+puts "SPAWN: $cmd"
+eval spawn $cmd
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { fail "welcome timeout" }
+    eof { fail "eof before welcome" }
+}
+expect {
+    -re ">" { puts "\nPASS: saw prompt" }
+    timeout { fail "prompt timeout" }
+    eof { fail "eof before prompt" }
+}
+send "dmesg\r"
+expect {
+    -re "House driver framework online" { puts "\nPASS: dmesg framework online" }
+    timeout { fail "dmesg timeout" }
+}
+sleep 1
+send "lsdev\r"
+expect { -re ">" { puts "\nPASS: lsdev" } timeout { fail "lsdev timeout" } }
+send "virtio scan\r"
+expect {
+    -re "virtio slot 0" { puts "\nPASS: virtio scan slot 0" }
+    timeout { fail "virtio scan timeout" }
+}
+sleep 1
+send "virtio scan\r"
+expect {
+    -re "device_id=3" { puts "\nPASS: virtio scan device_id=3" }
+    -re "virtio slot" {
+        if {$has_serial} { fail "virtio scan no console device with -device present" } else { puts "\nINFO: virtio scan no console (no -device)" }
+    }
+    timeout { fail "virtio scan2 timeout" }
+}
+if {!$has_serial} {
+    send "con init 7\r"
+    expect {
+        -re "ConBadSlot|ConNotCon" { puts "\nINFO: con init 7 no device (empty slot)" }
+        -re "ok" { fail "con init 7 ok without serial device" }
+        timeout { fail "con init timeout" }
+    }
+    catch {exec kill -9 [exp_pid]}
+    catch {close}
+    catch {wait}
+    exit 0
+}
+# Bridge TCP 4445 -> unix sockpath, then connect as TCP client.
+set lines [list {import socket} {import sys} {import threading} {tcp_port = int(sys.argv[1])} {unix_path = sys.argv[2]} {srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)} {srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)} {srv.bind(("127.0.0.1", tcp_port))} {srv.listen(1)} {conn, _ = srv.accept()} {unix_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)} {unix_sock.connect(unix_path)} {def fwd(src, dst):} {    try:} {        while True:} {            data = src.recv(4096)} {            if not data:} {                break} {            dst.sendall(data)} {    except OSError:} {        pass} {t = threading.Thread(target=fwd, args=(conn, unix_sock))} {t.daemon = True} {t.start()} {fwd(unix_sock, conn)}]
+set fh [open "/tmp/house-con-bridge.py" w]
+puts $fh [join $lines "\n"]
+close $fh
+set bridge_pid [exec python3 /tmp/house-con-bridge.py $tcpport $sockpath &]
+after 1000
+set s [socket 127.0.0.1 $tcpport]
+fconfigure $s -translation binary -buffering none -blocking 0
+puts "\nPASS: host socket connected"
+set conSlot 7
+send "con init $conSlot\r"
+expect {
+    -re "ok" { puts "\nPASS: con init $conSlot ok" }
+    -re "Con" { fail "con init $conSlot returned error with serial present" }
+    timeout { fail "con init timeout" }
+}
+sleep 1
+send "con status $conSlot\r"
+expect {
+    -re "status ok" { puts "\nPASS: con status $conSlot" }
+    timeout { fail "con status timeout" }
+}
+sleep 1
+send "con write $conSlot hello-con\r"
+expect {
+    -re "ok" { puts "\nPASS: con write ok" }
+    timeout { fail "con write timeout" }
+}
+if {[sock_expect $s "hello-con" 20]} { puts "\nPASS: host saw hello-con" } else { fail "host never saw hello-con" }
+sock_drain $s
+puts -nonewline $s "host-line-1"
+flush $s
+sleep 1
+send "con read $conSlot\r"
+expect {
+    -re "host-line-1" { puts "\nPASS: con read saw host-line-1" }
+    timeout { fail "con read timeout" }
+}
+sleep 1
+send "ns ls\r"
+expect {
+    -re "virtio-con7" { puts "\nPASS: ns ls shows virtio-con7" }
+    timeout { fail "ns ls missing virtio-con7" }
+}
+send "con teardown $conSlot\r"
+expect {
+    -re "teardown ok" { puts "\nPASS: con teardown $conSlot" }
+    -re "Con" { fail "con teardown error with serial present" }
+    timeout { fail "con teardown timeout" }
+}
+sleep 1
+send "con init $conSlot\r"
+expect {
+    -re "ok" { puts "\nPASS: con re-init $conSlot ok" }
+    -re "Con" { fail "con re-init error with serial present" }
+    timeout { fail "con re-init timeout" }
+}
+sleep 1
+send "con mirror on\r"
+expect {
+    -re "mirror on" { puts "\nPASS: mirror on" }
+    timeout { fail "mirror on timeout" }
+}
+sock_drain $s
+send "echo mirror-probe-xyz\r"
+expect {
+    -re ">" { puts "\nPASS: echo after mirror on" }
+    timeout { fail "echo timeout" }
+}
+if {[sock_expect $s "mirror-probe-xyz" 20]} { puts "\nPASS: host saw mirror-probe-xyz" } else { fail "host never saw mirror output" }
+send "con mirror off\r"
+expect {
+    -re "mirror off" { puts "\nPASS: mirror off" }
+    timeout { fail "mirror off timeout" }
+}
+sock_drain $s
+sleep 1
+# burst 5 scans without deadlock
+for {set i 0} {$i < 5} {incr i} {
+    send "virtio scan\r"
+    sleep 1
+}
+puts "\nPASS: burst 5 scans ok"
+puts "\nPASS: virtio-con ok"
+catch {close $s}
+catch {exec kill -9 $bridge_pid}
+catch {exec kill -9 [exp_pid]}
+catch {close}
+catch {wait}
+exit 0

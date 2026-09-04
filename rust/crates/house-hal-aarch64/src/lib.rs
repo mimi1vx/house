@@ -32,6 +32,7 @@ pub mod timer;
 pub mod uart;
 pub mod userspace;
 pub mod virtio_blk;
+pub mod virtio_con;
 pub mod virtio_net;
 pub mod virtio_probe;
 pub mod virtio_transport;

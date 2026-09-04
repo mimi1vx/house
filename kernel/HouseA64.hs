@@ -25,8 +25,10 @@ import GHC.Conc
   )
 import qualified H.FileSystem as FS
 import H.Monad (runH)
+import H.Mutable (Ref, newRef, readRef, writeRef)
 import qualified H.Pages as HPages
 import qualified H.PhysicalMemory as HPhys
+import H.Unsafe (unsafePerformH)
 import qualified H.VirtualMemory as VM
 import qualified Kernel.Driver.Dmesg as Dmesg
 import qualified Kernel.Driver.GIC as DGIC
@@ -37,6 +39,8 @@ import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (showDriverInfo)
 import qualified Kernel.Driver.Virtio.Blk as Blk
 import qualified Kernel.Driver.Virtio.Blk.Types as BlkTypes
+import qualified Kernel.Driver.Virtio.Con as Con
+import qualified Kernel.Driver.Virtio.Con.Types as ConTypes
 import qualified Kernel.Driver.Virtio.Net as Net
 import qualified Kernel.Driver.Virtio.Net.Types as NetTypes
 import qualified Kernel.Driver.Virtio.Queue as VQueue
@@ -54,7 +58,35 @@ import qualified Kernel.Userspace as U
 import qualified Kernel.Userspace.Loader as ULdr
 import System.Timeout (timeout)
 
-foreign import ccall "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
+foreign import ccall "uart_puts" c_uart_puts_raw :: Ptr CChar -> IO ()
+
+-- | All shell output flows through here. Console-mirror interposition point:
+-- when 'con mirror on', every UART line is best-effort duplicated to the
+-- virtio-console TX queue (dropped when not inited, never blocks the shell).
+c_uart_puts :: Ptr CChar -> IO ()
+c_uart_puts p = c_uart_puts_raw p >> mirrorOut p
+
+-- | Best-effort mirror of one UART string to the console slot. Swallows all
+-- exceptions; drops silently unless mirror is on and the server is inited.
+mirrorOut :: Ptr CChar -> IO ()
+mirrorOut p = do
+  on <- runH (readRef conMirror)
+  when on $
+    ( do
+        s <- peekCString p
+        slot <- runH (readRef conMirrorSlot)
+        _ <- runH (Con.conWriteBytes slot (map (fromIntegral . fromEnum) (take 4096 s)))
+        return ()
+    )
+      `catch` (\(_ :: SomeException) -> return ())
+
+{-# NOINLINE conMirror #-}
+conMirror :: Ref Bool
+conMirror = unsafePerformH $ newRef False
+
+{-# NOINLINE conMirrorSlot #-}
+conMirrorSlot :: Ref Int
+conMirrorSlot = unsafePerformH $ newRef 7
 
 foreign import ccall unsafe "house_uptime_secs" c_uptime :: IO Word64
 
@@ -219,6 +251,15 @@ house_main = do
       ["arp", "ls"] -> handleArpLs
       ["net", "dhcp"] -> handleNetDhcp
       ["net"] -> withCString "usage: net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>\n" c_uart_puts
+      ["con", "init", s] -> handleConInit s
+      ["con", "status", s] -> handleConStatus s
+      ("con" : "write" : s : rest) -> handleConWrite s (unwords rest)
+      ["con", "read", s] -> handleConRead (Just s)
+      ["con", "read"] -> handleConRead Nothing
+      ["con", "teardown", s] -> handleConTeardown s
+      ["con", "mirror", "on"] -> handleConMirror True
+      ["con", "mirror", "off"] -> handleConMirror False
+      ["con"] -> withCString "usage: con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off\n" c_uart_puts
       ["free"] -> handleFree
       ["mem"] -> handleMem
       ["detect"] -> handleDetect
@@ -516,6 +557,56 @@ house_main = do
       _ -> withCString "usage: udpecho <ip> <port> <text>\n" c_uart_puts
     findNetSlot xs = case filter ("virtio-net" `isPrefixOf`) xs of
       (s : _) -> case reads (drop (length "virtio-net") s) of [(n, "")] -> n; _ -> 0
+      [] -> 0
+    handleConInit s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Con.conServerInit n)
+        case r of
+          Left e -> withCString (ConTypes.conErrorToString e ++ "\n") c_uart_puts
+          Right dev -> withCString ("ok qsize0=" ++ show (VQueue.queueSize (ConTypes.conRxQueue dev)) ++ " qsize1=" ++ show (VQueue.queueSize (ConTypes.conTxQueue dev)) ++ " slot=" ++ show (ConTypes.conSlot dev) ++ "\n") c_uart_puts
+      _ -> withCString "usage: con init <slot>\n" c_uart_puts
+    handleConStatus s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Con.conProbe n)
+        case r of
+          Left e -> withCString (ConTypes.conErrorToString e ++ "\n") c_uart_puts
+          Right () -> do
+            xs <- runH NS.nsList
+            let hasNs = ("virtio-con" ++ show n) `elem` xs
+            withCString ("con slot " ++ show n ++ " ns=" ++ show hasNs ++ " status ok\n") c_uart_puts
+      _ -> withCString "usage: con status <slot>\n" c_uart_puts
+    handleConWrite s txt = case reads s of
+      [(n, "")] -> do
+        r <- runH (Con.conWrite n txt)
+        case r of
+          Left e -> withCString (ConTypes.conErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "ok\n" c_uart_puts
+      _ -> withCString "usage: con write <slot> <text>\n" c_uart_puts
+    handleConRead mSlot = do
+      slot <- case mSlot of
+        Just s -> case reads s of [(n, "")] -> return n; _ -> return (-1)
+        Nothing -> do
+          xs <- runH NS.nsList
+          return (findConSlot xs)
+      if slot < 0
+        then withCString "usage: con read [slot]\n" c_uart_puts
+        else do
+          r <- runH (Con.conRead slot)
+          case r of
+            Left e -> withCString (ConTypes.conErrorToString e ++ "\n") c_uart_puts
+            Right out -> withCString (take 256 out ++ "\n") c_uart_puts
+    handleConTeardown s = case reads s of
+      [(n, "")] -> do
+        r <- runH (Con.conServerTeardown n)
+        case r of
+          Left e -> withCString (ConTypes.conErrorToString e ++ "\n") c_uart_puts
+          Right () -> withCString "teardown ok\n" c_uart_puts
+      _ -> withCString "usage: con teardown <slot>\n" c_uart_puts
+    handleConMirror on = do
+      _ <- runH (writeRef conMirror on)
+      withCString (if on then "mirror on\n" else "mirror off\n") c_uart_puts
+    findConSlot xs = case filter ("virtio-con" `isPrefixOf`) xs of
+      (x : _) -> case reads (drop (length "virtio-con") x) of [(n, "")] -> n; _ -> 0
       [] -> 0
     handleArpLs = do
       xs <- runH Net.netArpLs
@@ -850,6 +941,7 @@ house_main = do
           "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)",
           "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; ramfs volatile, sync persists HFS1, mount restores)",
           "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)",
+          "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)",
           "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)"
         ]
     seqFib :: Int -> Int
