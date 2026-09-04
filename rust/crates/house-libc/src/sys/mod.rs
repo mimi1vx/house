@@ -177,15 +177,21 @@ pub unsafe extern "C" fn read(fd: i32, buf: *mut u8, n: usize) -> isize {
             }
             let isr_active = unsafe { core::ptr::read_volatile(&raw const house_isr_active) };
             if isr_active != 0 {
+                // Drain all slots, return total expirations (Linux timerfd
+                // semantics) so one read catches up after idle.
+                let mut total: u64 = 0;
                 for i in 0..HOUSE_MAX_SMP {
                     let v = unsafe { core::ptr::read_volatile(&raw const house_isr_pending[i]) };
                     if v > 0 {
-                        unsafe { core::ptr::write_volatile(&raw mut house_isr_pending[i], v - 1) };
-                        break;
+                        unsafe { core::ptr::write_volatile(&raw mut house_isr_pending[i], 0) };
+                        total = total.wrapping_add(v);
                     }
                 }
-                entry.ticks += 1;
-                unsafe { *(buf as *mut u64) = 1 };
+                if total == 0 {
+                    total = 1;
+                }
+                entry.ticks += total;
+                unsafe { *(buf as *mut u64) = total };
                 return 8;
             }
             entry.last_ns = unsafe { house_uptime_ns_raw() };
