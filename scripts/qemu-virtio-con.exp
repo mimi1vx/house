@@ -7,12 +7,11 @@
 # NOTE: the port must be `virtconsole` (single-port console). `virtserialport`
 # needs multipoint PORT_READY control traffic (deferred ID-11 slice): guest TX
 # completes but QEMU never forwards it to the chardev.
-# Host side: Tcl `socket` cannot speak AF_UNIX and macOS ships no socat, so this
-# harness embeds a tiny python3 TCP->unix bridge (written to /tmp at runtime):
-#   python3 /tmp/house-con-bridge.py 4445 -> /tmp/house-con.sock, then Tcl speaks TCP.
-# Manual fallback with socat (if installed):
+# Host side: Tcl `socket` cannot speak AF_UNIX, so this harness bridges via
+# socat (required on the host):
 #   socat TCP-LISTEN:4445,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/tmp/house-con.sock
-#   then in another shell: nc 127.0.0.1 4445   (or raw: socat - UNIX-CONNECT:/tmp/house-con.sock)
+# then Tcl speaks TCP. Manual observe: nc 127.0.0.1 4445
+# (or raw: socat - UNIX-CONNECT:/tmp/house-con.sock)
 # Timing: guest `con init` posts RX buffers BEFORE the host sends anything;
 # host bytes sent before the guest posts RX buffers are dropped by the device.
 set kernel [lindex $argv 0]
@@ -105,12 +104,9 @@ if {!$has_serial} {
     catch {wait}
     exit 0
 }
-# Bridge TCP 4445 -> unix sockpath, then connect as TCP client.
-set lines [list {import socket} {import sys} {import threading} {tcp_port = int(sys.argv[1])} {unix_path = sys.argv[2]} {srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)} {srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)} {srv.bind(("127.0.0.1", tcp_port))} {srv.listen(1)} {conn, _ = srv.accept()} {unix_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)} {unix_sock.connect(unix_path)} {def fwd(src, dst):} {    try:} {        while True:} {            data = src.recv(4096)} {            if not data:} {                break} {            dst.sendall(data)} {    except OSError:} {        pass} {t = threading.Thread(target=fwd, args=(conn, unix_sock))} {t.daemon = True} {t.start()} {fwd(unix_sock, conn)}]
-set fh [open "/tmp/house-con-bridge.py" w]
-puts $fh [join $lines "\n"]
-close $fh
-set bridge_pid [exec python3 /tmp/house-con-bridge.py $tcpport $sockpath &]
+# Bridge TCP 4445 -> unix sockpath via socat, then connect as TCP client.
+if {[catch {exec socat -V} err]} { fail "socat missing on host: $err" }
+set bridge_pid [exec socat TCP-LISTEN:$tcpport,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:$sockpath &]
 after 1000
 set s [socket 127.0.0.1 $tcpport]
 fconfigure $s -translation binary -buffering none -blocking 0
