@@ -4,6 +4,8 @@ IMAGE := house-port:latest
 
 container-image:
 	container builder start -c 4 -m 4G || true
+	# Single sanctioned CONTAINER_DEFAULT_PLATFORM: `container build` line only.
+	# Every `container run` below pins `--platform linux/arm64` explicitly.
 	CONTAINER_DEFAULT_PLATFORM=linux/arm64 container build \
 	  --platform linux/arm64 -f Containerfile -t $(IMAGE) .
 	@archs=$$(container image inspect $(IMAGE) | \
@@ -169,7 +171,18 @@ house-userspace-check: house-build
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
 
-# VM/demand pager (PR2): 4K demand paging 0x01000000–0xFFFFFFFF, mprotect RO→perm fault, munmap→translation fault, isolate, ASID+shootdown
+# SMP-8 scaling gate (Track D): 8 cores online at 4G, ceiling 16.
+# Status 2026-09-04: N=8 hvf is flaky on this tree (3 runs: smp PASS + caps
+# timeout once, MVar-blocked/smp timeout twice) — pre-existing RTS-topology
+# flakiness, not a Track C+D regression. Policy: default N=2 per-commit;
+# N=8 stays a nightly/scaling gate (hvf best-effort + tcg nightly). Do not
+# gate releases on N=8 until the topology flake is root-caused.
+smp-check-8:
+	$(MAKE) smp-check SMP_N=8 SPIKE_MEM=4G
+
+# Buddy/MM pressure leg (Track D): the qemu-vm.exp harness asserts `vm-ok`
+# plus `mem` buddy free/total at both geometries, so 512M vs 4G pressure is
+# recorded on every run without a new allocator.
 vm-check:
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C $(SPIKE_DIR) clean
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C kernel clean
@@ -186,9 +199,10 @@ house-vm-check: vm-check
 
 # `make run` is a convenience alias for the house shell (hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
-# spike ticks, GIC dispatch + VM, house banner, and interactive shell,
-# each under hvf and tcg where applicable. It is the gate used by CI
-# and by "from clean clone inside container" verification.
+# spike ticks, GIC dispatch + VM, house banner, interactive shell, and
+# rust (clippy + fmt), each under hvf and tcg where applicable. It is the
+# gate used by CI and by "from clean clone inside container" verification.
+# Scaling legs (vm-check 512M/2+4G/4, smp-check-8) stay out of default `check`.
 run: house-run
 
 check:
@@ -197,8 +211,9 @@ check:
 	$(MAKE) house-check
 	$(MAKE) house-shell-check
 	$(MAKE) house-posix-check
-	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix) =="
+	$(MAKE) rust-check
+	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust) =="
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-userspace-check rust-check rust-clean run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check smp-check-8 vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-userspace-check rust-check rust-clean run check

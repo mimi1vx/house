@@ -28,8 +28,9 @@ Globals `__heap_base 0x42000000` / `__early_stacks_*` / `__rela_start` remain `l
 Toolchain: `rust-toolchain.toml` `channel="stable"` + `aarch64-unknown-none` +
 `Containerfile` `COPY rust-toolchain.toml` + `cargo fetch` cache.
 Every `container run --platform linux/arm64` per `apple-container` skill;
+single sanctioned `CONTAINER_DEFAULT_PLATFORM=linux/arm64` on the
+`container build` line only (`Makefile`), never exported globally;
 `Containerfile:5` `uname -m == aarch64` guard + `Makefile:9` `arm64` assert.
-No `CONTAINER_DEFAULT_PLATFORM`.
 
 `house-hal` is `unsafe` + `#[inline(always)]` in impl — compile-time
 monomorphized, not vtable (avoids ISR overhead, preserves `dmb sy`/`dsb sy`/
@@ -76,5 +77,13 @@ aarch64 gate untouched (`cargo build --target aarch64-unknown-none` + `cargo cli
 
 Trait methods forward to free functions that keep exact sequences:
 `msr mair_el1/tcr_el1/ttbr0_el1`; `dsb ish; tlbi vmalle1is; dsb ish; isb`;
-`dc cvac` before DMA, `dc ivac` on RX. `rg "dc cvac|dsb sy|tlbi"` parity
-C vs Rust `house-hal-aarch64` must match (see `scripts/ci-rust.sh`).
+`dc cvac` before DMA, `dc ivac` on RX. Flush covers only touched ranges
+(64 B lines over `[pa, pa+len)`, `checked_add`-guarded, `dsb sy` after);
+invalidate-before-read on RX, flush-before-notify on TX. `rg "dc cvac|dsb sy|tlbi"` parity
+C vs Rust `house-hal-aarch64` must match. Post-port CI split
+(`scripts/`): `ci-rust.sh` (fmt + clippy + build + panic/`checked_*`/nm/dc-dsb-tlbi
+parity), `ci-rust-phase1.sh` (libc shims `__stack_chk_*` + single `panic_handler`
++ clippy/fmt), `ci-rust-phase2.sh` (boot `_start`/`secondary_entry`/`__boot_dtb`/
+`vectors`/`house_enter_el0` + clippy/fmt), `ci-tinylibc-parity.sh`
+(`c-abi.md` table vs `nm` subset + `checked_*` >= `__builtin_*overflow` +
+single `panic_handler`).

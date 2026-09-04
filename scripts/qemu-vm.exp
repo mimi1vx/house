@@ -67,5 +67,12 @@ expect {
     timeout { puts "\nFAIL: timed out waiting for /$marker/"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: qemu exited before marker"; exit 1 }
 }
+# Buddy/MM pressure leg (Track D): record buddy free/total at this geometry
+send "mem\r"
+expect {
+    -re "buddy \[0-9\]+/\[0-9\]+ pages" { puts "\nPASS: buddy free/total" }
+    timeout { puts "\nFAIL: buddy timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before buddy"; exit 1 }
+}
 catch {exec kill -9 [exp_pid]}
 exit 0

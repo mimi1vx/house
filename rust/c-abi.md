@@ -1,17 +1,62 @@
-# Stable C ABI map — Rust ↔ platform/aarch64 + tinylibc
+# Stable C ABI map — Rust ↔ Haskell FFI + `ld`
 
 > Single source of truth for every `#[no_mangle] pub extern "C"` / `pub static`
-> Rust must preserve when porting `platform/aarch64/*.c`, `tinylibc/*`,
-> `start.S`, and `aarch64.ld` logic to Rust. Frozen in Phase 1; drift here
-> breaks `ld -T build/aarch64.ld` in Phase 2.
-> No `bindgen`/`cbindgen` — freestanding headers and host `glibc` `stat`
-> layouts differ (`plans/rust-port.md:148`). This file is `nm`-auditable:
-> `nm platform/aarch64/build/*.o | grep " T "` must be a subset of the
-> `Symbol` column after Rust link.
+> the Rust workspace exports. The C-to-Rust port is complete: `house-boot`
+> (`global_asm!` entry/vectors) + `house-hal-aarch64` + `house-libc` are always
+> linked (`platform/aarch64/Makefile`, `--start-group`/`--end-group`), and
+> `platform/aarch64/tinylibc` is superseded. This file is the frozen contract:
+> renaming, removing, or re-signaturing a symbol here breaks `ld -T
+> build/aarch64.ld` and every Haskell `foreign import ccall unsafe` that names
+> it. This file is `nm`-auditable: `nm rust/target/aarch64-unknown-none/debug/*.a
+> *.rlib | grep " T "` must cover the `Symbol` column (see Audit notes).
+> No `bindgen`/`cbindgen` — freestanding headers are not host-parseable and host
+> `glibc` `stat` layouts differ from tinylibc `stat`; hand-written `#[repr(C)]`
+> truth with the `nm` gate is the reviewable contract (SOTA Rust 01 minimal API).
+
+Conventions: **Crate** is the defining Rust crate (link owner); the section
+header names the defining module (`src/<file>.rs`). Every
+`pub unsafe extern "C"` carries a `// SAFETY:` comment at its definition site
+discharging the caller's preconditions (SOTA Rust 03); the `Hal*` traits in
+`house-hal` are `#[inline(always)]` adapters over these free functions and add
+no new `#[no_mangle]` names. **Source** is pre-port C provenance
+(`platform/aarch64/*`, `tinylibc/*`, `start.S`, `aarch64.ld`).
+
+## No ABI delta from Tracks A/B
+
+Tracks A/B added no `#[no_mangle]` symbols: `house_vm_demand_single`,
+`house_vm_demand_100`, and `house_puts_after` (the `vmTest`/`vm` surface) live
+in `house-hal-aarch64/src/mm/vm.rs` and were part of the port, not new ABI.
+No `house_pa_for_va` / `house_shootdown_count` symbols exist anywhere in the
+tree (they stayed private to the HAL); `parFib`/`mvarTest`/net/EL0 work reused
+the frozen map below.
+
+## Trust boundaries
+
+Future symbol additions that touch these paths get bounds review first
+(SOTA Code Security 06/09):
+
+- **Virtio-blk device bytes.** The device writes completion data into guest
+  RAM; `virtio_blk_invalidate` (`dc ivac`, invalidate-before-read) must precede
+  any read of `used`/status/data, and `virtio_transport_dc_flush` (`dc cvac`,
+  flush-before-notify) must precede `virtio_transport_notify`. Lengths arrive
+  from `qsize`/request fields — `checked_*` on `pa+len` (see `mmio.rs`
+  `dc_cvac_range`/`dc_ivac_range`, `virtio_transport_dc_flush`).
+- **Virtio-net hostile RX frames.** Same invalidate-before-read rule via
+  `virtio_net_invalidate`; the Haskell decoders (`decodeEthernet`/`Arp`/`Ipv4`
+  in `Kernel/Driver/Virtio/Net/Stack.hs`) do their own length checks on top.
+  RX-replenish keeps the Track B `pollTx`/locking order; the IRQ→Endpoint push
+  path (`house_irq_push`, `ba5acfa`) stays byte-identical.
+- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`) and
+  `house_ipc_svc_dispatch` (`IPC 0x10..0x14`) take raw `imm`/`x0..x3` from EL0;
+  unknown `imm` returns an error, user pointers are validated before
+  copy (`house_ipc_copy_msg` is length-bounded).
+- **Buddy containment.** `buddy_free_page`/`buddy_contains` reject null,
+  misaligned, and out-of-range (`BUDDY_START..BUDDY_END`) pages; the managed
+  window is `__heap_base+64M .. house_boot_stack_top-16*64K`.
 
 Legend: **Crate** is the defining Rust crate; **Symbol** is the exact
-`#[no_mangle]` name `ld` expects; **C signature** is the current C declaration
-(`platform/aarch64/*.h` or `.c`); **Source** is the owning C file.
+`#[no_mangle]` name `ld` expects; **C signature** is the pre-port C declaration;
+**Source** is the owning pre-port C file (Rust module is the section header).
 
 ## HAL crates (`house-hal-aarch64`)
 
@@ -43,6 +88,9 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 
 ### `buddy.rs` — `buddy.c` / `buddy.h`
 
+Manages `__heap_base+64M .. house_boot_stack_top-16*64K`; lengths use
+`checked_add` (SOTA Security 06).
+
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
 | `house-hal-aarch64` | `buddy_init` | `void buddy_init(uint64_t start, uint64_t end)` | `buddy.c` |
@@ -70,16 +118,23 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 
 ### `timer.rs` — `timer.c`
 
+Owns `house_isr_active` / `house_isr_pending` (per-core timer pending) and the
+rearm path feeding `house_rts_tick()` (SMP_N cores, PPI 27/30, SGI 0 IPI).
+
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
+| `house-hal-aarch64` | `house_isr_active` | `volatile int house_isr_active` | `timer.c`/`irq.c` |
+| `house-hal-aarch64` | `house_isr_pending` | `volatile uint64_t house_isr_pending[HOUSE_MAX_SMP]` | `timer.c` |
 | `house-hal-aarch64` | `house_timer_init` | `void house_timer_init(void)` | `timer.c` |
 | `house-hal-aarch64` | `house_timer_init_secondary` | `void house_timer_init_secondary(uint32_t core)` | `timer.c` |
 | `house-hal-aarch64` | `house_timer_rearm_virt` | `void house_timer_rearm_virt(void)` | `timer.c` |
 | `house-hal-aarch64` | `house_timer_rearm_phys` | `void house_timer_rearm_phys(void)` | `timer.c` |
 | `house-hal-aarch64` | `house_uptime_secs` | `uint64_t house_uptime_secs(void)` | `timer.c` |
-| `house-hal-aarch64` | `house_uptime_ns` | `uint64_t house_uptime_ns(void)` | `tinylibc/sys.c` (timerfd pacing) |
 
 ### `irq.rs` — `irq.c` / `irq.h`
+
+IRQ→Endpoint push path (`house_irq_push`, `ba5acfa` livelock fix) is frozen;
+`house_fd_pipe_readable` is provided by `house-libc`.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -91,6 +146,10 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-hal-aarch64` | `house_irq_pipe_readable` | `int house_irq_pipe_readable(int fd)` | `irq.c` |
 
 ### `userspace.rs` — `userspace.c` / `userspace.h`
+
+TTBR0 window `0x01000000–0xFFFFFFFF`, 8-bit ASID with `VMALLE1IS` wrap,
+demand pager + `mprotect` RO perm faults + `munmap` translation faults,
+`VAE1IS` + SGI 1 shootdown.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -106,7 +165,25 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-hal-aarch64` | `min_user_addr` | `void *min_user_addr` | `userspace.c` |
 | `house-hal-aarch64` | `max_user_addr` | `void *max_user_addr` | `userspace.c` |
 
-### `svc.rs` — `svc.c` / `svc.h` / `ipc.c` / `ipc.h`
+### `mm/vm.rs` — `mm/vm.c`
+
+VM self-test surface used by the `vm` shell command (`vm-ok` gate):
+demand-100 pages, `mprotect` RO perm fault, `munmap` translation fault,
+`house_puts_after` ordering marker.
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-hal-aarch64` | `house_vm_mmap` | `void *house_vm_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)` | `mm/vm.c` |
+| `house-hal-aarch64` | `house_vm_munmap` | `int house_vm_munmap(void *a, size_t len)` | `mm/vm.c` |
+| `house-hal-aarch64` | `house_vm_mprotect` | `int house_vm_mprotect(void *a, size_t len, int prot)` | `mm/vm.c` |
+| `house-hal-aarch64` | `house_vm_demand_single` | `int house_vm_demand_single(void)` | `mm/vm.c` |
+| `house-hal-aarch64` | `house_vm_demand_100` | `int house_vm_demand_100(void)` | `mm/vm.c` |
+| `house-hal-aarch64` | `house_puts_after` | `void house_puts_after(void)` | `mm/vm.c` |
+
+### `svc.rs` + `ipc.rs` — `svc.c` / `svc.h` / `ipc.c` / `ipc.h`
+
+EL0 `svc #imm` dispatch (`WRITE 0x01`/`EXIT 0x02`, `IPC 0x10..0x14` via
+Endpoint). Unknown `imm` is rejected; user pointers are validated before copy.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -117,7 +194,6 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-hal-aarch64` | `house_is_exited` | `int house_is_exited(void)` | `svc.c` |
 | `house-hal-aarch64` | `house_ipc_svc_dispatch` | `int64_t house_ipc_svc_dispatch(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3)` | `ipc.c` |
 | `house-hal-aarch64` | `house_ipc_copy_msg` | `void house_ipc_copy_msg(const void *src, void *dst, size_t len)` | `ipc.c` |
-| `house-hal-aarch64` | `house_rts_tick` | `void house_rts_tick(void)` | `tinylibc/sys.c` (ticker seam) |
 
 ### `psci.rs` — `psci.c` / `psci.h`
 
@@ -130,6 +206,9 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-hal-aarch64` | `psci_cpu_off` | `int64_t psci_cpu_off(void)` | `psci.c` |
 
 ### `dtb` / `detect` / `probe` — `house_dtb.c` / `house_detect.c` / `house_probe.c`
+
+RAM auto-detect: DTB `reg` (via `x0`) → fault probe `128M→16G` → `512M`
+fallback, capped by `HOUSE_RAM_LIMIT_BYTES`.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -146,31 +225,12 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-hal-aarch64` | `house_smp` | `int house_smp` | `house_detect.c` |
 | `house-hal-aarch64` | `house_ram_source` | `const char *house_ram_source` | `house_detect.c` |
 
-### `c_start` / `exception` — `c_start.c` + `start.S` vectors
-
-| Crate | Symbol | C signature | Source |
-|-------|--------|-------------|--------|
-| `house-boot` | `c_start` | `void c_start(void)` | `c_start.c` |
-| `house-boot` | `c_start_secondary` | `void c_start_secondary(uint64_t core_id)` | `c_start.c` |
-| `house-boot` | `c_handle_sync` | `uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *gpr, void *fpi)` | `c_start.c` |
-| `house-boot` | `c_handle_irq` | `void c_handle_irq(uint64_t *gpr, void *fpi)` | `c_start.c` |
-| `house-boot` | `fatal_exception` | `void fatal_exception(void)` | `c_start.c` |
-| `house-boot` | `house_smp_n` | `volatile int house_smp_n` | `c_start.c` |
-| `house-boot` | `house_smp_online_mask` | `volatile uint32_t house_smp_online_mask` | `c_start.c` |
-| `house-boot` | `house_isr_active` | `volatile int house_isr_active` | `timer.c`/`irq.c` |
-| `house-boot` | `house_isr_pending` | `volatile uint64_t house_isr_pending[HOUSE_MAX_SMP]` | `timer.c` |
-| `house-boot` | `vectors` | `vectors` (VBAR_EL1) | `start.S` |
-| `house-boot` | `_start` | `ENTRY _start` | `start.S` + `aarch64.ld` |
-| `house-boot` | `secondary_entry` | `secondary_entry` (4K-aligned) | `start.S` |
-| `house-boot` | `house_enter_el0` | `void house_enter_el0(uint64_t entry, uint64_t sp, void *pdir, uint64_t asid)` | `start.S` |
-| `house-boot` | `svc_exit_trampoline` | `void svc_exit_trampoline(void)` | `start.S` |
-| `house-boot` | `__boot_dtb` | `uint64_t __boot_dtb` | `start.S` |
-| `house-boot` | `__rela_start` / `__rela_end` | `__rela_start`, `__rela_end` | `aarch64.ld` |
-| `house-boot` | `__bss_start` / `__bss_end` | `__bss_start`, `__bss_end` | `aarch64.ld` |
-| `house-boot` | `__early_stacks_*` / `__heap_base` / `__ram_base` | linker symbols | `aarch64.ld` |
-| `house-boot` | `__init_array_start` / `__fini_array_start` | init/fini bounds | `aarch64.ld` |
-
 ### `virtio` — `virtio_transport.c` / `virtio_blk.c` / `virtio_net.c` / `virtio_probe.c`
+
+Flush discipline (audited Track D): `dc cvac` (flush-before-notify) on every
+touched TX/descriptor/avail range, `dc ivac` (invalidate-before-read) on every
+device-written RX/used range, `dsb sy` after each range op. Only touched ranges
+are flushed (64 B lines from `pa & !63` to `pa+len`, `checked_add`).
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -202,9 +262,40 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-hal-aarch64` | `virtio_net_submit_tx` | `int virtio_net_submit_tx(int slot, uint64_t hdr_pa, uint64_t data_pa, uint32_t data_len, uint32_t *req_id)` | `virtio_net.c` |
 | `house-hal-aarch64` | `virtio_net_poll_used` | `int virtio_net_poll_used(int slot, int qidx, uint32_t *out_id, uint32_t *out_len)` | `virtio_net.c` |
 
-## house-libc (`tinylibc/*` + `mm/vm.c`)
+### `c_start` / `exception` — `house-boot` (`global_asm!` + `c_start.rs`)
 
-### `sys` — `tinylibc/sys.c`
+`_start`, `secondary_entry`, `vectors`, `house_enter_el0`,
+`svc_exit_trampoline`, and `__boot_dtb` are emitted by `global_asm!`
+(`entry.rs`, `exception.rs`), not by `#[no_mangle]` functions — they resolve
+at `ld -T build/aarch64.ld` exactly like the old `start.S` labels.
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-boot` | `c_start` | `void c_start(void)` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `c_start_secondary` | `void c_start_secondary(uint64_t core_id)` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `c_handle_sync` | `uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *gpr, void *fpi)` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `c_handle_irq` | `void c_handle_irq(uint64_t *gpr, void *fpi)` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `fatal_exception` | `void fatal_exception(void)` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `house_smp_n` | `volatile int house_smp_n` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `house_smp_online_mask` | `volatile uint32_t house_smp_online_mask` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `vectors` | `vectors` (VBAR_EL1) | `start.S` → `exception.rs` `global_asm!` |
+| `house-boot` | `_start` | `ENTRY _start` | `start.S` + `aarch64.ld` → `entry.rs` `global_asm!` |
+| `house-boot` | `secondary_entry` | `secondary_entry` (4K-aligned) | `start.S` → `entry.rs` `global_asm!` |
+| `house-boot` | `house_enter_el0` | `void house_enter_el0(uint64_t entry, uint64_t sp, void *pdir, uint64_t asid)` | `start.S` → `exception.rs` `global_asm!` |
+| `house-boot` | `svc_exit_trampoline` | `void svc_exit_trampoline(void)` | `start.S` → `exception.rs` `global_asm!` |
+| `house-boot` | `__boot_dtb` | `uint64_t __boot_dtb` | `start.S` → `entry.rs` `global_asm!` |
+| `house-boot` | `__rela_start` / `__rela_end` | `__rela_start`, `__rela_end` | `aarch64.ld` |
+| `house-boot` | `__bss_start` / `__bss_end` | `__bss_start`, `__bss_end` | `aarch64.ld` |
+| `house-boot` | `__early_stacks_*` / `__heap_base` / `__ram_base` | linker symbols | `aarch64.ld` |
+| `house-boot` | `__init_array_start` / `__fini_array_start` | init/fini bounds | `aarch64.ld` |
+
+## house-libc (`tinylibc/*` port — complete)
+
+Single owner of `#[panic_handler]` (`panic.rs`) and `__stack_chk_guard` /
+`__stack_chk_fail` (SOTA Rust 03). `house_rts_tick` is the timer ticker seam
+called from the HAL rearm path; `house_uptime_ns` backs timerfd pacing.
+
+### `sys` — `tinylibc/sys.c` → `sys/mod.rs` + `sys/time.rs` + `sys/errno.rs`
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -244,7 +335,8 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-libc` | `sigaction` | `int sigaction(int sig, const struct sigaction *act, struct sigaction *old)` | `tinylibc/sys.c` |
 | `house-libc` | `sigprocmask` | `int sigprocmask(int how, const sigset_t *set, sigset_t *old)` | `tinylibc/sys.c` |
 | `house-libc` | `raise` / `kill` | `int raise(int sig)` / `int kill(pid_t pid, int sig)` | `tinylibc/sys.c` |
-| `house-libc` | `house_rts_tick` | `void house_rts_tick(void)` | `tinylibc/sys.c` |
+| `house-libc` | `house_rts_tick` | `void house_rts_tick(void)` | `tinylibc/sys.c` → `sys/mod.rs` (ticker seam) |
+| `house-libc` | `house_uptime_ns` | `uint64_t house_uptime_ns(void)` | `tinylibc/sys.c` → `sys/time.rs` (timerfd pacing) |
 | `house-libc` | `setitimer` / `getitimer` | `int setitimer(int which, const struct itimerval *nv, struct itimerval *ov)` | `tinylibc/sys.c` |
 | `house-libc` | `timer_create` / `timer_settime` / `timer_gettime` / `timer_getoverrun` / `timer_delete` | POSIX timers | `tinylibc/sys.c` |
 | `house-libc` | `timerfd_create` / `timerfd_settime` / `timerfd_gettime` | `int timerfd_create(int clockid, int flags)` etc. | `tinylibc/sys.c` |
@@ -279,7 +371,7 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-libc` | `nanosleep` / `poll` / `select` / `pause` | `int nanosleep(...)` etc. | `threads.c` |
 | `house-libc` | `house_spin_*` | `house_spin_init/lock/trylock/unlock` (inline in `spinlock.h`) | `spinlock.h` |
 
-### `alloc` — `tinylibc/alloc.c` + `mm/vm.c`
+### `alloc` — `tinylibc/alloc.c` + `mm/vm.c` (POSIX `mmap` family)
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -293,7 +385,7 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-libc` | `munmap` | `int munmap(void *a, size_t len)` | `mm/vm.c` |
 | `house-libc` | `mprotect` | `int mprotect(void *a, size_t len, int prot)` | `mm/vm.c` |
 
-### `mem` — `tinylibc/mem.c`
+### `mem` — `tinylibc/mem.c` → `mem.rs`
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -304,17 +396,69 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 | `house-libc` | `memchr` | `void *memchr(const void *s, int c, size_t n)` | `tinylibc/mem.c` |
 | `house-libc` | `strlen` | `size_t strlen(const char *s)` | `tinylibc/mem.c` |
 | `house-libc` | `strnlen` | `size_t strnlen(const char *s, size_t maxlen)` | `tinylibc/mem.c` |
-| `house-libc` | `strcmp` | `int strcmp(const char *a, const char *b)` | `tinylibc/mem.c` |
-| `house-libc` | `strchr` | `char *strchr(const char *s, int c)` | `tinylibc/mem.c` |
-| `house-libc` | `strncpy` | `char *strncpy(char *dst, const char *src, size_t n)` | `tinylibc/mem.c` |
+| `house-libc` | `strcmp` / `strncmp` | `int strcmp(const char *a, const char *b)` etc. | `tinylibc/mem.c` |
+| `house-libc` | `strcpy` / `strncpy` / `strcat` | `char *strcpy(char *dst, const char *src)` etc. | `tinylibc/mem.c` |
+| `house-libc` | `strchr` / `strrchr` | `char *strchr(const char *s, int c)` etc. | `tinylibc/mem.c` |
+| `house-libc` | `strcasecmp` | `int strcasecmp(const char *a, const char *b)` | `tinylibc/mem.c` |
 
-Remaining `tinylibc` modules (`stdio.c`, `getopt.c`, `compat.c`, `mathmin.c`, `c_print.c`) export `printf`-like helpers, `vsnprintf`, and `getopt` — deferred to Phase 4 `house-libc: stdio` port; their symbols will be added to this doc when ported.
+### `stdio` — `tinylibc/stdio.c` → `stdio.rs` (ported)
+
+`stdin`/`stdout`/`stderr` plus the `printf` family; formatting is minimal
+(freestanding) — full `vfprintf` formatting stays out of scope.
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-libc` | `stdin` / `stdout` / `stderr` | `FILE *stdin` etc. | `tinylibc/stdio.c` |
+| `house-libc` | `printf` / `vprintf` | `int printf(const char *fmt, ...)` | `tinylibc/stdio.c` |
+| `house-libc` | `fprintf` / `vfprintf` | `int fprintf(FILE *f, const char *fmt, ...)` | `tinylibc/stdio.c` |
+| `house-libc` | `sprintf` / `snprintf` / `vsnprintf` | `int snprintf(char *s, size_t n, const char *fmt, ...)` etc. | `tinylibc/stdio.c` |
+| `house-libc` | `puts` / `fputs` / `putchar` / `fputc` | `int puts(const char *s)` etc. | `tinylibc/stdio.c` |
+| `house-libc` | `fwrite` / `fflush` | `size_t fwrite(const void *p, size_t s, size_t n, FILE *f)` etc. | `tinylibc/stdio.c` |
+
+### `getopt` — `tinylibc/getopt.c` → `getopt.rs` (ported)
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-libc` | `optind` / `opterr` / `optopt` / `optarg` | `int optind` etc. `char *optarg` | `tinylibc/getopt.c` |
+| `house-libc` | `getopt` / `getopt_long` / `getopt_long_only` | `int getopt(int argc, char **argv, const char *opts)` etc. | `tinylibc/getopt.c` |
+
+### `compat` — `tinylibc/compat.c` → `compat.rs` (ported)
+
+Host-compat shims the RTS link needs: `stat64`/`fstat64`/`lstat64`,
+`dl*` stubs, `__*_chk` fortify stubs, file/term/process/locale/iconv/regex
+stubs. Representative (see `compat.rs` for the full list):
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-libc` | `stat64` / `fstat64` / `lstat` / `lstat64` | `int stat64(const char *p, struct stat64 *st)` etc. | `tinylibc/compat.c` |
+| `house-libc` | `dlopen` / `dlsym` / `dlclose` / `dlerror` / `dlinfo` / `dl_iterate_phdr` | `void *dlopen(const char *f, int mode)` etc. | `tinylibc/compat.c` |
+| `house-libc` | `__fprintf_chk` / `__printf_chk` / `__memcpy_chk` / `__memmove_chk` / `__memset_chk` / `__xpg_strerror_r` / `__isoc99_sscanf` / `__getauxval` / `__assert_fail` / `__ctype_b_loc` | fortify/host stubs | `tinylibc/compat.c` |
+| `house-libc` | `fopen` / `fclose` / `fread` / `fgets` / `feof` / `fseek` / `ftell` / `getc` / `getline` | `FILE *fopen(const char *p, const char *m)` etc. | `tinylibc/compat.c` |
+| `house-libc` | `setmntent` / `endmntent` / `hasmntopt` / `getmntent_r` | mntent stubs | `tinylibc/compat.c` |
+| `house-libc` | `access` / `chmod` / `creat` / `link` / `mkdir` / `mknod` / `mkfifo` / `mkstemp` / `memfd_create` / `umask` / `utime` / `ftruncate` / `ftruncate64` / `qsort` / `statfs` | POSIX stubs | `tinylibc/compat.c` |
+| `house-libc` | `getrlimit` / `getrusage` / `clock_getcpuclockid` / `time` / `ctime_r` / `getauxval` / `getppid` / `fork` / `waitpid` / `atexit` / `syscall` / `madvise` | process/time stubs | `tinylibc/compat.c` |
+| `house-libc` | `tcgetattr` / `tcsetattr` / `dirname` / `stpcpy` / `strtoull` | misc stubs | `tinylibc/compat.c` |
+| `house-libc` | `regcomp` / `regexec` / `regfree` | regex stubs | `tinylibc/compat.c` |
+| `house-libc` | `newlocale` / `freelocale` / `uselocale` / `setlocale` / `nl_langinfo` / `iconv_open` / `iconv` / `iconv_close` | locale/iconv stubs | `tinylibc/compat.c` |
+
+### `mathmin` — `tinylibc/mathmin.c` → `mathmin.rs` (ported)
+
+Freestanding `libm` subset (`ldexp`, `log`/`log2`, `exp`, `pow`, `sin`,
+`cos`, `tan`, `sqrt`, `fabs`, `floor`, `ceil`, `trunc`, `round`, `strtod`,
+`asinh`/`asinhf`, `acosh`/`acoshf`, `atanh`/`atanhf`, `cbrt`, `hypot`,
+`fmax`, `fmin`, `fmod`).
+
+### `c_print` — `tinylibc/c_print.c` → `c_print.rs` (ported)
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-libc` | `c_print` | `void c_print(const char *s)` | `tinylibc/c_print.c` |
 
 ## Globals resolved by `aarch64.ld`
 
-These are linker-defined symbols the C code references as `extern char`/`uint64_t`.
-Rust must not define them; they remain in `aarch64.ld`. They are listed here
-because `nm` shows them as `U` until `ld -T build/aarch64.ld` links.
+These are linker-defined symbols the HAL references as `extern`; Rust must not
+define them — they remain in `aarch64.ld`. They are listed here because `nm`
+shows them as `U` until `ld -T build/aarch64.ld` links.
 
 `__heap_base` (`0x42000000`), `__ram_base` (`0x40000000`), `__kernel_virt_base`,
 `__bss_start`/`__bss_end`, `__rela_start`/`__rela_end`, `__init_array_start`/`__fini_array_start`,
@@ -323,25 +467,28 @@ because `nm` shows them as `U` until `ld -T build/aarch64.ld` links.
 ## Audit notes
 
 ```sh
-# C-defined symbols (current pure-C build):
-nm platform/aarch64/build/*.o 2>/dev/null | grep " T " | awk '{print $3}' | sort
-# Documented symbols check:
-grep -E '^\| house_|^\| uart_|^\| buddy_|^\| psci_|^\| virtio_|^\| fdt_|^\| c_start|^\| vectors|^\| _start' rust/c-abi.md | awk -F'|' '{print $3}' | tr -d ' ' | sort
-# After Rust link (Phase 2), no U should remain:
+# Documented symbols check (Symbol column):
+grep -E '^\| (house-|uart_|buddy_|psci_|virtio_|fdt_|c_start|vectors|_start|secondary_entry|house_enter_el0|svc_exit_trampoline|__boot_dtb|malloc|free|calloc|realloc|mmap|munmap|mprotect|memcpy|printf|getopt|c_print|optind|stdin|pthread_|sched_|clock_|timer|epoll_|eventfd|pipe|nanosleep|poll|select|read|write|open|close|stat|sysconf|exit|abort|strtol|socket)' rust/c-abi.md | awk -F'|' '{print $3}' | tr -d ' ' | sort -u | head -60
+# Rust export audit (post-port: HAL + boot + libc):
+grep -rn "#\[no_mangle\]" rust/crates --include="*.rs" | wc -l   # ~400 (full libc port)
+grep -rn "pub unsafe extern \"C\" fn" rust/crates/house-hal-aarch64/src rust/crates/house-boot/src --include="*.rs" | wc -l
+# global_asm! labels (not no_mangle):
+grep -n "\.global" rust/crates/house-boot/src/entry.rs rust/crates/house-boot/src/exception.rs
+# After link, no unexpected U should remain (RTS/glibc names excluded):
 # nm platform/aarch64/build/house.elf | grep " U " | grep -v "HsFFI\|libHS" || echo ok
-# Rust shims (Phase 1 only):
-nm rust/target/aarch64-unknown-none/debug/libhouse_libc.a | grep -E "__stack_chk|panic"
+# Single-owner gates (ci-tinylibc-parity.sh):
+grep -rn "panic_handler" rust/crates --include="*.rs"   # exactly 1 (house-libc panic.rs)
 ```
 
 `HsFFI.h` / `ghc --print-libdir` RTS archives are unchanged and linked via
 `--start-group $(PRIM_A) ... $(RTS_A) $(FFI_A)` — they are not part of this map.
 
-## Phase 5 note
+## `house-hal` trait note
 
 `house-hal` trait groups existing `#[no_mangle]` symbols — no new names.
 `house-hal-aarch64` `impl Hal* for AArch64Hal` are `#[inline(always)]` adapters
-to the free functions above (no vtable). Verify `riscv64` feature stub without
-breaking `aarch64` gate:
+to the free functions above (no vtable). Verify the `riscv64` feature stub without
+breaking the `aarch64` gate:
 
 ```sh
 cargo build -p house-hal --no-default-features --features riscv64
@@ -350,7 +497,8 @@ cargo metadata --manifest-path rust/Cargo.toml | jq '.packages[] | select(.name=
 
 ## Rejected alternative
 
-`cbindgen`/`bindgen` from `platform/aarch64/*.h` was rejected: freestanding
-headers are not host-parseable and `host glibc stat` layouts differ from
-tinylibc `stat`. Hand-written `#[repr(C)]` truth with `nm` gate is the
-reviewable contract (SOTA Rust 01 minimal API).
+`cbindgen`/`bindgen` from `platform/aarch64/*.h` remains rejected: freestanding
+headers are not host-parseable and host `glibc` `stat` layouts differ from
+tinylibc `stat` (hence the `stat64`/`fstat64` shims above). Hand-written
+`#[repr(C)]` truth with the `nm` gate is the reviewable contract (SOTA Rust 01
+minimal API).

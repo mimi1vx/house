@@ -58,11 +58,15 @@ pub unsafe extern "C" fn virtio_transport_dc_flush(pa: u64, len: usize) {
     if len == 0 {
         return;
     }
-    // SAFETY: pa is Normal WB, length-checked.
+    // SAFETY: pa is Normal WB; pa+len is checked_add-guarded (a wrapping
+    // length from untrusted input must flush nothing, not everything).
+    let end = match pa.checked_add(len as u64) {
+        Some(e) => e,
+        None => return,
+    };
     unsafe {
         core::arch::asm!("dmb ish", options(nostack, preserves_flags));
         let start = pa & !63;
-        let end = pa + len as u64;
         let mut p = start;
         while p < end {
             core::arch::asm!("dc cvac, {0}", in(reg) p, options(nostack, preserves_flags));

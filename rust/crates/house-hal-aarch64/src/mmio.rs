@@ -159,8 +159,12 @@ pub unsafe fn dc_ivac_va(pa: u64) {
 /// Range must be Normal WB, not overlapping MMIO/Device.
 pub unsafe fn dc_cvac_range(pa: u64, len: usize) {
     // SAFETY: caller guarantees range valid; loop handles unaligned start.
+    // pa+len is checked_add-guarded: a wrapping length must flush nothing.
+    let end = match pa.checked_add(len as u64) {
+        Some(e) => e,
+        None => return,
+    };
     unsafe {
-        let end = pa + len as u64;
         let mut cur = pa & !(DC_LINE - 1);
         while cur < end {
             asm!("dc cvac, {0}", in(reg) cur, options(nostack, preserves_flags));
@@ -176,8 +180,12 @@ pub unsafe fn dc_cvac_range(pa: u64, len: usize) {
 /// Same as `dc_cvac_range`; caller must `dmb sy` before reading buffer.
 pub unsafe fn dc_ivac_range(pa: u64, len: usize) {
     // SAFETY: caller guarantees range valid.
+    // pa+len is checked_add-guarded: a wrapping length must invalidate nothing.
+    let end = match pa.checked_add(len as u64) {
+        Some(e) => e,
+        None => return,
+    };
     unsafe {
-        let end = pa + len as u64;
         let mut cur = pa & !(DC_LINE - 1);
         while cur < end {
             asm!("dc ivac, {0}", in(reg) cur, options(nostack, preserves_flags));
