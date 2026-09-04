@@ -43,7 +43,7 @@ type VAddr = Word64
 
 minVAddr, maxVAddr :: VAddr
 minVAddr = 0x01000000
-maxVAddr = 0xFFFFFFFF -- 4GB window (0x01000000–0xFFFFFFFF, span 0xFF000000), T0SZ=16 4K; single L0 (512GB) + L1 0..3 (4×1GB) demand-allocated
+maxVAddr = 0x1000000000 -- 64GB demand window (0x01000000–0x1000000000), matches mm/vm.rs HOUSE_USER_VA_MAX; single L0 + demand-allocated L1/L2/L3
 
 -- abstract type PageMap  -- Show,Eq,Ord(!)
 

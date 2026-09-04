@@ -22,7 +22,7 @@ rust/
     house-libc/           # tinylibc port (staticlib+rlib, single #[panic_handler], __stack_chk_guard)
 ```
 
-Link: `platform/aarch64/aarch64.ld` → `build/aarch64.ld` via `cc -E -P -DHOUSE_SMP_N`.
+Link: `platform/aarch64/aarch64.ld` → `build/aarch64.ld` via `cc -E -P` (no `-DHOUSE_*`).
 Globals `__heap_base 0x42000000` / `__early_stacks_*` / `__rela_start` remain `ld`-defined.
 
 Toolchain: `rust-toolchain.toml` `channel="stable"` + `aarch64-unknown-none` +

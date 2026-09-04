@@ -1,7 +1,16 @@
 #![allow(unused_assignments)]
 //! Fault-trapped RAM probe — `house_probe.c` transliteration.
+//!
+//! Open-ended: double from 128M until the first fault, bounded only by TCR
+//! PA capacity (256G contiguous from RAM_BASE). Read-only LDR as before;
+//! never a store-test. The DTB path normally skips this entirely — it runs
+//! only on DTB-missing boots. Only the flat `.bin` Linux-path boot (x0=DTB)
+//! is supported; without a DTB, hvf reads past RAM can succeed and the probe
+//! may over-claim by design.
 
 const HOUSE_RAM_BASE: u64 = 0x40000000;
+/// TCR/L1 capacity bound matching `detect.rs`/`mmu.rs` (256 1G blocks).
+const PROBE_MAX: u64 = 256 << 30;
 
 #[no_mangle]
 pub static mut house_in_probe: i32 = 0;
@@ -16,10 +25,7 @@ unsafe fn probe_addr(addr: u64) -> bool {
     unsafe {
         house_in_probe = 1;
         core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
-        // Use raw pointer for recovery address: label after LDR.
         let after: u64;
-        // We need to capture address of label `2f` via `adr`.
-        // Use explicit assembly with local label.
         let mut tmp: u64 = 0;
         core::arch::asm!(
             "adr {after}, 2f",
@@ -47,29 +53,28 @@ unsafe fn probe_addr(addr: u64) -> bool {
 
 #[no_mangle]
 pub unsafe extern "C" fn house_ram_probe() -> u64 {
-    // No HOUSE_RAM_LIMIT shortcut: a limit larger than physical RAM would be
-    // misreported, and on hvf reads beyond RAM can succeed (false-positive).
-    // detect.rs applies the limit as min(detected, limit) instead. The DTB
-    // (via the `-kernel` flat binary Linux boot path) normally resolves
-    // first, so this fault walk only runs on boards without a DTB.
     // SAFETY: called early, single core, fault handler watches house_in_probe.
     unsafe {
-        const SIZES: [u64; 8] = [
-            16 << 30,
-            8 << 30,
-            4 << 30,
-            2 << 30,
-            1 << 30,
-            512 << 20,
-            256 << 20,
-            128 << 20,
-        ];
-        for sz in SIZES {
-            let addr = HOUSE_RAM_BASE + sz - 8;
+        let mut size: u64 = 128 << 20;
+        let mut last_ok: u64 = 0;
+        while size <= PROBE_MAX {
+            let Some(addr) = HOUSE_RAM_BASE
+                .checked_add(size)
+                .and_then(|e| e.checked_sub(8))
+            else {
+                break;
+            };
             if probe_addr(addr) {
-                return sz;
+                last_ok = size;
+                let Some(next) = size.checked_mul(2) else {
+                    break;
+                };
+                // Progress guarantee: checked_mul on nonzero never returns same.
+                size = next;
+            } else {
+                break;
             }
         }
-        0
+        last_ok
     }
 }

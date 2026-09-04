@@ -171,9 +171,32 @@ pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
 
 #[no_mangle]
 pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
+    extern "C" {
+        static mut house_smp_online_mask: u32;
+        fn house_gic_send_sgi_to_core(sgi: u32, core: u32);
+    }
     unsafe {
         let va = vaddr >> 12;
         core::arch::asm!("dsb ishst; tlbi vae1is, {0}; dsb ish; isb", in(reg) va, options(nostack, preserves_flags));
+        // Broadcast SGI 1 to online cores except self; offline cores are
+        // skipped so a down core never takes a shootdown IPI.
+        let mut me: u64;
+        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags));
+        let me = (me & 0xFF) as u32;
+        let mask = core::ptr::read_volatile(&raw const house_smp_online_mask);
+        for core in 0..32u32 {
+            if core == me {
+                continue;
+            }
+            let bit = match 1u32.checked_shl(core) {
+                Some(b) => b,
+                None => continue,
+            };
+            if mask & bit != 0 {
+                house_gic_send_sgi_to_core(1, core);
+            }
+        }
+        core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
     }
 }
 

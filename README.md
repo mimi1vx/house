@@ -14,7 +14,7 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 
 * Build container `house-port:latest` (Debian 13, Rust stable `aarch64-unknown-none` + GHC 9.14.1 aarch64 via ghcup). Every Haskell/Rust/C compilation runs `container run --platform linux/arm64 ...` (see `Containerfile`); single sanctioned `CONTAINER_DEFAULT_PLATFORM=linux/arm64` on the `container build` line only (`Makefile`), never exported globally — each `run` pins `--platform linux/arm64` and `container image inspect` asserts `arm64` only. The HAL and boot are Rust (`rust/crates/house-boot` `global_asm!` + `rust/crates/house-hal-aarch64` + `rust/crates/house-libc`); see `rust/ARCHITECTURE.md`. `make rust-check` = `cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings` + `cargo fmt --check`.
 * QEMU on the macOS host (`brew install qemu expect`, HVF acceleration). The container is build-only; QEMU never runs inside it.
- * Guest RAM is auto-detected (DTB `reg` from the `x0` QEMU passes on its Linux boot path → fault probe `128M→16G` → `512M` fallback; same binary at `256M`/`512M`/`1G`/`2G`/`4G`/`8G`/`16G` without rebuild). QEMU only takes that path for non-ELF images, so `-kernel` boots the `objcopy -O binary` flat image (`build/*.bin`; `.elf` stays for `readelf`/`gdb`) — ELF `-kernel` boots get `x0=0` and no DTB, and the fault probe false-positives on hvf (reads beyond RAM succeed, later stores abort QEMU with `hvf_handle_exception`). `SPIKE_MEM ?= 4G` (now `HOUSE_RAM_LIMIT`) only drives QEMU `-m` and caps `HOUSE_RAM_LIMIT_BYTES` via `min(detected, limit)`. `SMP_N ?= 2` (now `HOUSE_SMP_LIMIT`) compiles `HOUSE_SMP_N`/`HOUSE_SMP_LIMIT` and per-core 64 KiB stacks (`house_boot_stack_top - core*64K`, `__early_stacks_base + SMP_N*64K`); `SMP_N` scales to `HOUSE_MAX_SMP` 16 (tested to 8). `TCR EPD1=0` split `TTBR1=kernel` / `TTBR0=user` with 8-bit ASID, `TLBI VAE1IS` + SGI 1 `VMALLE1IS` shootdown.
+ * Guest RAM is auto-detected (DTB `reg` from the `x0` QEMU passes on its Linux boot path → open-ended fault probe doubling from 128M → `512M` fallback; one binary boots at `512M`/`1G`/`2G`/`4G`/`6G`/`8G`/`16G` without rebuild, hvf+tcg). QEMU only takes that path for non-ELF images, so `-kernel` boots the `objcopy -O binary` flat image (`build/*.bin`; `.elf` stays for `readelf`/`gdb`) — ELF `-kernel` boots get `x0=0` and no DTB, and the fault probe false-positives on hvf (reads beyond RAM succeed, later stores abort QEMU with `hvf_handle_exception`). `SPIKE_MEM ?= 4G` only drives QEMU `-m`. `SMP_N ?= 2` only drives QEMU `-smp` and expect args; core count is detected at runtime (DTB → PSCI/GICR max) with per-core 64 KiB stacks (`house_boot_stack_top - core*64K`, `__early_stacks` 32-entry HW reservation, HW bound 32, tested to 8). `TCR EPD1=0` split `TTBR1=kernel` / `TTBR0=user` with 8-bit ASID, `TLBI VAE1IS` + SGI 1 `VMALLE1IS` shootdown (online-only broadcast).
 
 ### What boots
 
@@ -27,7 +27,7 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 
 ### Boot
 
-`rust/crates/house-boot/src/entry.rs` (`global_asm!`) preserves the DTB pointer from `x0`, handles the EL2→EL1 drop (EL3 where present), enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocations (primary only), clears BSS (primary only), installs VBAR, calls `house_mmu_early` (primary, identity-maps RAM up to `16G` for probe) or `house_mmu_enable_secondary` (secondaries, shared tables), sets per-core `sp = house_boot_stack_top - core*64K` (early `__early_stacks_top`, rebased after `house_detect_early`), then enters `c_start` vs `c_start_secondary` (secondaries via `secondary_entry` 4 KiB-aligned PSCI entry `psci_cpu_on` `0xC4000003` `hvc` with `smc` fallback). `c_start` runs `house_detect_early` (DTB `reg` → fault probe → fallback, capped by `HOUSE_RAM_LIMIT_BYTES`) then `house_mmu_update_alias()` rebuilds RTS alias `0x4200000000+`.
+`rust/crates/house-boot/src/entry.rs` (`global_asm!`) preserves the DTB pointer from `x0`, handles the EL2→EL1 drop (EL3 where present), enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocations (primary only), clears BSS (primary only), installs VBAR, calls `house_mmu_early` (primary, identity-maps RAM per TCR/L1 capacity) or `house_mmu_enable_secondary` (secondaries, shared tables), sets per-core `sp = house_boot_stack_top - core*64K` (early `__early_stacks_top`, rebased after `house_detect_early`), then enters `c_start` vs `c_start_secondary` (secondaries via `secondary_entry` 4 KiB-aligned PSCI entry `psci_cpu_on` `0xC4000003` `hvc` with `smc` fallback). `c_start` runs `house_detect_early` (DTB `reg` → fault probe → fallback, `stack_top = BASE+ram-2M` via checked math) then `house_mmu_update_alias()` rebuilds RTS alias `0x4200000000+`.
 
 ### GICv3
 
@@ -35,7 +35,7 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 
 ### Linking
 
-`platform/aarch64/Makefile` locates `HsFFI.h` and `libHS{rts,base,ghc-prim,ghc-bignum,ghc-internal,containers,pretty,mtl,array,transformers,deepseq,Cffi}.a` via `ghc --print-libdir` / `ghc-pkg field`; `rts` is threaded. `rust/crates/house-boot` (`libhouse_boot.rlib`), `house-hal-aarch64` (`libhouse_hal_aarch64.rlib`), `house-libc` (`libhouse_libc.a`) plus `libcore`/`libcompiler_builtins` and Haskell archives plus `libgmp.a` plus `libgcc` are linked `--start-group`/`--end-group`. `readelf -h` gate checks `ENTRY(_start)` / `Machine: AArch64`. `build/aarch64.ld` is generated via `cc -E -P -DHOUSE_SMP_N`.
+`platform/aarch64/Makefile` locates `HsFFI.h` and `libHS{rts,base,ghc-prim,ghc-bignum,ghc-internal,containers,pretty,mtl,array,transformers,deepseq,Cffi}.a` via `ghc --print-libdir` / `ghc-pkg field`; `rts` is threaded. `rust/crates/house-boot` (`libhouse_boot.rlib`), `house-hal-aarch64` (`libhouse_hal_aarch64.rlib`), `house-libc` (`libhouse_libc.a`) plus `libcore`/`libcompiler_builtins` and Haskell archives plus `libgmp.a` plus `libgcc` are linked `--start-group`/`--end-group`. `readelf -h` gate checks `ENTRY(_start)` / `Machine: AArch64`. `build/aarch64.ld` is generated via `cc -E -P` (no `-DHOUSE_*`; `HOUSE_MAX_SMP=32` HW reservation lives in `aarch64.ld`).
 
 ## Build & run (host)
 
@@ -61,8 +61,9 @@ make house-shell-check  # -> prompt, help->Usage, lambda, wastemem 10->55, hvf+t
 make house-posix-check  # -> help descriptions (-- ), echo, uname, uptime, shutdown -r (reboot) / -h (halt), hvf+tcg
 make house-fs-check     # -> ramfs: write/cat/ls/mkdir/rm + echo > /path over H.FileSystem (2 MiB pool), hvf+tcg
 make smp-check          # -> N cores online + caps N + parfib 20=6765 + mvar ok, hvf+tcg (default N=2; SMP_N=4 for >2 gate)
-make smp-check-8        # -> smp-check at SMP_N=8/SPIKE_MEM=4G (scaling gate, ceiling 16)
-make vm-check           # -> demand 100 pages + mprotect RO + munmap + isolate + asid + smp shootdown (512M/2+4G/4 hvf+tcg vm-ok) + mem buddy free/total at both geometries
+make smp-check-8        # -> smp-check at SMP_N=8/SPIKE_MEM=4G (scaling gate, ceiling 32)
+make smp-hotplug-check  # -> smp down 1/up 1 cycle at N=2, caps mirror, parfib each step (hvf+tcg)
+make vm-check           # -> demand 100 pages + mprotect RO + munmap + isolate + asid + smp shootdown, one build booted at 512M/2+4G/4+6G/4+8G/4+16G/4 + mem buddy free/total at each geometry
 make house-ipc-check house-driver-check
 make house-virtio-transport-check house-virtio-blk-check house-virtio-net-check
 make house-userspace-check  # -> run /bin/hello -> Hello from EL0, TTBR0/ASID/pager (tcg)

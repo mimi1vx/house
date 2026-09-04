@@ -38,7 +38,7 @@ const HOUSE_THR_RUNNABLE: i32 = 1;
 const HOUSE_THR_RUNNING: i32 = 2;
 const HOUSE_THR_BLOCKED: i32 = 3;
 const HOUSE_MAX_THREADS: usize = 64;
-const HOUSE_MAX_SMP: usize = 16;
+const HOUSE_MAX_SMP: usize = 32;
 const HOUSE_THREAD_STACK_BYTES: usize = 512 * 1024;
 
 static mut THREADS: [HouseThread; 64] = [HouseThread {
@@ -64,18 +64,18 @@ static mut THREADS: [HouseThread; 64] = [HouseThread {
 }; 64];
 
 #[no_mangle]
-pub static mut house_current_thr: [*mut HouseThread; 16] = [core::ptr::null_mut(); 16];
+pub static mut house_current_thr: [*mut HouseThread; 32] = [core::ptr::null_mut(); 32];
 
-static mut RUN_HEAD: [*mut HouseThread; 16] = [core::ptr::null_mut(); 16];
-static mut RUN_TAIL: [*mut HouseThread; 16] = [core::ptr::null_mut(); 16];
+static mut RUN_HEAD: [*mut HouseThread; 32] = [core::ptr::null_mut(); 32];
+static mut RUN_TAIL: [*mut HouseThread; 32] = [core::ptr::null_mut(); 32];
 static mut NEXT_TID: i32 = 1;
 
 #[no_mangle]
 pub static mut house_thr_mode: i32 = 1;
 #[no_mangle]
-pub static mut house_ipi_pending: [i32; 16] = [0; 16];
+pub static mut house_ipi_pending: [i32; 32] = [0; 32];
 #[no_mangle]
-pub static mut house_sched_deferred: [i32; 16] = [0; 16];
+pub static mut house_sched_deferred: [i32; 32] = [0; 32];
 #[no_mangle]
 pub static mut sched_lock: u32 = 0;
 
@@ -105,14 +105,51 @@ unsafe fn alloc_thread() -> *mut HouseThread {
     for i in 0..HOUSE_MAX_THREADS {
         let thr = unsafe { &mut THREADS[i] };
         if thr.state == HOUSE_THR_UNUSED {
+            // Drop stale run-queue links to this slot: pthread_exit never
+            // unlinks self, so reuse must not inherit queue membership.
+            unsafe { dequeue_specific(thr as *mut HouseThread) };
             return thr as *mut HouseThread;
         }
     }
     core::ptr::null_mut()
 }
 
+// Remove every run-queue link to `thr` (slot reuse, idempotent).
+unsafe fn dequeue_specific(thr: *mut HouseThread) {
+    for c in 0..HOUSE_MAX_SMP {
+        let mut prev: *mut HouseThread = core::ptr::null_mut();
+        let mut cur = unsafe { RUN_HEAD[c] };
+        while !cur.is_null() {
+            let nxt = unsafe { (*cur).next };
+            if cur == thr {
+                if prev.is_null() {
+                    unsafe { RUN_HEAD[c] = nxt };
+                } else {
+                    unsafe { (*prev).next = nxt };
+                }
+                if unsafe { RUN_TAIL[c] } == cur {
+                    unsafe { RUN_TAIL[c] = prev };
+                }
+                unsafe { (*cur).next = core::ptr::null_mut() };
+            } else {
+                prev = cur;
+            }
+            cur = nxt;
+        }
+    }
+}
+
 unsafe fn enqueue_run_core(core: i32, thr: *mut HouseThread) {
     if core < 0 || core as usize >= HOUSE_MAX_SMP {
+        return;
+    }
+    if thr.is_null() {
+        return;
+    }
+    // Never queue twice: a duplicate entry corrupts run-queue accounting
+    // (observed: queued+RUNNING, current+RUNNABLE) and strands work behind
+    // a parked thread. The running thread requeues itself on yield.
+    if unsafe { queued_anywhere(thr) } {
         return;
     }
     let c = core as usize;
@@ -128,17 +165,40 @@ unsafe fn enqueue_run_core(core: i32, thr: *mut HouseThread) {
     }
 }
 
+#[inline]
+unsafe fn live_mask() -> u32 {
+    unsafe { core::ptr::read_volatile(&raw const house_smp_online_mask) }
+}
+
+#[inline]
+unsafe fn first_online(mask: u32) -> i32 {
+    if mask == 0 {
+        return 0;
+    }
+    mask.trailing_zeros() as i32
+}
+
 unsafe fn enqueue_run(thr: *mut HouseThread) {
     let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
     let smp = if smp <= 0 { 2 } else { smp };
     let aff = unsafe { (*thr).affinity };
-    let core = if aff != 0 {
+    let mut core = if aff != 0 {
         aff.trailing_zeros() as i32
     } else {
         let tid = unsafe { (*thr).tid };
         (tid % smp) as i32
     };
-    let core = if core >= smp { 0 } else { core };
+    if core >= smp {
+        core = 0;
+    }
+    // Follow the live mask: an offline target never runs its queue.
+    let mask = unsafe { live_mask() };
+    if mask != 0 {
+        let bit = 1u32.checked_shl(core as u32).unwrap_or(0);
+        if bit == 0 || mask & bit == 0 {
+            core = unsafe { first_online(mask) };
+        }
+    }
     unsafe { enqueue_run_core(core, thr) };
     let cur = unsafe { cpu_id() } as i32;
     if core != cur {
@@ -630,7 +690,7 @@ pub unsafe extern "C" fn pthread_create(
         (*t).next = core::ptr::null_mut();
         let smp = core::ptr::read_volatile(&raw const house_smp_n);
         let smp = if smp <= 0 { 2 } else { smp };
-        let target = if tid < 10 {
+        let mut target = if tid < 10 {
             0
         } else {
             let mut tgt = tid % smp;
@@ -642,7 +702,15 @@ pub unsafe extern "C" fn pthread_create(
             }
             tgt as i32
         };
-        (*t).affinity = 1u32 << target;
+        // New tasks inherit the live mask: never park on an offline core.
+        let mask = live_mask();
+        if mask != 0 {
+            let bit = 1u32.checked_shl(target as u32).unwrap_or(0);
+            if bit == 0 || mask & bit == 0 {
+                target = first_online(mask);
+            }
+        }
+        (*t).affinity = 1u32.checked_shl(target as u32).unwrap_or(1);
         // SAFETY: memset sigmask 0 like C memset(&t->sigmask,0,sizeof...)
         (*t).sigmask = [0; 2];
         let top = (stack as usize + HOUSE_THREAD_STACK_BYTES) & !15;
@@ -734,6 +802,8 @@ pub unsafe extern "C" fn pthread_join(t: u64, r: *mut *mut u8) -> i32 {
         if next.is_null() {
             unsafe { house_sched_lock_release() };
             unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
+            // the exiter may itself be queued behind us
+            unsafe { house_sched_yield() };
             continue;
         }
         unsafe { (*next).state = HOUSE_THR_RUNNING };
@@ -1160,9 +1230,13 @@ pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> i32 {
         let next = dequeue_run_core(core_id as i32);
         if next.is_null() {
             house_sched_lock_release();
-            // spin until signaled
+            // spin until signaled; run locally queued work (e.g. the
+            // signaler) on each wakeup so it cannot stall behind us.
             while (*cur).state == HOUSE_THR_BLOCKED {
                 core::arch::asm!("wfi", options(nostack, preserves_flags));
+                if (*cur).state == HOUSE_THR_BLOCKED {
+                    house_sched_yield();
+                }
             }
             house_sched_lock_acquire();
         } else {
@@ -1188,6 +1262,8 @@ pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> i32 {
             if n2.is_null() {
                 house_sched_lock_release();
                 core::arch::asm!("wfi", options(nostack, preserves_flags));
+                // who holds the mutex may itself be queued behind us
+                house_sched_yield();
                 house_sched_lock_acquire();
                 continue;
             }
@@ -1309,6 +1385,10 @@ pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *cons
                     break;
                 }
                 core::arch::asm!("wfi", options(nostack, preserves_flags));
+                // run locally queued work while waiting; it may signal us
+                if (*cur).state == HOUSE_THR_BLOCKED {
+                    house_sched_yield();
+                }
             }
             house_sched_lock_acquire();
         } else {
@@ -1335,6 +1415,8 @@ pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *cons
             if n2.is_null() {
                 house_sched_lock_release();
                 core::arch::asm!("wfi", options(nostack, preserves_flags));
+                // who holds the mutex may itself be queued behind us
+                house_sched_yield();
                 house_sched_lock_acquire();
                 continue;
             }
@@ -1392,16 +1474,9 @@ pub unsafe extern "C" fn pthread_attr_setaffinity_np(
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_attr_getaffinity_np(_a: *mut u8, _sz: usize, _m: *mut u8) -> i32 {
-    // SAFETY: matches C pthread_attr_getaffinity_np: all-SMP mask.
+    // SAFETY: reports the live online mask, not (1<<SMP_N)-1.
     if !_m.is_null() && _sz >= 8 {
-        let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
-        let m = if smp >= 64 {
-            !0u64
-        } else if smp <= 0 {
-            1u64
-        } else {
-            (1u64 << smp) - 1
-        };
+        let m = unsafe { live_mask() } as u64;
         unsafe { *(_m as *mut u64) = m };
         if _sz > 8 {
             unsafe { core::ptr::write_bytes(_m.add(8), 0, _sz - 8) };
@@ -1415,7 +1490,53 @@ pub unsafe extern "C" fn pthread_setaffinity_np(_t: u64, _sz: usize, _m: *const 
 }
 #[no_mangle]
 pub unsafe extern "C" fn pthread_getaffinity_np(_t: u64, _sz: usize, _m: *mut u8) -> i32 {
+    // SAFETY: live online mask like sched_getaffinity.
+    if !_m.is_null() && _sz >= 8 {
+        let m = unsafe { live_mask() } as u64;
+        unsafe { *(_m as *mut u64) = m };
+        if _sz > 8 {
+            unsafe { core::ptr::write_bytes(_m.add(8), 0, _sz - 8) };
+        }
+    }
     0
+}
+
+/// Migrate `core`'s run queue to the first online core (hotplug down path).
+///
+/// # Safety
+/// Call after the mask bit is cleared, with the target core OFF so its
+/// queue is quiescent; takes `sched_lock`.
+#[no_mangle]
+pub unsafe extern "C" fn house_threads_on_core_down(core: u32) {
+    if (core as usize) >= HOUSE_MAX_SMP || core == 0 {
+        return;
+    }
+    unsafe { house_sched_lock_acquire() };
+    let mask = unsafe { live_mask() };
+    let dst = unsafe { first_online(mask) };
+    let dst = if dst < 0 { 0 } else { dst };
+    unsafe {
+        let mut cur = RUN_HEAD[core as usize];
+        RUN_HEAD[core as usize] = core::ptr::null_mut();
+        RUN_TAIL[core as usize] = core::ptr::null_mut();
+        house_current_thr[core as usize] = core::ptr::null_mut();
+        while !cur.is_null() {
+            let nxt = (*cur).next;
+            (*cur).next = core::ptr::null_mut();
+            (*cur).state = HOUSE_THR_RUNNABLE;
+            let bit = 1u32.checked_shl(dst as u32).unwrap_or(1);
+            (*cur).affinity = bit;
+            if !RUN_TAIL[dst as usize].is_null() {
+                (*RUN_TAIL[dst as usize]).next = cur;
+            } else {
+                RUN_HEAD[dst as usize] = cur;
+            }
+            RUN_TAIL[dst as usize] = cur;
+            cur = nxt;
+        }
+        house_sched_lock_release();
+        house_sched_kick(dst);
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn sched_yield() -> i32 {
@@ -1425,8 +1546,7 @@ pub unsafe extern "C" fn sched_yield() -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn sched_getaffinity(_p: i32, _s: usize, _m: *mut u8) -> i32 {
     if !_m.is_null() && _s >= 8 {
-        let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
-        let m = if smp >= 64 { !0u64 } else { (1u64 << smp) - 1 };
+        let m = unsafe { live_mask() } as u64;
         unsafe { *(_m as *mut u64) = m };
         if _s > 8 {
             unsafe { core::ptr::write_bytes(_m.add(8), 0, _s - 8) };

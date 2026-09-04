@@ -25,6 +25,7 @@ pub mod mmio;
 pub mod mmu;
 pub mod probe;
 pub mod psci;
+pub mod smp;
 pub mod spinlock;
 pub mod svc;
 pub mod timer;
@@ -49,7 +50,7 @@ unsafe impl HalGic for AArch64Hal {
     }
     #[inline(always)]
     unsafe fn init_secondary(core: u32) {
-        // SAFETY: core < 16, GICR per-core valid.
+        // SAFETY: core < 32, GICR per-core valid.
         unsafe { crate::gic::house_gic_init_secondary(core) }
     }
     #[inline(always)]

@@ -1,0 +1,72 @@
+#!/usr/bin/expect -f
+# SMP hotplug down-leg for House/aarch64 on hvf.
+# hvf refuses PSCI re-CPU_ON after CPU_OFF (call returns 0, the core never
+# re-enters via secondary_entry), so up-after-down is tcg-only. This harness
+# verifies the hvf-supported prefix: boot at N=2, parfib, down 1 -> 1 core,
+# caps 1, parfib again.
+# Usage: expect scripts/qemu-smp-hotplug-down.exp <kernel.bin> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 60}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "smp\r"
+expect {
+    -re "smp: 2 cores online" { puts "\nPASS: smp 2 online" }
+    timeout { puts "\nFAIL: smp 2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before smp"; exit 1 }
+}
+expect -re "> " {}
+send "parfib 20\r"
+expect {
+    -re "6765" { puts "\nPASS: parfib before down" }
+    timeout { puts "\nFAIL: parfib timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before parfib"; exit 1 }
+}
+expect -re "> " {}
+send "smp down 1\r"
+expect {
+    -re "smp down ok" { puts "\nPASS: down ok" }
+    timeout { puts "\nFAIL: down timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before down"; exit 1 }
+}
+expect -re "> " {}
+send "smp\r"
+expect {
+    -re "smp: 1 cores online" { puts "\nPASS: smp 1 online" }
+    timeout { puts "\nFAIL: smp 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after down"; exit 1 }
+}
+expect -re "> " {}
+send "caps\r"
+expect {
+    -re "caps 1" { puts "\nPASS: caps 1" }
+    timeout { puts "\nFAIL: caps 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before caps 1"; exit 1 }
+}
+expect -re "> " {}
+send "parfib 20\r"
+expect {
+    -re "6765" { puts "\nPASS: parfib after down" }
+    timeout { puts "\nFAIL: parfib down timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof parfib down"; exit 1 }
+}
+puts "\nPASS: smp hotplug down-leg ok (hvf; up-after-down is tcg-only)"
+catch {exec kill -9 [exp_pid]}
+exit 0

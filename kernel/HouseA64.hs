@@ -21,6 +21,7 @@ import GHC.Conc
     getNumProcessors,
     par,
     pseq,
+    setNumCapabilities,
   )
 import qualified H.FileSystem as FS
 import H.Monad (runH)
@@ -48,6 +49,7 @@ import qualified Kernel.IPC.Grant as G
 import qualified Kernel.IPC.Nameservice as NS
 import Kernel.IPC.Types (Message (..))
 import qualified Kernel.LineEditor as LE
+import qualified Kernel.SMP as SMP
 import qualified Kernel.Userspace as U
 import qualified Kernel.Userspace.Loader as ULdr
 import System.Timeout (timeout)
@@ -63,6 +65,16 @@ foreign import ccall unsafe "psci_system_reset" c_reset :: IO ()
 foreign import ccall unsafe "&house_ram_bytes" c_ram_ref :: Ptr Word64
 
 foreign import ccall unsafe "&house_boot_stack_top" c_stack_top_ref :: Ptr Word64
+
+foreign import ccall unsafe "&house_ram_source" c_ram_source_ref :: Ptr (Ptr CChar)
+
+foreign import ccall unsafe "&house_smp" c_smp_ref :: Ptr CInt
+
+foreign import ccall unsafe "&__boot_dtb" c_dtb_ref :: Ptr Word64
+
+foreign import ccall unsafe "fdt_ram_bank_count" c_bank_count :: Ptr () -> IO CInt
+
+foreign import ccall unsafe "fdt_get_ram_bank" c_bank_get :: Ptr () -> CInt -> Ptr Word64 -> Ptr Word64 -> IO CInt
 
 foreign import ccall unsafe "house_mem_stats" c_mem_stats :: Ptr Word64 -> Ptr Word64 -> IO ()
 
@@ -100,6 +112,10 @@ foreign export ccall house_main :: IO ()
 
 house_main :: IO ()
 house_main = do
+  caps0 <- getNumCapabilities
+  procs0 <- getNumProcessors
+  mask0 <- SMP.onlineSet
+  withCString ("[house] rts caps=" ++ show caps0 ++ " procs=" ++ show procs0 ++ " online=" ++ show mask0 ++ "\n") c_uart_puts
   withCString "Welcome to the House shell! Enter help to see a list of commands.\n\n" c_uart_puts
   console <- runH PL011.launchConsoleDriver
   kbd <- runH PL011.launchPL011KeyboardDriver
@@ -144,8 +160,12 @@ house_main = do
       ["smp"] -> do
         caps <- getNumCapabilities
         procs <- getNumProcessors
-        let mask = (1 `shiftL` procs) - 1
-        withCString ("smp: " ++ show procs ++ " cores online caps=" ++ show caps ++ " procs=" ++ show procs ++ " timers=PPI27+30 ipi=SGI0 caches=WB onlineMask=0x" ++ showHex mask ++ "\n") c_uart_puts
+        on <- SMP.onlineSet
+        let n = length on
+            mask = sum [1 `shiftL` i | i <- on] :: Int
+        withCString ("smp: " ++ show n ++ " cores online caps=" ++ show caps ++ " procs=" ++ show procs ++ " timers=PPI27+30 ipi=SGI0 caches=WB onlineMask=0x" ++ showHex mask ++ "\n") c_uart_puts
+      ["smp", "up", nStr] -> handleSmpUp nStr
+      ["smp", "down", nStr] -> handleSmpDown nStr
       ["caps"] -> do caps <- getNumCapabilities; procs <- getNumProcessors; withCString ("caps " ++ show caps ++ " procs " ++ show procs ++ "\n") c_uart_puts
       ["parfib", nStr] -> case reads nStr of
         [(n, "")] -> do v <- parFibIO n; withCString ("parfib " ++ show n ++ " = " ++ show v ++ "\n") c_uart_puts
@@ -216,6 +236,27 @@ house_main = do
           case r of
             Left e -> withCString (showFsError e ++ "\n") c_uart_puts
             Right () -> return ()
+    handleSmpUp nStr = case reads nStr of
+      [(n, "")] -> do
+        r <- SMP.up n
+        case r of
+          Left e -> withCString ("smp up failed: " ++ e ++ "\n") c_uart_puts
+          Right () -> do
+            k <- SMP.onlineCount
+            setNumCapabilities k
+            withCString ("smp up ok online=" ++ show k ++ "\n") c_uart_puts
+      _ -> withCString "usage: smp up <core>\n" c_uart_puts
+    handleSmpDown nStr = case reads nStr of
+      [(n, "")] -> do
+        k0 <- SMP.onlineCount
+        r <- SMP.down n
+        case r of
+          Left e -> withCString ("smp down failed: " ++ e ++ "\n") c_uart_puts
+          Right () -> do
+            k <- SMP.onlineCount
+            when (k < k0) (setNumCapabilities k)
+            withCString ("smp down ok online=" ++ show k ++ "\n") c_uart_puts
+      _ -> withCString "usage: smp down <core>\n" c_uart_puts
     handleLs p = do
       r <- runH (FS.fsLs p)
       case r of
@@ -495,14 +536,34 @@ house_main = do
       tot <- c_buddy_total
       freeB <- c_buddy_free
       ram <- peek c_ram_ref
+      srcPtr <- peek c_ram_source_ref
+      src <- peekCString srcPtr
+      smpV <- peek c_smp_ref
       alloca $ \pTot -> alloca $ \pFree -> do
         c_mem_stats pTot pFree
         t <- peek pTot
         f <- peek pFree
-        withCString ("free: H.Pages=" ++ show fc ++ " buddy " ++ show freeB ++ "/" ++ show tot ++ " mem " ++ show f ++ "/" ++ show t ++ " ram " ++ show (ram `div` (1024 * 1024)) ++ "M\n") c_uart_puts
+        withCString ("free: H.Pages=" ++ show fc ++ " buddy " ++ show freeB ++ "/" ++ show tot ++ " mem " ++ show f ++ "/" ++ show t ++ " ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " smp=" ++ show smpV ++ "\n") c_uart_puts
     handleMem = do
       ram <- peek c_ram_ref
       stk <- peek c_stack_top_ref
+      srcPtr <- peek c_ram_source_ref
+      src <- peekCString srcPtr
+      smpV <- peek c_smp_ref
+      dtbAddr <- peek c_dtb_ref
+      let dtbPtr = intPtrToPtr (fromIntegral dtbAddr) :: Ptr ()
+      nb <- c_bank_count dtbPtr
+      b0 <- alloca $ \pBase -> alloca $ \pSize ->
+        if nb > 0
+          then do
+            r <- c_bank_get dtbPtr 0 pBase pSize
+            if r /= 0
+              then do
+                b <- peek pBase
+                s <- peek pSize
+                return (" bank0 base=0x" ++ showHex64 b ++ " size=" ++ show (s `div` (1024 * 1024)) ++ "M")
+              else return ""
+          else return ""
       tot <- c_buddy_total
       fr <- c_buddy_free
       alloca $ \p0 -> alloca $ \p1 -> alloca $ \pt -> do
@@ -510,13 +571,19 @@ house_main = do
         t0 <- peek p0
         t1 <- peek p1
         tc <- peek pt
-        withCString ("mem: ram " ++ show (ram `div` (1024 * 1024)) ++ "M stack_top 0x" ++ showHex (fromIntegral stk) ++ " buddy " ++ show fr ++ "/" ++ show tot ++ " pages ttbr0 0x" ++ showHex64 t0 ++ " ttbr1 0x" ++ showHex64 t1 ++ " tcr 0x" ++ showHex64 tc ++ "\n") c_uart_puts
+        withCString ("mem: ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " banks=" ++ show nb ++ b0 ++ " smp=" ++ show smpV ++ " stack_top 0x" ++ showHex (fromIntegral stk) ++ " buddy " ++ show fr ++ "/" ++ show tot ++ " pages ttbr0 0x" ++ showHex64 t0 ++ " ttbr1 0x" ++ showHex64 t1 ++ " tcr 0x" ++ showHex64 tc ++ "\n") c_uart_puts
     handleDetect = do
       ram <- peek c_ram_ref
       stk <- peek c_stack_top_ref
+      srcPtr <- peek c_ram_source_ref
+      src <- peekCString srcPtr
+      smpV <- peek c_smp_ref
+      dtbAddr <- peek c_dtb_ref
+      let dtbPtr = intPtrToPtr (fromIntegral dtbAddr) :: Ptr ()
+      nb <- c_bank_count dtbPtr
       caps <- getNumCapabilities
       procs <- getNumProcessors
-      withCString ("detect: ram " ++ show (ram `div` (1024 * 1024)) ++ "M stack_top 0x" ++ showHex (fromIntegral stk) ++ " caps=" ++ show caps ++ " procs=" ++ show procs ++ "\n") c_uart_puts
+      withCString ("detect: ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " banks=" ++ show nb ++ " smp=" ++ show smpV ++ " stack_top 0x" ++ showHex (fromIntegral stk) ++ " caps=" ++ show caps ++ " procs=" ++ show procs ++ "\n") c_uart_puts
     handleVm = do
       -- wrapper that prints vm-ok on full pass, vm-fail otherwise; all sub-steps catch exceptions
       ok <- vmTest `catch` (\(_ :: SomeException) -> return False)
@@ -763,7 +830,7 @@ house_main = do
           "       mem -- show ram/stack/buddy+ttbr",
           "       detect -- show ram/stack/caps",
           "       vm -- demand pager 100 pages + mmap/mprotect/munmap + isolate + asid+smp shootdown",
-          "       smp -- show SMP cores online",
+          "       smp -- show SMP cores online | smp up <core> | smp down <core> -- hotplug to ceiling 32, caps mirror online",
           "       caps -- show capabilities",
           "       parfib <n> -- parallel fib",
           "       mvar <n> -- MVar ping-pong test",

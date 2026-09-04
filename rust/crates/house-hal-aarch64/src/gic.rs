@@ -11,8 +11,10 @@ const GICR_IGROUPR0: u64 = GICR_SGI_OFF + 0x80;
 const GICR_ISENABLER0: u64 = GICR_SGI_OFF + 0x100;
 const GICR_ICENABLER0: u64 = GICR_SGI_OFF + 0x180;
 
-// SGI for scheduler IPI — same as irq.h SGI_IPI (0)
+// SGI for scheduler IPI — same as irq.h SGI_IPI (0); SGI 1 is TLB
+// shootdown, SGI 7 is the SMP-OFF remote handshake (see smp.rs).
 const SGI_IPI: u32 = 0;
+const SGI_OFF: u32 = 7;
 
 #[inline]
 fn gicr_base(core: u32) -> u64 {
@@ -54,14 +56,24 @@ pub unsafe extern "C" fn house_gic_init() {
         }
         let igr = gicr_base(0) + GICR_IGROUPR0;
         let mut gr = mmio_r32(igr);
-        gr |= (1u32 << 27) | (1u32 << 29) | (1u32 << 30) | (1u32 << SGI_IPI) | (1u32 << 1);
+        gr |= (1u32 << 27)
+            | (1u32 << 29)
+            | (1u32 << 30)
+            | (1u32 << SGI_IPI)
+            | (1u32 << 1)
+            | (1u32 << SGI_OFF);
         mmio_w32(igr, gr);
         let ctlr = mmio_r32(GICD_BASE);
         mmio_w32(GICD_BASE, ctlr | 0x02);
         let isen = gicr_base(0) + GICR_ISENABLER0;
         mmio_w32(
             isen,
-            (1u32 << 27) | (1u32 << 29) | (1u32 << 30) | (1u32 << SGI_IPI) | (1u32 << 1),
+            (1u32 << 27)
+                | (1u32 << 29)
+                | (1u32 << 30)
+                | (1u32 << SGI_IPI)
+                | (1u32 << 1)
+                | (1u32 << SGI_OFF),
         );
         core::arch::asm!("mrs {0}, ICC_SRE_EL1", out(reg) _ , options(nostack, preserves_flags));
     }
@@ -83,13 +95,23 @@ pub unsafe extern "C" fn house_gic_init_secondary(core: u32) {
         }
         let igr = gicr_base(core) + GICR_IGROUPR0;
         let mut gr = mmio_r32(igr);
-        gr |= (1u32 << 27) | (1u32 << 29) | (1u32 << 30) | (1u32 << SGI_IPI) | (1u32 << 1);
+        gr |= (1u32 << 27)
+            | (1u32 << 29)
+            | (1u32 << 30)
+            | (1u32 << SGI_IPI)
+            | (1u32 << 1)
+            | (1u32 << SGI_OFF);
         mmio_w32(igr, gr);
         core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
         let isen = gicr_base(core) + GICR_ISENABLER0;
         mmio_w32(
             isen,
-            (1u32 << 27) | (1u32 << 29) | (1u32 << 30) | (1u32 << SGI_IPI) | (1u32 << 1),
+            (1u32 << 27)
+                | (1u32 << 29)
+                | (1u32 << 30)
+                | (1u32 << SGI_IPI)
+                | (1u32 << 1)
+                | (1u32 << SGI_OFF),
         );
         core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
         gic_enable_sre();

@@ -17,31 +17,19 @@ container-shell:
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) bash
 
 # --- aarch64 freestanding spike ---
-# Guest RAM is auto-detected (DTB via x0 → probe → fallback) — no compile limit.
+# Guest RAM/SMP are auto-detected at runtime (DTB via x0 → probe → fallback).
 # -kernel boots the flat build/*.bin: QEMU takes non-ELF images via its Linux
 # path (x0=DTB); ELF -kernel gets x0=0 and the hvf probe false-positives.
-# SPIKE_MEM only drives QEMU -m (512M/1G/2G/4G/8G/16G all verified, hvf+tcg);
-# same binary boots at any -m without rebuild. SMP_N: vCPUs for QEMU -smp
-# and early stacks (default 2, up to HOUSE_MAX_SMP=16, tested to 8).
-# New names HOUSE_RAM_LIMIT / HOUSE_SMP_LIMIT are caps (compat shims kept):
-#   HOUSE_RAM_LIMIT ?= SPIKE_MEM  → -DHOUSE_RAM_LIMIT_BYTES
-#   HOUSE_SMP_LIMIT ?= SMP_N      → -DHOUSE_SMP_LIMIT (also HOUSE_SMP_N for compat)
+# SPIKE_MEM only drives QEMU -m (512M/1G/2G/4G/6G/8G/16G all boot from one
+# .bin without rebuild). SMP_N only drives QEMU -smp and expect args.
 SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
 SMP_N ?= 2
-HOUSE_RAM_LIMIT ?= $(SPIKE_MEM)
-HOUSE_SMP_LIMIT ?= $(SMP_N)
-# Convert e.g. 512M/4G to bytes for -DHOUSE_RAM_LIMIT_BYTES (unless already given as bytes)
-ifeq ($(origin HOUSE_RAM_LIMIT_BYTES),undefined)
-HOUSE_RAM_LIMIT_BYTES := $(shell echo "$(HOUSE_RAM_LIMIT)" | awk '{v=$$0; m=substr(v,length(v),1); n=substr(v,1,length(v)-1)+0; if(m=="G"||m=="g") print n*1024*1024*1024; else if(m=="M"||m=="m") print n*1024*1024; else if(m=="K"||m=="k") print n*1024; else print v}')
-endif
-SMP_DEFS_C := -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT) -DHOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES)
-SMP_DEFS_S := -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
 
 spike-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) SMP_N=$(SMP_N) HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR)
 
 spike-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -56,11 +44,11 @@ spike-check:
 	  'ticks-ok' 90 hvf $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 irq-check kernel ---
-# Only entry point differs (IrqCheck vs Spike); RAM is auto-detected.
+# Only entry point differs (IrqCheck vs Spike); RAM/SMP auto-detected.
 irq-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) irq SMP_N=$(SMP_N) HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) irq
 
 irq-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -81,7 +69,7 @@ irq-check:
 house-build:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
-	  make -C $(SPIKE_DIR) house SMP_N=$(SMP_N) HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) DEFS_C='$(SMP_DEFS_C)' DEFS_S='$(SMP_DEFS_S)'
+	  make -C $(SPIKE_DIR) house
 
 rust-check:
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \
@@ -123,7 +111,7 @@ house-posix-check:
 	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # SMP check (phase 9): N cores online + Haskell parallel (parametrised by SMP_N, default 2)
-# Use SMP_N=4 make smp-check for the >2 gate (4G working RAM, tested to 8, ceiling 16).
+# Use SMP_N=4 make smp-check for the >2 gate (4G working RAM, tested to 8, HW bound 32).
 smp-check:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
@@ -131,7 +119,7 @@ smp-check:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
 	  make -C kernel clean
-	$(MAKE) house-build SMP_N=$(SMP_N)
+	$(MAKE) house-build
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
@@ -171,29 +159,40 @@ house-userspace-check: house-build
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
 
-# SMP-8 scaling gate (Track D): 8 cores online at 4G, ceiling 16.
-# Status 2026-09-04: N=8 hvf is flaky on this tree (3 runs: smp PASS + caps
-# timeout once, MVar-blocked/smp timeout twice) — pre-existing RTS-topology
-# flakiness, not a Track C+D regression. Policy: default N=2 per-commit;
-# N=8 stays a nightly/scaling gate (hvf best-effort + tcg nightly). Do not
-# gate releases on N=8 until the topology flake is root-caused.
+# SMP hotplug cycle (Tracks S+H): down/up at N=2, caps mirror, parfib each step.
+# Accel split (step 6 spike): hvf refuses PSCI re-CPU_ON after CPU_OFF (call
+# returns 0, core never re-enters), so up-after-down is tcg-only; hvf runs the
+# down-leg (OFF + mask + caps + migrate + parfib) while tcg runs the full cycle.
+smp-hotplug-check: house-build
+	expect scripts/qemu-smp-hotplug-down.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) 2
+	expect scripts/qemu-smp-hotplug.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) 2
+
+# SMP-8 scaling gate (Track D): 8 cores online at 4G, ceiling 32.
+# Status 2026-09-04: the RTS-interactive flake at 7-8 caps is fixed —
+# (a) the 32-slot fd table starved N=7 (RTS opens ~4 fds/capability, so the
+# timer manager's eventfd failed ENFILE and every threadDelay threw), now
+# FAKE_FD_N=256; (b) the N=5 hs_init hang was a scheduler stall (parked
+# waiter ignoring locally queued work, no preemption) plus duplicate
+# run-queue entries, now guarded in enqueue_run_core with stale-link purge
+# on slot reuse and yield-after-wakeup in the cond/join park loops.
+# 1-8 cores pass hvf+tcg (16/16). Policy: default N=2 per-commit; N=8 stays
+# a nightly/scaling gate.
 smp-check-8:
 	$(MAKE) smp-check SMP_N=8 SPIKE_MEM=4G
 
-# Buddy/MM pressure leg (Track D): the qemu-vm.exp harness asserts `vm-ok`
-# plus `mem` buddy free/total at both geometries, so 512M vs 4G pressure is
-# recorded on every run without a new allocator.
-vm-check:
-	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C $(SPIKE_DIR) clean
-	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C kernel clean
-	$(MAKE) house-build HOUSE_RAM_LIMIT=512M HOUSE_SMP_LIMIT=2
+# Buddy/MM pressure leg (Track D + memory-6g): one `house-build`, then N
+# expects from the same `.bin` — DTB-first detect reports truthful ram at
+# every geometry. The qemu-vm.exp harness asserts `vm-ok` plus `mem` buddy
+# free/total, so pressure is recorded without a new allocator.
+vm-check: house-build
 	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 512M 2
 	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 tcg 512M 2
-	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C $(SPIKE_DIR) clean
-	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C kernel clean
-	$(MAKE) house-build HOUSE_RAM_LIMIT=4G HOUSE_SMP_LIMIT=4
 	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 4G 4
 	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 tcg 4G 4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 6G 4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 180 tcg 6G 4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 8G 4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 16G 4
 
 house-vm-check: vm-check
 
@@ -202,7 +201,7 @@ house-vm-check: vm-check
 # spike ticks, GIC dispatch + VM, house banner, interactive shell, and
 # rust (clippy + fmt), each under hvf and tcg where applicable. It is the
 # gate used by CI and by "from clean clone inside container" verification.
-# Scaling legs (vm-check 512M/2+4G/4, smp-check-8) stay out of default `check`.
+# Scaling legs (vm-check 512M/2+4G/4+6G/4+8G/4+16G/4 single-build, smp-check-8) stay out of default `check`.
 run: house-run
 
 check:
@@ -216,4 +215,4 @@ check:
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check smp-check-8 vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-userspace-check rust-check rust-clean run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-userspace-check rust-check rust-clean run check

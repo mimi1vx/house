@@ -9,7 +9,6 @@ LD      := ld
 OBJCOPY := objcopy
 DEFS_C  ?=
 DEFS_S  ?=
-SMP_N   ?= 2  # generalizes to N ≤ HOUSE_MAX_SMP (16, tested to 8)
 RUST_MANIFEST := ../../rust/Cargo.toml
 RUST_TARGET   := aarch64-unknown-none
 RUST_BOOT_A   := ../../rust/target/$(RUST_TARGET)/debug/libhouse_boot.rlib
@@ -23,26 +22,18 @@ RUST_LIBS     := $(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A)
 BOOT_O := $(RUST_BOOT_A)
 # FORCE: rlib file targets carry no source prerequisites, so without this make
 # treats existing rlibs as up-to-date and Rust edits never reach the ELF.
-# Cargo's own fingerprinting keeps the no-op case fast, and rerun-if-env-changed
-# in build.rs picks up HOUSE_RAM_LIMIT_BYTES changes.
+# Cargo's own fingerprinting keeps the no-op case fast.
 $(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A): FORCE
-	HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
+	cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
 
 FORCE:
 
-HOUSE_SMP_LIMIT ?= $(SMP_N)
-HOUSE_RAM_LIMIT_BYTES ?=
 .DEFAULT_GOAL := all
-
-ifneq ($(HOUSE_RAM_LIMIT_BYTES),)
-DEFS_C += -DHOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES)
-endif
-DEFS_C += -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
 
 RUST_LIBC_A_DEPS := $(RUST_LIBC_A)
 CFLAGS  := -O2 -ffreestanding -fno-builtin -fno-pic -fno-pie \
            -fno-stack-protector -Wall -Werror -I. -I$(HSINC) $(DEFS_C)
-ASFLAGS := -I. $(DEFS_S) -DHOUSE_SMP_N=$(SMP_N) -DHOUSE_SMP_LIMIT=$(HOUSE_SMP_LIMIT)
+ASFLAGS := -I. $(DEFS_S)
 HS_GHCFLAGS := -XGHC2024 -Wall -Werror -package mtl -package array -i../../kernel -ibuild -outputdir build
 
 UNITDIR_base := $(shell ghc-pkg field base import-dirs --simple-output | awk '{print $$1}')
@@ -107,7 +98,7 @@ build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
 	  $(shell $(CC) -print-libgcc-file-name)
 
 build/aarch64.ld: aarch64.ld | build
-	$(CC) -E -P -x c -DHOUSE_SMP_N=$(SMP_N) -o $@ $<
+	$(CC) -E -P -x c -o $@ $<
 
 build:
 	mkdir -p build build/H build/Kernel/Types build/Util build/Kernel build/mm

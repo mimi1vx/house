@@ -1,6 +1,6 @@
 //! Buddy allocator — `buddy.c` transliteration (intrusive free-list+bump).
 //!
-//! Over `__heap_base+64M .. house_boot_stack_top-16*64K` whole RAM window.
+//! Over `__heap_base+64M .. stack_top-N*64K` (N = detected cores).
 
 use crate::spinlock::RawSpinLock;
 
@@ -15,8 +15,10 @@ static mut BUDDY_START: u64 = 0;
 static mut BUDDY_END: u64 = 0;
 static mut BUDDY_CUR: u64 = 0;
 static LOCK: RawSpinLock = RawSpinLock::new();
-static mut TOTAL_PAGES: i32 = 0;
-static mut FREE_PAGES: i32 = 0;
+// 64-bit counters (6G ≈ 1.5M pages; TCR window far beyond i32 only at TB
+// scale). The `buddy_*_count` C ABI stays i32: saturated compat shims.
+static mut TOTAL_PAGES: u64 = 0;
+static mut FREE_PAGES: u64 = 0;
 static mut FREE_HEAD: *mut FreeBlock = core::ptr::null_mut();
 
 /// void buddy_init(uint64_t start, uint64_t end)
@@ -42,7 +44,7 @@ pub unsafe extern "C" fn buddy_init(start: u64, end: u64) {
         BUDDY_END = e;
         BUDDY_CUR = s;
         // pages = (e - s) >>12 ; e>s checked above.
-        let pages = ((e - s) >> 12) as i32;
+        let pages = (e - s) >> 12;
         TOTAL_PAGES = pages;
         FREE_PAGES = pages;
         FREE_HEAD = core::ptr::null_mut();
@@ -114,23 +116,23 @@ pub unsafe extern "C" fn buddy_free_page(p: *mut u8) {
     LOCK.unlock();
 }
 
-/// int buddy_free_count(void)
+/// int buddy_free_count(void) — compat shim, saturates at INT_MAX.
 #[no_mangle]
 pub unsafe extern "C" fn buddy_free_count() -> i32 {
     // SAFETY: reading FREE_PAGES is racy but single word; no lock needed for count query (C does same).
-    unsafe { FREE_PAGES }
+    unsafe { FREE_PAGES.min(i32::MAX as u64) as i32 }
 }
 
-/// int buddy_total_count(void)
+/// int buddy_total_count(void) — compat shim, saturates at INT_MAX.
 #[no_mangle]
 pub unsafe extern "C" fn buddy_total_count() -> i32 {
-    unsafe { TOTAL_PAGES }
+    unsafe { TOTAL_PAGES.min(i32::MAX as u64) as i32 }
 }
 
 /// void house_mem_stats(uint64_t *total, uint64_t *free_pages_out)
 #[no_mangle]
 pub unsafe extern "C" fn house_mem_stats(total: *mut u64, free_out: *mut u64) {
-    let (tp, fp): (i32, i32);
+    let (tp, fp): (u64, u64);
     LOCK.lock();
     unsafe {
         tp = TOTAL_PAGES;
@@ -140,10 +142,10 @@ pub unsafe extern "C" fn house_mem_stats(total: *mut u64, free_out: *mut u64) {
     // SAFETY: caller guarantees total/free_out are valid or null.
     unsafe {
         if !total.is_null() {
-            *total = tp as u64;
+            *total = tp;
         }
         if !free_out.is_null() {
-            *free_out = fp as u64;
+            *free_out = fp;
         }
     }
 }

@@ -43,7 +43,7 @@ check_house_spike_main:
     "#
 );
 
-const HOUSE_MAX_SMP: usize = 16;
+const HOUSE_MAX_SMP: usize = 32;
 
 // Single definition — other crates declare `extern "C" static mut house_smp_n`.
 #[no_mangle]
@@ -87,6 +87,9 @@ extern "C" {
     fn house_sched_maybe_preempt_from_isr();
     fn house_sched_yield();
     fn psci_cpu_on(mpidr: u64, entry: u64, ctx: u64) -> i64;
+    fn psci_affinity_info(mpidr: u64, lowest: u64) -> i64;
+    fn psci_cpu_off() -> i64;
+    fn house_smp_should_off(core: u32) -> i32;
     fn house_handle_user_fault(far: u64) -> i32;
     fn house_is_ro_page(va: u64) -> i32;
     fn house_svc_dispatch(imm: u32, x0: u64, x1: u64, x2: u64, x3: u64, gpr: *mut u64) -> i64;
@@ -103,7 +106,7 @@ extern "C" {
     #[link_name = "house_isr_active"]
     static mut __c_house_isr_active: i32;
     #[link_name = "house_isr_pending"]
-    static mut __c_house_isr_pending: [u64; 16];
+    static mut __c_house_isr_pending: [u64; 32];
     #[link_name = "house_timer_interval"]
     static mut __c_house_timer_interval: u32;
 }
@@ -315,6 +318,29 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
         }
         return;
     }
+    if intid == 7 {
+        // SGI 7: SMP-OFF remote handshake — self-off when flagged.
+        let me = unsafe { cpu_id() };
+        let want = unsafe { house_smp_should_off(me) };
+        unsafe {
+            core::arch::asm!("msr ICC_EOIR1_EL1, {0}", in(reg) iar, options(nostack, preserves_flags));
+            core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+        }
+        if want != 0 {
+            unsafe {
+                core::arch::asm!(
+                    "dsb sy; tlbi vmalle1is; dsb sy; isb",
+                    options(nostack, preserves_flags)
+                );
+                let _ = psci_cpu_off();
+                // If CPU_OFF returns (refused), park until re-kicked.
+                loop {
+                    core::arch::asm!("wfe", options(nostack, preserves_flags));
+                }
+            }
+        }
+        return;
+    }
     if intid == 27 {
         // SAFETY: rearm virtual timer, tick via house_isr_pending
         unsafe {
@@ -325,7 +351,7 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
             if core::ptr::read_volatile(&raw const __c_house_isr_active) != 0
                 && core_id < HOUSE_MAX_SMP
             {
-                let p = &raw mut __c_house_isr_pending as *mut [u64; 16] as *mut u64;
+                let p = &raw mut __c_house_isr_pending as *mut [u64; 32] as *mut u64;
                 let slot = p.add(core_id);
                 // Use atomic fetch_add equivalent
                 let atomic = &*(slot as *const core::sync::atomic::AtomicU64);
@@ -375,9 +401,20 @@ pub unsafe extern "C" fn c_start_secondary(core_id: u64) {
     let core = core_id as u32;
     // SAFETY: early secondary, DAIF masked, per-core init.
     unsafe {
-        uart_puts(b"[house] c_start_secondary core \0".as_ptr());
-        uart_putc(b'0' + (core & 0xF) as u8);
+        let mpidr: u64;
+        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nostack, preserves_flags));
+        uart_puts(b"[house] c_start_secondary core=\0".as_ptr());
+        uart_putc(b'0' + (core / 10) as u8);
+        uart_putc(b'0' + (core % 10) as u8);
+        uart_puts(b" mpidr=\0".as_ptr());
+        puthex(mpidr);
         uart_puts(b"\n\0".as_ptr());
+        // Epoch guard for PSCI OFF->ON re-entry: stale TLB entries from the
+        // OFF window must die before re-init.
+        core::arch::asm!(
+            "dsb ishst; tlbi vmalle1is; dsb ish; isb",
+            options(nostack, preserves_flags)
+        );
         house_gic_init_secondary(core);
         house_timer_init_secondary(core);
         house_threads_init_secondary(core);
@@ -387,9 +424,12 @@ pub unsafe extern "C" fn c_start_secondary(core_id: u64) {
             (*ptr).fetch_or(1u32 << core, Ordering::SeqCst);
             core::arch::asm!("dmb sy; dsb sy; sev", options(nostack, preserves_flags));
         }
-        uart_puts(b"[house] secondary core \0".as_ptr());
-        uart_putc(b'0' + (core & 0xF) as u8);
-        uart_puts(b" online\n\0".as_ptr());
+        uart_puts(b"[house] secondary core=\0".as_ptr());
+        uart_putc(b'0' + (core / 10) as u8);
+        uart_putc(b'0' + (core % 10) as u8);
+        uart_puts(b" online mask=\0".as_ptr());
+        puthex(core::ptr::read_volatile(&raw const house_smp_online_mask) as u64);
+        uart_puts(b"\n\0".as_ptr());
         house_irq_enable();
         loop {
             core::arch::asm!("wfe", options(nostack, preserves_flags));
@@ -408,7 +448,9 @@ pub unsafe extern "C" fn c_start() {
             uart_puts(b"[house] detect early: ram=\0".as_ptr());
             puthex(core::ptr::read_volatile(&raw const house_ram_bytes));
             uart_puts(b" smp=\0".as_ptr());
-            uart_putc(b'0' + (core::ptr::read_volatile(&raw const house_smp) & 0xF) as u8);
+            let _smp_e = core::ptr::read_volatile(&raw const house_smp);
+            uart_putc(b'0' + ((_smp_e / 10) & 0xF) as u8);
+            uart_putc(b'0' + ((_smp_e % 10) & 0xF) as u8);
             uart_puts(b" src=\0".as_ptr());
             uart_puts(core::ptr::read_volatile(&raw const house_ram_source));
             uart_puts(b" stack_top=\0".as_ptr());
@@ -416,6 +458,17 @@ pub unsafe extern "C" fn c_start() {
             uart_puts(b" dtb=\0".as_ptr());
             puthex(__boot_dtb);
             uart_puts(b"\n\0".as_ptr());
+        }
+        {
+            // Map detected RAM before rebasing sp: stack_top can sit above
+            // the early 4G window (e.g. ~7G at 6G RAM); the first push after
+            // rebase would fault on the unmapped window.
+            house_mmu_update_alias();
+            uart_puts(b"[house] mmu alias updated for ram \0".as_ptr());
+            puthex(core::ptr::read_volatile(&raw const house_ram_bytes));
+            uart_puts(b"\n\0".as_ptr());
+        }
+        {
             let core = cpu_id() as u64;
             // Per-core 64 KiB stacks: measured primary depth ~18.5K during
             // RTS bringup exceeds the old 16K and corrupts the neighbor core.
@@ -423,20 +476,19 @@ pub unsafe extern "C" fn c_start() {
                 .wrapping_sub(core * 65536);
             core::arch::asm!("mov sp, {0}", in(reg) new_sp, options(nostack, preserves_flags));
         }
-        {
-            house_mmu_update_alias();
-            uart_puts(b"[house] mmu alias updated for ram \0".as_ptr());
-            puthex(core::ptr::read_volatile(&raw const house_ram_bytes));
-            uart_puts(b"\n\0".as_ptr());
-        }
         uart_puts(b"[house] c_start: irq_init\n\0".as_ptr());
         house_irq_init();
         {
             let pool_top = (&raw mut __heap_base as *mut u8 as u64).wrapping_add(64 << 20);
             let b_start = (pool_top.checked_add(4095).unwrap_or(u64::MAX)) & !4095u64;
             let mut b_end = core::ptr::read_volatile(&raw const house_boot_stack_top);
-            if b_end > (HOUSE_MAX_SMP as u64 * 65536) {
-                b_end -= HOUSE_MAX_SMP as u64 * 65536;
+            // Reserve per-core 64K stacks for the detected core count (HW bound 32).
+            let detected_n = core::ptr::read_volatile(&raw const house_smp) as u64;
+            let detected_n = detected_n.clamp(1, HOUSE_MAX_SMP as u64);
+            if let Some(reserve) = detected_n.checked_mul(65536) {
+                if let Some(end) = b_end.checked_sub(reserve) {
+                    b_end = end;
+                }
             }
             b_end &= !4095u64;
             if b_end > b_start {
@@ -463,25 +515,51 @@ pub unsafe extern "C" fn c_start() {
         }
         house_detect_late();
         {
-            let n = core::ptr::read_volatile(&raw const house_smp_n) as u32;
+            let n = core::ptr::read_volatile(&raw const house_smp_n);
             uart_puts(b"[house] c_start: house_smp_n=\0".as_ptr());
-            uart_putc(b'0' + (n & 0xF) as u8);
+            uart_putc(b'0' + ((n / 10) & 0xF) as u8);
+            uart_putc(b'0' + ((n % 10) & 0xF) as u8);
             uart_puts(b"\n\0".as_ptr());
         }
         house_thread_init_main();
         let smp_n = core::ptr::read_volatile(&raw const house_smp_n);
         if smp_n > 1 {
             uart_puts(b"[house] smp: bringing up \0".as_ptr());
-            uart_putc(b'0' + (smp_n & 0xF) as u8);
+            uart_putc(b'0' + (smp_n / 10) as u8);
+            uart_putc(b'0' + (smp_n % 10) as u8);
             uart_puts(b" cores\n\0".as_ptr());
+            let mut boot_freq: u64 = 0;
+            core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) boot_freq, options(nostack, preserves_flags));
             for i in 1..smp_n {
+                let aff = psci_affinity_info(i as u64, 0);
+                uart_puts(b"[house] psci aff core=\0".as_ptr());
+                uart_putc(b'0' + ((i / 10) & 0xF) as u8);
+                uart_putc(b'0' + ((i % 10) & 0xF) as u8);
+                uart_puts(b" state=\0".as_ptr());
+                puthex(aff as u64);
+                uart_puts(b"\n\0".as_ptr());
                 let entry = secondary_entry as *const () as u64;
                 let r = psci_cpu_on(i as u64, entry, i as u64);
                 uart_puts(b"[house] psci_cpu_on \0".as_ptr());
-                uart_putc(b'0' + (i & 0xF) as u8);
+                uart_putc(b'0' + ((i / 10) & 0xF) as u8);
+                uart_putc(b'0' + ((i % 10) & 0xF) as u8);
                 uart_puts(b" -> \0".as_ptr());
                 puthex(r as u64);
                 uart_puts(b"\n\0".as_ptr());
+                // Serialize ON with settle delay: hvf loses wakeups on
+                // back-to-back CPU_ON at N=8; 20ms between cores.
+                if boot_freq != 0 {
+                    let t0: u64;
+                    core::arch::asm!("mrs {0}, cntvct_el0", out(reg) t0, options(nostack, preserves_flags));
+                    loop {
+                        let now: u64;
+                        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) now, options(nostack, preserves_flags));
+                        if now.wrapping_sub(t0) > boot_freq / 50 {
+                            break;
+                        }
+                        core::arch::asm!("yield", options(nostack, preserves_flags));
+                    }
+                }
             }
             let mut start_ns: u64 = 0;
             let mut freq: u64 = 0;
@@ -501,7 +579,7 @@ pub unsafe extern "C" fn c_start() {
                 core::arch::asm!("wfe", options(nostack, preserves_flags));
                 let now: u64;
                 core::arch::asm!("mrs {0}, cntvct_el0", out(reg) now, options(nostack, preserves_flags));
-                if freq != 0 && now.wrapping_sub(start_ns) > freq * 2 {
+                if freq != 0 && now.wrapping_sub(start_ns) > freq * 5 {
                     break;
                 }
             }
@@ -612,7 +690,12 @@ pub unsafe extern "C" fn c_start() {
                 uart_puts(NB.as_ptr());
                 uart_puts(b" injected\n\0".as_ptr());
             }
-            uart_puts(b"[house] c_start: hs_init\n\0".as_ptr());
+            uart_puts(b"[house] c_start: hs_init smp_n=\0".as_ptr());
+            uart_putc(b'0' + ((smp_n / 10) & 0xF) as u8);
+            uart_putc(b'0' + ((smp_n % 10) & 0xF) as u8);
+            uart_puts(b" mask=\0".as_ptr());
+            puthex(core::ptr::read_volatile(&raw const house_smp_online_mask) as u64);
+            uart_puts(b"\n\0".as_ptr());
             hs_init(&raw mut ARGC, &raw mut ARGV_PTR);
             // weak dispatch — helpers return 0 if not linked
             let spike_addr = check_house_spike_main();

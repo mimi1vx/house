@@ -247,10 +247,10 @@ pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
                                 } else {
                                     0
                                 };
-                                total_ram = total_ram.checked_add(size).unwrap_or(16 << 30);
-                                if total_ram > (16u64 << 30) {
-                                    total_ram = 16u64 << 30;
-                                }
+                                total_ram = match total_ram.checked_add(size) {
+                                    Some(v) => v,
+                                    None => return 0,
+                                };
                                 off += entry_bytes;
                             }
                         }
@@ -366,4 +366,215 @@ pub unsafe extern "C" fn fdt_get_cpu_count(dtb: *const u8) -> i32 {
         }
         count
     }
+}
+
+/// One `reg` entry of a `memory` node: base address + size.
+unsafe fn ram_bank_at(
+    dtb: *const u8,
+    want: i32,
+    base_out: *mut u64,
+    size_out: *mut u64,
+) -> (i32, i32) {
+    // Returns (total_count, found). Writes *base_out/*size_out when found.
+    // SAFETY: caller guarantees dtb valid (fdt_valid checked) and out ptrs
+    // valid when want >= 0.
+    unsafe {
+        let base = dtb;
+        let totalsize = be32(base.add(4));
+        let off_struct = be32(base.add(8));
+        let off_strings = be32(base.add(12));
+        let size_strings = be32(base.add(32));
+        let size_struct = be32(base.add(36));
+        let mut struct_end = off_struct.checked_add(size_struct).unwrap_or(totalsize);
+        if struct_end > totalsize {
+            struct_end = totalsize;
+        }
+        let mut addr_cells: u32 = 2;
+        let mut size_cells: u32 = 2;
+        let mut stack_depth: i32 = 0;
+        let mut is_memory_stack = [false; 16];
+        let mut p = off_struct;
+        let mut ok = true;
+        let mut count: i32 = 0;
+        let mut found = false;
+        while ok && p.checked_add(4).unwrap_or(u32::MAX) <= struct_end {
+            let token = be32(base.add(p as usize));
+            p = p.wrapping_add(4);
+            if token == 0x1 {
+                let name_ptr = base.add(p as usize) as *const u8;
+                let mut namelen: u32 = 0;
+                while p.checked_add(namelen).unwrap_or(u32::MAX) < totalsize
+                    && *base.add((p + namelen) as usize) != 0
+                {
+                    namelen += 1;
+                    if namelen > 64 {
+                        break;
+                    }
+                }
+                if p.checked_add(namelen).unwrap_or(u32::MAX) >= totalsize {
+                    ok = false;
+                    break;
+                }
+                namelen += 1;
+                let is_mem = {
+                    let n0 = *name_ptr;
+                    let n1 = *name_ptr.add(1);
+                    let n2 = *name_ptr.add(2);
+                    let n3 = *name_ptr.add(3);
+                    let n4 = *name_ptr.add(4);
+                    let n5 = *name_ptr.add(5);
+                    let n6 = *name_ptr.add(6);
+                    n0 == b'm'
+                        && n1 == b'e'
+                        && n2 == b'm'
+                        && n3 == b'o'
+                        && n4 == b'r'
+                        && n5 == b'y'
+                        && (n6 == 0 || n6 == b'@')
+                };
+                if stack_depth >= 0 && (stack_depth as usize) < 16 {
+                    is_memory_stack[stack_depth as usize] = is_mem;
+                }
+                stack_depth += 1;
+                if stack_depth > 16 {
+                    stack_depth = 16;
+                }
+                p = align4(p.wrapping_add(namelen));
+            } else if token == 0x2 {
+                if stack_depth > 0 {
+                    stack_depth -= 1;
+                }
+            } else if token == 0x3 {
+                if p.checked_add(8).unwrap_or(u32::MAX) > struct_end {
+                    ok = false;
+                    break;
+                }
+                let len = be32(base.add(p as usize));
+                p = p.wrapping_add(4);
+                let nameoff = be32(base.add(p as usize));
+                p = p.wrapping_add(4);
+                let prop_ptr = base.add(p as usize);
+                if p.checked_add(len).unwrap_or(u32::MAX) > struct_end {
+                    ok = false;
+                    break;
+                }
+                if stack_depth == 1 && nameoff < size_strings && len == 4 {
+                    let s = base.add((off_strings + nameoff) as usize) as *const u8;
+                    let ac: &[u8] = b"#address-cells";
+                    let sc: &[u8] = b"#size-cells";
+                    let mut is_ac = true;
+                    for i in 0..ac.len() {
+                        if *s.add(i) != ac[i] {
+                            is_ac = false;
+                            break;
+                        }
+                    }
+                    if is_ac && *s.add(ac.len()) != 0 {
+                        is_ac = false;
+                    }
+                    let mut is_sc = true;
+                    for i in 0..sc.len() {
+                        if *s.add(i) != sc[i] {
+                            is_sc = false;
+                            break;
+                        }
+                    }
+                    if is_sc && *s.add(sc.len()) != 0 {
+                        is_sc = false;
+                    }
+                    if is_ac {
+                        let v = be32(prop_ptr);
+                        addr_cells = if v > 2 { 2 } else { v };
+                    } else if is_sc {
+                        let v = be32(prop_ptr);
+                        size_cells = if v > 2 { 2 } else { v };
+                    }
+                }
+                let cur_is_mem = if stack_depth > 0 && (stack_depth as usize) <= 16 {
+                    is_memory_stack[(stack_depth - 1) as usize]
+                } else {
+                    false
+                };
+                if cur_is_mem && nameoff < size_strings {
+                    let s = base.add((off_strings + nameoff) as usize) as *const u8;
+                    let is_reg =
+                        *s == b'r' && *s.add(1) == b'e' && *s.add(2) == b'g' && *s.add(3) == 0;
+                    if is_reg {
+                        let cells = addr_cells + size_cells;
+                        if cells != 0 && cells <= 4 {
+                            let entry_bytes = cells * 4;
+                            let mut off: u32 = 0;
+                            while off.checked_add(entry_bytes).unwrap_or(u32::MAX) <= len {
+                                let e = prop_ptr.add(off as usize);
+                                let addr: u64 = if addr_cells == 2 {
+                                    let hi = be32(e);
+                                    let lo = be32(e.add(4));
+                                    ((hi as u64) << 32) | lo as u64
+                                } else if addr_cells == 1 {
+                                    be32(e) as u64
+                                } else {
+                                    0
+                                };
+                                let size: u64 = if size_cells == 2 {
+                                    let hi = be32(e.add((addr_cells * 4) as usize));
+                                    let lo = be32(e.add((addr_cells * 4 + 4) as usize));
+                                    ((hi as u64) << 32) | lo as u64
+                                } else if size_cells == 1 {
+                                    be32(e.add((addr_cells * 4) as usize)) as u64
+                                } else {
+                                    0
+                                };
+                                if count == want && !found {
+                                    if !base_out.is_null() {
+                                        *base_out = addr;
+                                    }
+                                    if !size_out.is_null() {
+                                        *size_out = size;
+                                    }
+                                    found = true;
+                                }
+                                count = count.saturating_add(1);
+                                off += entry_bytes;
+                            }
+                        }
+                    }
+                }
+                p = align4(p.wrapping_add(len));
+            } else if token == 0x4 {
+                continue;
+            } else if token == 0x9 {
+                break;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        (count, found as i32)
+    }
+}
+
+/// int fdt_ram_bank_count(const void *dtb) — number of `memory` `reg` entries.
+#[no_mangle]
+pub unsafe extern "C" fn fdt_ram_bank_count(dtb: *const u8) -> i32 {
+    if unsafe { fdt_valid(dtb) } == 0 {
+        return 0;
+    }
+    // SAFETY: dtb valid; out ptrs null with want=-1 (count only, no write).
+    unsafe { ram_bank_at(dtb, -1, core::ptr::null_mut(), core::ptr::null_mut()).0 }
+}
+
+/// int fdt_get_ram_bank(const void *dtb, int i, uint64_t *base, uint64_t *size)
+/// — 1 on success, 0 when missing/out of range.
+#[no_mangle]
+pub unsafe extern "C" fn fdt_get_ram_bank(
+    dtb: *const u8,
+    idx: i32,
+    base: *mut u64,
+    size: *mut u64,
+) -> i32 {
+    if unsafe { fdt_valid(dtb) } == 0 || idx < 0 || base.is_null() || size.is_null() {
+        return 0;
+    }
+    // SAFETY: dtb valid, idx in range, base/size non-null 8-byte aligned by caller.
+    unsafe { ram_bank_at(dtb, idx, base, size).1 }
 }

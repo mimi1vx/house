@@ -1,17 +1,17 @@
 //! EL1 virtual/physical timer — `timer.c` transliteration.
 
-const HOUSE_MAX_SMP: usize = 16;
+const HOUSE_MAX_SMP: usize = 32;
 
 #[no_mangle]
 pub static mut house_isr_active: i32 = 0;
 
 #[no_mangle]
-pub static mut house_isr_pending: [u64; 16] = [0; 16];
+pub static mut house_isr_pending: [u64; 32] = [0; 32];
 
 #[no_mangle]
 pub static mut house_timer_interval: u32 = 0;
 
-static mut HOUSE_BOOT_TICKS: [u64; 16] = [0; 16];
+static mut HOUSE_BOOT_TICKS: [u64; 32] = [0; 32];
 
 unsafe fn cntfrq() -> u64 {
     let f: u64;

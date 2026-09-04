@@ -4,7 +4,10 @@
 > the Rust workspace exports. The C-to-Rust port is complete: `house-boot`
 > (`global_asm!` entry/vectors) + `house-hal-aarch64` + `house-libc` are always
 > linked (`platform/aarch64/Makefile`, `--start-group`/`--end-group`), and
-> `platform/aarch64/tinylibc` is superseded. This file is the frozen contract:
+>    `platform/aarch64/tinylibc` is superseded. Ceiling is `HOUSE_MAX_SMP=32`
+   (`u32` online mask, `0xFFFFFFFF` at 32; no `1u32 << 32` shifts — all
+   mask construction uses `checked_shl` or the `smp_n >= 32` guard). This
+   file is the frozen contract:
 > renaming, removing, or re-signaturing a symbol here breaks `ld -T
 > build/aarch64.ld` and every Haskell `foreign import ccall unsafe` that names
 > it. This file is `nm`-auditable: `nm rust/target/aarch64-unknown-none/debug/*.a
@@ -51,8 +54,8 @@ Future symbol additions that touch these paths get bounds review first
   unknown `imm` returns an error, user pointers are validated before
   copy (`house_ipc_copy_msg` is length-bounded).
 - **Buddy containment.** `buddy_free_page`/`buddy_contains` reject null,
-  misaligned, and out-of-range (`BUDDY_START..BUDDY_END`) pages; the managed
-  window is `__heap_base+64M .. house_boot_stack_top-16*64K`.
+   misaligned, and out-of-range (`BUDDY_START..BUDDY_END`) pages; the managed
+   window is `__heap_base+64M .. stack_top-N*64K` (N = detected cores).
 
 Legend: **Crate** is the defining Rust crate; **Symbol** is the exact
 `#[no_mangle]` name `ld` expects; **C signature** is the pre-port C declaration;
@@ -88,8 +91,10 @@ Also `ttbr1_l0`, `l1_low`, `l1_rts`, `l2_rts` are `static` and not exported — 
 
 ### `buddy.rs` — `buddy.c` / `buddy.h`
 
-Manages `__heap_base+64M .. house_boot_stack_top-16*64K`; lengths use
-`checked_add` (SOTA Security 06).
+Manages `__heap_base+64M .. stack_top-N*64K` (N = detected cores, 2 MiB max
+reservation at the 32-core HW bound); lengths use `checked_add` (SOTA
+Security 06). Counters are 64-bit; `buddy_*_count` stay `int` as saturated
+compat shims, `house_mem_stats` is the full 64-bit path.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -124,7 +129,7 @@ rearm path feeding `house_rts_tick()` (SMP_N cores, PPI 27/30, SGI 0 IPI).
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
 | `house-hal-aarch64` | `house_isr_active` | `volatile int house_isr_active` | `timer.c`/`irq.c` |
-| `house-hal-aarch64` | `house_isr_pending` | `volatile uint64_t house_isr_pending[HOUSE_MAX_SMP]` | `timer.c` |
+| `house-hal-aarch64` | `house_isr_pending` | `volatile uint64_t house_isr_pending[HOUSE_MAX_SMP]` (32) | `timer.c` |
 | `house-hal-aarch64` | `house_timer_init` | `void house_timer_init(void)` | `timer.c` |
 | `house-hal-aarch64` | `house_timer_init_secondary` | `void house_timer_init_secondary(uint32_t core)` | `timer.c` |
 | `house-hal-aarch64` | `house_timer_rearm_virt` | `void house_timer_rearm_virt(void)` | `timer.c` |
@@ -195,6 +200,22 @@ Endpoint). Unknown `imm` is rejected; user pointers are validated before copy.
 | `house-hal-aarch64` | `house_ipc_svc_dispatch` | `int64_t house_ipc_svc_dispatch(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3)` | `ipc.c` |
 | `house-hal-aarch64` | `house_ipc_copy_msg` | `void house_ipc_copy_msg(const void *src, void *dst, size_t len)` | `ipc.c` |
 
+### `smp.rs` — SMP hotplug (new, Tracks S+H)
+
+`house_smp_up` / `house_smp_down` drive the PSCI OFF→ON cycle (`CPU_OFF`
+self-off via SGI 7 remote handshake, `CPU_ON` re-entry through
+`secondary_entry` with epoch-guarded re-init); `house_smp_online` reports the
+live mask and `house_smp_should_off` is polled by the target's SGI 7 handler
+in `house-boot` (`c_start.rs`). Range checks use `checked_shl` (no
+`1u32 << 32` edge); core 0 down is refused.
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-hal-aarch64` | `house_smp_online` | `uint32_t house_smp_online(void)` | `smp.rs` (new) |
+| `house-hal-aarch64` | `house_smp_up` | `int house_smp_up(uint32_t core)` | `smp.rs` (new) |
+| `house-hal-aarch64` | `house_smp_down` | `int house_smp_down(uint32_t core)` | `smp.rs` (new) |
+| `house-hal-aarch64` | `house_smp_should_off` | `int house_smp_should_off(uint32_t core)` | `smp.rs` (new) |
+
 ### `psci.rs` — `psci.c` / `psci.h`
 
 | Crate | Symbol | C signature | Source |
@@ -207,13 +228,18 @@ Endpoint). Unknown `imm` is rejected; user pointers are validated before copy.
 
 ### `dtb` / `detect` / `probe` — `house_dtb.c` / `house_detect.c` / `house_probe.c`
 
-RAM auto-detect: DTB `reg` (via `x0`) → fault probe `128M→16G` → `512M`
-fallback, capped by `HOUSE_RAM_LIMIT_BYTES`.
+RAM auto-detect: DTB `reg` (via `x0`) → open-ended fault probe (double from
+128M, TCR-bounded) → `512M` fallback. No build-time LIMIT vars, no geometry
+caps — `-m` is the only knob. DTB sums use `checked_add` (overflow → 0);
+`stack_top = BASE+ram-2M` via checked math. SMP is DTB → max(DTB,PSCI,GICR),
+bounded only by the 32-entry HW tables.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
 | `house-hal-aarch64` | `fdt_valid` | `int fdt_valid(const void *dtb)` | `house_dtb.c` |
 | `house-hal-aarch64` | `fdt_get_ram_bytes` | `uint64_t fdt_get_ram_bytes(const void *dtb)` | `house_dtb.c` |
+| `house-hal-aarch64` | `fdt_ram_bank_count` | `int fdt_ram_bank_count(const void *dtb)` | `house_dtb.c` (new) |
+| `house-hal-aarch64` | `fdt_get_ram_bank` | `int fdt_get_ram_bank(const void *dtb, int i, uint64_t *base, uint64_t *size)` | `house_dtb.c` (new) |
 | `house-hal-aarch64` | `fdt_get_cpu_count` | `int fdt_get_cpu_count(const void *dtb)` | `house_dtb.c` |
 | `house-hal-aarch64` | `house_detect_early` | `void house_detect_early(void)` | `house_detect.c` |
 | `house-hal-aarch64` | `house_detect_late` | `void house_detect_late(void)` | `house_detect.c` |

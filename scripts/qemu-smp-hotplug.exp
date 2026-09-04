@@ -1,0 +1,89 @@
+#!/usr/bin/expect -f
+# SMP hotplug cycle for House/aarch64 (down/up at N=2, caps mirror).
+# Usage: expect scripts/qemu-smp-hotplug.exp <kernel.bin> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 60}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "smp\r"
+expect {
+    -re "smp: 2 cores online" { puts "\nPASS: smp 2 online" }
+    timeout { puts "\nFAIL: smp 2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before smp"; exit 1 }
+}
+expect -re "> " {}
+send "parfib 20\r"
+expect {
+    -re "6765" { puts "\nPASS: parfib before down" }
+    timeout { puts "\nFAIL: parfib timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before parfib"; exit 1 }
+}
+expect -re "> " {}
+send "smp down 1\r"
+expect {
+    -re "smp down ok" { puts "\nPASS: down ok" }
+    timeout { puts "\nFAIL: down timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before down"; exit 1 }
+}
+expect -re "> " {}
+send "smp\r"
+expect {
+    -re "smp: 1 cores online" { puts "\nPASS: smp 1 online" }
+    timeout { puts "\nFAIL: smp 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after down"; exit 1 }
+}
+expect -re "> " {}
+send "caps\r"
+expect {
+    -re "caps 1" { puts "\nPASS: caps 1" }
+    timeout { puts "\nFAIL: caps 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before caps 1"; exit 1 }
+}
+expect -re "> " {}
+send "parfib 20\r"
+expect {
+    -re "6765" { puts "\nPASS: parfib after down" }
+    timeout { puts "\nFAIL: parfib down timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof parfib down"; exit 1 }
+}
+expect -re "> " {}
+send "smp up 1\r"
+expect {
+    -re "smp up ok" { puts "\nPASS: up ok" }
+    timeout { puts "\nFAIL: up timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before up"; exit 1 }
+}
+expect -re "> " {}
+send "smp\r"
+expect {
+    -re "smp: 2 cores online" { puts "\nPASS: smp 2 online again" }
+    timeout { puts "\nFAIL: smp 2 again timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after up"; exit 1 }
+}
+expect -re "> " {}
+send "parfib 20\r"
+expect {
+    -re "6765" { puts "\nPASS: parfib after up" }
+    timeout { puts "\nFAIL: parfib up timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof parfib up"; exit 1 }
+}
+puts "\nPASS: smp hotplug cycle ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

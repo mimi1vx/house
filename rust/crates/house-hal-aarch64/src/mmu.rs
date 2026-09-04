@@ -68,6 +68,7 @@ unsafe fn build_rts_alias(span: u64) {
         } else {
             0
         };
+        // HW bound: 8 L2 tables = 8G alias window (covers half of 16G RAM).
         let vspan64 = if usable_half > (8u64 << 30) {
             8u64 << 30
         } else {
@@ -232,6 +233,38 @@ pub unsafe extern "C" fn house_mmu_clone_kernel_l2(new_l2: *mut u64) {
     }
 }
 
+/// Map identity blocks for detected RAM not covered by `house_mmu_early`.
+///
+/// `house_mmu_early` runs before RAM is known and maps a 4G fallback window.
+/// After detect, RAM can sit above that window (e.g. 6G → stack_top ~7G);
+/// mapping must grow before `c_start` rebases `sp`, or the first push faults.
+/// Only block descriptors are written; table entries are never touched.
+/// # Safety
+/// Single core (secondaries not up yet), EL1, `L1_LOW` live. Caller orders
+/// TLB maintenance (`trim_ram_blocks` below issues `tlbi vmalle1is`).
+unsafe fn extend_ram_blocks() {
+    unsafe {
+        let mut span = get_ram_bytes();
+        if span == 0 {
+            span = 4u64 << 30;
+        }
+        let Some(blocks) = span
+            .checked_add((1u64 << 30) - 1)
+            .map(|s| (s >> 30) as usize)
+        else {
+            return;
+        };
+        let l1_low_ptr = L1_LOW.0.as_mut_ptr();
+        let mut i = 1usize;
+        while i <= blocks && i < 256 {
+            if *l1_low_ptr.wrapping_add(i) == 0 {
+                map_block(i, ATTR_NORMAL);
+            }
+            i += 1;
+        }
+    }
+}
+
 /// Clear stale early-boot 1GB RAM blocks beyond detected RAM.
 ///
 /// `house_mmu_early` runs before RAM is known and maps up to 4GB of 1GB
@@ -268,6 +301,7 @@ unsafe fn trim_ram_blocks() {
 #[no_mangle]
 pub unsafe extern "C" fn house_mmu_update_alias() {
     unsafe {
+        extend_ram_blocks();
         trim_ram_blocks();
         let span = get_ram_bytes();
         build_rts_alias(span);
