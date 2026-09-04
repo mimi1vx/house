@@ -45,27 +45,13 @@ unsafe fn probe_addr(addr: u64) -> bool {
     }
 }
 
-#[cfg(has_house_ram_limit)]
-const HOUSE_RAM_LIMIT: u64 = {
-    let s = env!("HOUSE_RAM_LIMIT_BYTES");
-    let bytes = s.as_bytes();
-    let mut val = 0u64;
-    let mut i = 0;
-    while i < bytes.len() {
-        val = val * 10 + (bytes[i] - b'0') as u64;
-        i += 1;
-    }
-    val
-};
-#[cfg(not(has_house_ram_limit))]
-const HOUSE_RAM_LIMIT: u64 = 0;
-
 #[no_mangle]
 pub unsafe extern "C" fn house_ram_probe() -> u64 {
-    // If HOUSE_RAM_LIMIT is set via cargo env (from make DEFS_C), use it directly to avoid HVF isv fault on probe beyond RAM
-    if HOUSE_RAM_LIMIT != 0 {
-        return HOUSE_RAM_LIMIT;
-    }
+    // No HOUSE_RAM_LIMIT shortcut: a limit larger than physical RAM would be
+    // misreported, and on hvf reads beyond RAM can succeed (false-positive).
+    // detect.rs applies the limit as min(detected, limit) instead. The DTB
+    // (via the `-kernel` flat binary Linux boot path) normally resolves
+    // first, so this fault walk only runs on boards without a DTB.
     // SAFETY: called early, single core, fault handler watches house_in_probe.
     unsafe {
         const SIZES: [u64; 8] = [

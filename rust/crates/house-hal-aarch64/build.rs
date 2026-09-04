@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_house_ram_limit)");
+    println!("cargo:rerun-if-env-changed=HOUSE_RAM_LIMIT_BYTES");
     let is_riscv = std::env::var("CARGO_FEATURE_RISCV64").is_ok();
     if is_riscv {
         println!("cargo:rustc-cfg=house_arch=\"riscv64\"");

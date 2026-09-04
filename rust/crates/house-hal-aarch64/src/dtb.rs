@@ -125,14 +125,21 @@ pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
                 namelen += 1; // include nul
                               // track memory node startswith "memory"
                 let is_mem = if !name_ptr.is_null() {
-                    // check prefix "memory" (6 chars)
+                    // "memory" or "memory@..." — not "memory-controller" etc.
                     let n0 = *name_ptr;
                     let n1 = *name_ptr.add(1);
                     let n2 = *name_ptr.add(2);
                     let n3 = *name_ptr.add(3);
                     let n4 = *name_ptr.add(4);
                     let n5 = *name_ptr.add(5);
-                    n0 == b'm' && n1 == b'e' && n2 == b'm' && n3 == b'o' && n4 == b'r' && n5 == b'y'
+                    let n6 = *name_ptr.add(6);
+                    n0 == b'm'
+                        && n1 == b'e'
+                        && n2 == b'm'
+                        && n3 == b'o'
+                        && n4 == b'r'
+                        && n5 == b'y'
+                        && (n6 == 0 || n6 == b'@')
                 } else {
                     false
                 };
@@ -311,10 +318,12 @@ pub unsafe extern "C" fn fdt_get_cpu_count(dtb: *const u8) -> i32 {
                     if is_cpus {
                         cpus_depth = stack_depth;
                     } else if cpus_depth >= 0 && stack_depth == cpus_depth + 1 {
-                        // child of cpus starting with "cpu"
+                        // child of cpus named "cpu" or "cpu@..." — not
+                        // "cpu-map" (topology container, no '@'/NUL after cpu)
                         let is_cpu = *name_ptr == b'c'
                             && *name_ptr.add(1) == b'p'
-                            && *name_ptr.add(2) == b'u';
+                            && *name_ptr.add(2) == b'u'
+                            && (*name_ptr.add(3) == 0 || *name_ptr.add(3) == b'@');
                         if is_cpu {
                             count += 1;
                         }

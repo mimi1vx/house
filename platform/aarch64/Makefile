@@ -6,6 +6,7 @@ HSINC  := $(shell dirname "$(shell find "$(LIBDIR)" -name HsFFI.h | head -1)")
 
 CC      := gcc
 LD      := ld
+OBJCOPY := objcopy
 DEFS_C  ?=
 DEFS_S  ?=
 SMP_N   ?= 2  # generalizes to N ≤ HOUSE_MAX_SMP (16, tested to 8)
@@ -20,8 +21,14 @@ RUST_COMPILER_BUILTINS_A := $(wildcard $(RUST_SYSROOT)/lib/rustlib/$(RUST_TARGET
 RUST_LIBS     := $(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A)
 
 BOOT_O := $(RUST_BOOT_A)
-$(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A):
+# FORCE: rlib file targets carry no source prerequisites, so without this make
+# treats existing rlibs as up-to-date and Rust edits never reach the ELF.
+# Cargo's own fingerprinting keeps the no-op case fast, and rerun-if-env-changed
+# in build.rs picks up HOUSE_RAM_LIMIT_BYTES changes.
+$(RUST_BOOT_A) $(RUST_HAL_A) $(RUST_LIBC_A): FORCE
 	HOUSE_RAM_LIMIT_BYTES=$(HOUSE_RAM_LIMIT_BYTES) cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET)
+
+FORCE:
 
 HOUSE_SMP_LIMIT ?= $(SMP_N)
 HOUSE_RAM_LIMIT_BYTES ?=
@@ -79,13 +86,13 @@ OBJS := $(COMMON_OBJS) $(HAL_O) build/Spike.o
 OBJS_IRQ := $(COMMON_OBJS) $(HAL_O) build/IrqCheck.o build/H/Monad.o build/H/Interrupts.o $(VM_OBJS)
 OBJS_HOUSE_DEPS := $(COMMON_OBJS) $(HAL_O)
 
-all: build/spike.elf
+all: build/spike.elf build/spike.bin
 	@readelf -h build/spike.elf | grep -E 'Entry|Machine'
 
-irq: build/irq.elf
+irq: build/irq.elf build/irq.bin
 	@readelf -h build/irq.elf | grep -E 'Entry|Machine'
 
-house: build/house.elf
+house: build/house.elf build/house.bin
 	@readelf -h build/house.elf | grep -E 'Entry|Machine'
 
 house-hs:
@@ -104,6 +111,13 @@ build/aarch64.ld: aarch64.ld | build
 
 build:
 	mkdir -p build build/H build/Kernel/Types build/Util build/Kernel build/mm
+
+# Flat binary for `-kernel`: QEMU boots non-ELF aarch64 images via its Linux
+# path (bootloader stub sets x0=DTB, loads DTB into RAM). ELF `-kernel` boots
+# get x0=0 and no DTB, which starves RAM auto-detect on hvf (fault probe
+# false-positives there). The .elf stays for readelf/gdb.
+build/%.bin: build/%.elf | build
+	$(OBJCOPY) -O binary $< $@
 
 build/%.o: %.c | build
 	@mkdir -p $(dir $@)
@@ -158,4 +172,4 @@ cargo-fmt:
 cargo-clean:
 	cargo clean --manifest-path $(RUST_MANIFEST)
 
-.PHONY: all clean cargo-build cargo-clippy cargo-fmt cargo-clean
+.PHONY: all clean cargo-build cargo-clippy cargo-fmt cargo-clean FORCE

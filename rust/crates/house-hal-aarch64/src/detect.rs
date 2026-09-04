@@ -29,7 +29,25 @@ extern "C" {
     fn uart_putc(c: u8);
 }
 
-const FALLBACK_RAM: u64 = 512 << 20; // fallback 512M matches old stub; probe should override to 4G
+const FALLBACK_RAM: u64 = 512 << 20; // fallback 512M matches old stub; DTB should override
+
+// HOUSE_RAM_LIMIT_BYTES (from make DEFS_C via build.rs rustc-env) is a cap:
+// min(detected, limit), never an override — a limit larger than physical RAM
+// must not be reported (hvf reads beyond RAM succeed, then crash on stores).
+#[cfg(has_house_ram_limit)]
+const HOUSE_RAM_LIMIT: u64 = {
+    let s = env!("HOUSE_RAM_LIMIT_BYTES");
+    let bytes = s.as_bytes();
+    let mut val = 0u64;
+    let mut i = 0;
+    while i < bytes.len() {
+        val = val * 10 + (bytes[i] - b'0') as u64;
+        i += 1;
+    }
+    val
+};
+#[cfg(not(has_house_ram_limit))]
+const HOUSE_RAM_LIMIT: u64 = 0;
 
 #[no_mangle]
 pub unsafe extern "C" fn house_detect_early() {
@@ -50,6 +68,10 @@ pub unsafe extern "C" fn house_detect_early() {
                 smp = cpus;
             }
         }
+        // Fault probe is last resort: on hvf, reads beyond physical RAM can
+        // succeed (no stage-2 fault), so a bare-metal probe false-positives.
+        // The `-kernel` flat binary boots via QEMU's Linux path (x0=DTB),
+        // so DTB normally resolves first and the probe never runs on QEMU.
         if ram == 0 {
             let probed = house_ram_probe();
             if probed >= HOUSE_RAM_MIN && probed <= HOUSE_RAM_MAX {
@@ -61,6 +83,12 @@ pub unsafe extern "C" fn house_detect_early() {
             ram = FALLBACK_RAM;
             src = b"fallback\0".as_ptr();
         }
+        if HOUSE_RAM_LIMIT >= HOUSE_RAM_MIN
+            && HOUSE_RAM_LIMIT <= HOUSE_RAM_MAX
+            && ram > HOUSE_RAM_LIMIT
+        {
+            ram = HOUSE_RAM_LIMIT;
+        }
         ram &= !((1u64 << 21) - 1);
         if ram < HOUSE_RAM_MIN {
             ram = HOUSE_RAM_MIN;
@@ -68,8 +96,7 @@ pub unsafe extern "C" fn house_detect_early() {
         if ram > HOUSE_RAM_MAX {
             ram = HOUSE_RAM_MAX;
         }
-        // HOUSE_RAM_LIMIT_BYTES is compile-time def in C; we read via env at runtime? keep as-is.
-        // In Rust we don't have compile-time def, so just keep ram.
+        // Stack top 2M below RAM end; buddy/MMU use it, so ram must be truthful.
         house_ram_bytes = ram;
         house_ram_source = src;
         house_boot_stack_top = RAM_BASE + ram - 0x200000;

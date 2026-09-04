@@ -14,7 +14,7 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 
 * Build container `house-port:latest` (Debian 13, Rust stable `aarch64-unknown-none` + GHC 9.14.1 aarch64 via ghcup). Every Haskell/Rust/C compilation runs `container run --platform linux/arm64 ...` (see `Containerfile`); `CONTAINER_DEFAULT_PLATFORM` is never set globally — each invocation pins `--platform linux/arm64` and `container image inspect` asserts `arm64` only. The HAL and boot are Rust (`rust/crates/house-boot` `global_asm!` + `rust/crates/house-hal-aarch64` + `rust/crates/house-libc`); see `rust/ARCHITECTURE.md`. `make rust-check` = `cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings` + `cargo fmt --check`.
 * QEMU on the macOS host (`brew install qemu expect`, HVF acceleration). The container is build-only; QEMU never runs inside it.
- * Guest RAM is auto-detected (DTB `reg` → probe `128M→16G` → `128M` fallback; same ELF at `256M`/`512M`/`1G`/`2G`/`4G`/`8G`/`16G` without rebuild). `SPIKE_MEM ?= 4G` (now `HOUSE_RAM_LIMIT`) only drives QEMU `-m` and caps `HOUSE_RAM_LIMIT_BYTES`. `SMP_N ?= 2` (now `HOUSE_SMP_LIMIT`) compiles `HOUSE_SMP_N`/`HOUSE_SMP_LIMIT` and per-core 64 KiB stacks (`house_boot_stack_top - core*64K`, `__early_stacks_base + SMP_N*64K`); `SMP_N` scales to `HOUSE_MAX_SMP` 16 (tested to 8). `TCR EPD1=0` split `TTBR1=kernel` / `TTBR0=user` with 8-bit ASID, `TLBI VAE1IS` + SGI 1 `VMALLE1IS` shootdown.
+ * Guest RAM is auto-detected (DTB `reg` from the `x0` QEMU passes on its Linux boot path → fault probe `128M→16G` → `512M` fallback; same binary at `256M`/`512M`/`1G`/`2G`/`4G`/`8G`/`16G` without rebuild). QEMU only takes that path for non-ELF images, so `-kernel` boots the `objcopy -O binary` flat image (`build/*.bin`; `.elf` stays for `readelf`/`gdb`) — ELF `-kernel` boots get `x0=0` and no DTB, and the fault probe false-positives on hvf (reads beyond RAM succeed, later stores abort QEMU with `hvf_handle_exception`). `SPIKE_MEM ?= 4G` (now `HOUSE_RAM_LIMIT`) only drives QEMU `-m` and caps `HOUSE_RAM_LIMIT_BYTES` via `min(detected, limit)`. `SMP_N ?= 2` (now `HOUSE_SMP_LIMIT`) compiles `HOUSE_SMP_N`/`HOUSE_SMP_LIMIT` and per-core 64 KiB stacks (`house_boot_stack_top - core*64K`, `__early_stacks_base + SMP_N*64K`); `SMP_N` scales to `HOUSE_MAX_SMP` 16 (tested to 8). `TCR EPD1=0` split `TTBR1=kernel` / `TTBR0=user` with 8-bit ASID, `TLBI VAE1IS` + SGI 1 `VMALLE1IS` shootdown.
 
 ### What boots
 
@@ -27,7 +27,7 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 
 ### Boot
 
-`rust/crates/house-boot/src/entry.rs` (`global_asm!`) handles the EL3→EL2→EL1 drop, enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocations (primary only), clears BSS (primary only), installs VBAR, calls `house_mmu_early` (primary, identity-maps RAM up to `16G` for probe) or `house_mmu_enable_secondary` (secondaries, shared tables), sets per-core `sp = house_boot_stack_top - core*64K` (early `__early_stacks_top`, rebased after `house_detect_early`), then enters `c_start` vs `c_start_secondary` (secondaries via `secondary_entry` 4 KiB-aligned PSCI entry `psci_cpu_on` `0xC4000003` `hvc` with `smc` fallback). `c_start` probes `house_ram_probe` (`128M→16G`) then `house_mmu_update_alias()` rebuilds RTS alias `0x4200000000+`.
+`rust/crates/house-boot/src/entry.rs` (`global_asm!`) preserves the DTB pointer from `x0`, handles the EL2→EL1 drop (EL3 where present), enables `ICC_SRE_EL2`, enables FP/SIMD (`cpacr_el1`), applies `R_AARCH64_RELATIVE` relocations (primary only), clears BSS (primary only), installs VBAR, calls `house_mmu_early` (primary, identity-maps RAM up to `16G` for probe) or `house_mmu_enable_secondary` (secondaries, shared tables), sets per-core `sp = house_boot_stack_top - core*64K` (early `__early_stacks_top`, rebased after `house_detect_early`), then enters `c_start` vs `c_start_secondary` (secondaries via `secondary_entry` 4 KiB-aligned PSCI entry `psci_cpu_on` `0xC4000003` `hvc` with `smc` fallback). `c_start` runs `house_detect_early` (DTB `reg` → fault probe → fallback, capped by `HOUSE_RAM_LIMIT_BYTES`) then `house_mmu_update_alias()` rebuilds RTS alias `0x4200000000+`.
 
 ### GICv3
 
@@ -47,7 +47,7 @@ make container-image
 
 # spike: Haskell -> PL011 -> ticks-ok (threadDelay 500 ms x4)
 make spike-build        # container: make -C platform/aarch64 DEFS_C/S
-make spike-run          # qemu hvf, -m 4G, -kernel platform/aarch64/build/spike.elf
+make spike-run          # qemu hvf, -m 4G, -kernel platform/aarch64/build/spike.bin
 make spike-check        # clean + build + expect hvf
 
 # GIC + VM

@@ -15,9 +15,11 @@ container-shell:
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) bash
 
 # --- aarch64 freestanding spike ---
-# Guest RAM is auto-detected (DTB → probe → fallback) — no compile limit.
+# Guest RAM is auto-detected (DTB via x0 → probe → fallback) — no compile limit.
+# -kernel boots the flat build/*.bin: QEMU takes non-ELF images via its Linux
+# path (x0=DTB); ELF -kernel gets x0=0 and the hvf probe false-positives.
 # SPIKE_MEM only drives QEMU -m (512M/1G/2G/4G/8G/16G all verified, hvf+tcg);
-# same ELF boots at any -m without rebuild. SMP_N: vCPUs for QEMU -smp
+# same binary boots at any -m without rebuild. SMP_N: vCPUs for QEMU -smp
 # and early stacks (default 2, up to HOUSE_MAX_SMP=16, tested to 8).
 # New names HOUSE_RAM_LIMIT / HOUSE_SMP_LIMIT are caps (compat shims kept):
 #   HOUSE_RAM_LIMIT ?= SPIKE_MEM  → -DHOUSE_RAM_LIMIT_BYTES
@@ -41,14 +43,14 @@ spike-build:
 
 spike-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
-	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/spike.elf
+	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/spike.bin
 
 spike-check:
 	container run --platform linux/arm64 --rm \
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) spike-build
-	expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.elf \
+	expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.bin \
 	  'ticks-ok' 90 hvf $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 irq-check kernel ---
@@ -60,7 +62,7 @@ irq-build:
 
 irq-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
-	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/irq.elf
+	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/irq.bin
 
 # irq-check runs both hvf and tcg and requires vm-ok (which implies irq-ok).
 irq-check:
@@ -68,9 +70,9 @@ irq-check:
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) irq-build
-	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.elf \
+	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
 	  'vm-ok' 120 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.elf \
+	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
 	  'vm-ok' 120 tcg $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 house kernel ---
@@ -91,7 +93,7 @@ rust-clean:
 
 house-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
-	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.elf
+	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.bin
 
 house-check:
 	container run --platform linux/arm64 --rm \
@@ -101,22 +103,22 @@ house-check:
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
 	  make -C kernel clean
 	$(MAKE) house-build
-	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.elf \
+	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
 	  'Welcome to the House shell' 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.elf \
+	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
 	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Interactive shell (phase 5): prompt → help/lambda/wastemem via PL011 RX
 house-shell-check:
 	$(MAKE) house-build
-	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # POSIX-ish shell + PSCI (phase 7): help descriptions, echo/clear/uname/uptime, shutdown -r/-h
 house-posix-check:
 	$(MAKE) house-build
-	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # SMP check (phase 9): N cores online + Haskell parallel (parametrised by SMP_N, default 2)
 # Use SMP_N=4 make smp-check for the >2 gate (4G working RAM, tested to 8, ceiling 16).
@@ -128,55 +130,55 @@ smp-check:
 	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
 	  make -C kernel clean
 	$(MAKE) house-build SMP_N=$(SMP_N)
-	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.elf 60 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # RamFS + VFS (Track 1): volatile 2 MiB pool over H.Pages, H.FileSystem via ls/cat/write/rm/mkdir/stat + echo > /path
 house-fs-check: house-build
-	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # IPC microkernel (Track 1b): L4 sync rendezvous, copy+grant, ns+cap, hybrid Haskell/EL0
 house-ipc-check: house-build
-	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Driver framework (Track 2): registry on IPC + dmesg ring + SPI + virtio-MMIO probe 0x0a000000+i*0x200
 house-driver-check: house-build
-	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Virtio-MMIO transport (Track 3): device-agnostic split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint
 house-virtio-transport-check: house-build
-	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.elf 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.elf 30 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Virtio-blk (Track 4): block device on transport, virtio_blk_req, Grant pages, 4K blocks (512B sectors on wire), capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B
 house-virtio-blk-check: house-build
 	qemu-img create -f raw /tmp/house.img 64M
-	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.elf 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
-	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.elf 45 tcg $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
+	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
+	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 tcg $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 
 # Virtio-net (Track 5): virtio-net server, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user netdev 10.0.2.0/24
 house-virtio-net-check: house-build
-	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.elf 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
+	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 
 # Userspace EL0 (Track 6): ELF loader 0x01000000 window, svc write/exit/brk + IPC 0x10..0x14 via Endpoint, TTBR0/ASID/pager
 house-userspace-check: house-build
-	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.elf "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # VM/demand pager (PR2): 4K demand paging 0x01000000–0xFFFFFFFF, mprotect RO→perm fault, munmap→translation fault, isolate, ASID+shootdown
 vm-check:
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C $(SPIKE_DIR) clean
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C kernel clean
 	$(MAKE) house-build HOUSE_RAM_LIMIT=512M HOUSE_SMP_LIMIT=2
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 hvf 512M 2
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 tcg 512M 2
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 512M 2
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 tcg 512M 2
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C $(SPIKE_DIR) clean
 	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) make -C kernel clean
 	$(MAKE) house-build HOUSE_RAM_LIMIT=4G HOUSE_SMP_LIMIT=4
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 hvf 4G 4
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.elf 'vm-ok' 90 tcg 4G 4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 4G 4
+	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 tcg 4G 4
 
 house-vm-check: vm-check
 
