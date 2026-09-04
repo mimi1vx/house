@@ -87,7 +87,9 @@ sleep 1
 send "virtio scan\r"
 expect {
     -re "device_id=3" { puts "\nPASS: virtio scan device_id=3" }
-    -re "virtio slot" {
+    -re "slot 7:" {
+        # slot 7 is the last line: full scan arrived with no console device.
+        # (bare "virtio slot" matched partial output under slow tcg.)
         if {$has_serial} { fail "virtio scan no console device with -device present" } else { puts "\nINFO: virtio scan no console (no -device)" }
     }
     timeout { fail "virtio scan2 timeout" }
