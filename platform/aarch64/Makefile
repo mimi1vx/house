@@ -61,7 +61,13 @@ DEEP_A := $(shell ls $(UNITDIR_deep)/libHSdeepseq-*.a | head -1)
 RTS_A  := $(shell ls $(UNITDIR_rts)/libHSrts-*.a | grep thr | grep -v debug | grep -v eventlog | head -1)
 FFI_A  := $(UNITDIR_rts)/libCffi.a
 
+# Rust canonical link owners: house-boot (entry/vectors: _start,
+# secondary_entry, vectors, house_enter_el0 via global_asm!) +
+# house-hal-aarch64 + house-libc (single #[panic_handler] +
+# __stack_chk_guard owner, rust/crates/house-libc/src/panic.rs).
+# Linked --start-group/--end-group below (spike/irq/house rules).
 # Pure Rust HAL + Rust libc (no C tinylibc) — c-legacy tag preserves hybrid for bisect.
+# tinylibc superseded-provenance only: unlinked from build, no C objects re-added.
 # Former C sources tinylibc/*.c + switch.S/tls_desc.S + threads.h/spinlock.h removed;
 # build/tiny-*.o rules retired (kept as comment for archive).
 HAL_O := $(RUST_HAL_A)
