@@ -30,6 +30,11 @@ module Kernel.Userspace
     Kernel.Userspace.Syscall.syscallWrite,
     Kernel.Userspace.Syscall.syscallExit,
     Kernel.Userspace.Syscall.syscallBrk,
+    Kernel.Userspace.Syscall.syscallIpcSend,
+    Kernel.Userspace.Syscall.syscallIpcRecv,
+    Kernel.Userspace.Syscall.syscallIpcCall,
+    Kernel.Userspace.Syscall.syscallIpcReply,
+    Kernel.Userspace.Syscall.syscallIpcGrantMap,
   )
 where
 

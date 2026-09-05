@@ -15,7 +15,7 @@ static mut HOUSE_USER_EXIT_CODE: i32 = 0;
 extern "C" {
     fn uart_puts(s: *const u8);
     fn uart_putc(c: u8);
-    fn house_ipc_svc_dispatch(x0: u64, x1: u64, x2: u64, x3: u64) -> i64;
+    fn house_ipc_svc_dispatch(op: u32, x0: u64, x1: u64, x2: u64, x3: u64) -> i64;
     fn current_pdir() -> *mut u8;
 }
 
@@ -50,7 +50,8 @@ unsafe fn translate_va(va: u64) -> usize {
     }
 }
 
-unsafe fn validate_user_buffer(va: u64, len: u64) -> i32 {
+pub(crate) unsafe fn validate_user_buffer(va: u64, len: u64) -> i32 {
+    // SAFETY: EL1 page-table reads only; caller guarantees EL1 and no lock needed for svc read.
     if len == 0 {
         return 0;
     }
@@ -204,7 +205,7 @@ pub unsafe extern "C" fn house_svc_dispatch(
             | HOUSE_SVC_IPC_CALL
             | HOUSE_SVC_IPC_REPLY
             | HOUSE_SVC_IPC_GRANT_MAP => {
-                let r = house_ipc_svc_dispatch(x0, x1, x2, x3);
+                let r = house_ipc_svc_dispatch(imm, x0, x1, x2, x3);
                 if !gpr.is_null() {
                     *gpr = r as u64;
                 }

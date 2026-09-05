@@ -197,7 +197,7 @@ Endpoint). Unknown `imm` is rejected; user pointers are validated before copy.
 | `house-hal-aarch64` | `house_get_exit_code` | `int house_get_exit_code(void)` | `svc.c` |
 | `house-hal-aarch64` | `house_clear_exit` | `void house_clear_exit(void)` | `svc.c` |
 | `house-hal-aarch64` | `house_is_exited` | `int house_is_exited(void)` | `svc.c` |
-| `house-hal-aarch64` | `house_ipc_svc_dispatch` | `int64_t house_ipc_svc_dispatch(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3)` | `ipc.c` |
+| `house-hal-aarch64` | `house_ipc_svc_dispatch` | `int64_t house_ipc_svc_dispatch(uint32_t op, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3)` | `ipc.c` |
 | `house-hal-aarch64` | `house_ipc_copy_msg` | `void house_ipc_copy_msg(const void *src, void *dst, size_t len)` | `ipc.c` |
 
 ### `smp.rs` — SMP hotplug (new, Tracks S+H)
