@@ -28,7 +28,7 @@ import qualified H.Pages as P
 import H.PhysicalMemory (PhysPage, fromPhysPage, toPhysPage)
 import H.Utils
 
-foreign import ccall "uart_puts" c_uart_puts_vm :: Ptr CChar -> IO ()
+foreign import ccall unsafe "uart_puts" c_uart_puts_vm :: Ptr CChar -> IO ()
 
 foreign import ccall unsafe "house_mmu_clone_kernel_l1" c_clone_l1 :: Table -> IO ()
 

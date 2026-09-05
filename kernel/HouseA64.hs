@@ -58,7 +58,7 @@ import qualified Kernel.Userspace as U
 import qualified Kernel.Userspace.Loader as ULdr
 import System.Timeout (timeout)
 
-foreign import ccall "uart_puts" c_uart_puts_raw :: Ptr CChar -> IO ()
+foreign import ccall unsafe "uart_puts" c_uart_puts_raw :: Ptr CChar -> IO ()
 
 -- | All shell output flows through here. Console-mirror interposition point:
 -- when 'con mirror on', every UART line is best-effort duplicated to the
