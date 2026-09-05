@@ -1,4 +1,8 @@
 //! EL1 virtual/physical timer — `timer.c` transliteration.
+//! Threaded-RTS seam: tick delivery is non-blocking and
+//! capability-agnostic — `house_rts_tick` (house-libc) no-ops when
+//! `house_thr_mode != 0`; per-core rearm here never blocks, and the fixed
+//! `-N` (c_start `smp_n`) sets the capability count, not the tick rate.
 
 const HOUSE_MAX_SMP: usize = 32;
 

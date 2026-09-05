@@ -3,6 +3,9 @@
 //! Owner of the OFF-request flags and per-core epoch. The online mask itself
 //! (`house_smp_online_mask`) stays single-owned by `house-boot` (`c_start.rs`);
 //! this module accesses it via `extern` volatile reads and atomic RMW only.
+//! Threaded-RTS seam: `+RTS -N<smp_n>` is synthesized in
+//! house-boot `c_start` from detected cores (Max(DTB,PSCI,GICR)<=32);
+//! affinity follows the live mask (offline target -> first online).
 
 #![allow(static_mut_refs)]
 

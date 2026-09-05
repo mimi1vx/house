@@ -1,5 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
+-- Threaded-RTS seam: unsafe-only FFI; caps mirror the live
+-- online mask via fixed `+RTS -N` (see house-boot c_start).
 module Kernel.SMP (onlineSet, onlineCount, up, down) where
 
 import Data.Bits (testBit)
