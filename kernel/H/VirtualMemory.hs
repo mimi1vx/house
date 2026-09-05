@@ -305,11 +305,12 @@ allocPageMap =
                 pokeElemOff l0 (l0Index minVAddr) (descFromTable l1)
                 pokeElemOff l1 (l1Index minVAddr) (descFromTable l2)
                 let pm = PageMap l0
-                P.registerPage l0 pm freePDir
+                -- No GC finalizer: waitPid/killPid/error paths free every pdir
+                -- explicitly; a finalizer would double-free recycled tables.
                 -- initPDir deferred to Process.runElf after mapping segments, to keep TTBR0 kernel during map
                 return (Just pm)
 
-freePageMap _ = return () -- nop; underlying Pages are freed when corresponding registered PageMap is discovered dead
+freePageMap _ = return () -- nop; pdirs are freed explicitly via freePDir
 
 freePDir :: PDir -> H ()
 freePDir l0 =

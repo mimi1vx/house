@@ -29,3 +29,6 @@ syscallBrk = 0x03
 -- Stack contract (runElf): sp is 16-byte aligned; [sp]=argc,
 -- [sp+8]=argv[argc+1] NULL-terminated, then envp[envc+1] NULL-terminated,
 -- then NUL-terminated strings. Bounds: 64 entries and 1024 bytes per string.
+-- Register contract (house_enter_el0/svc_exit_trampoline): the kernel
+-- preserves x19-x28 across the EL0 session; guests must not rely on any
+-- other register surviving svc roundtrips (x0 carries the return value).

@@ -91,6 +91,27 @@ expect {
     timeout { puts "\nFAIL: prompt after second run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after second run"; exit 1 }
 }
+send "run /bin/argenv a b\r"
+expect {
+    -re "argc=3" { puts "\nPASS: argenv argc=3 (argv0 + a b)" }
+    timeout { puts "\nFAIL: argenv argc timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before argenv argc"; exit 1 }
+}
+expect {
+    -re "HOUSE=1" { puts "\nPASS: argenv env HOUSE=1" }
+    timeout { puts "\nFAIL: argenv env timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before argenv env"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: argenv ok exit 0" }
+    timeout { puts "\nFAIL: argenv ok exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before argenv ok exit"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after argenv" }
+    timeout { puts "\nFAIL: prompt after argenv timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after argenv"; exit 1 }
+}
 send "free\r"
 expect {
     -re "buddy" { puts "\nPASS: free after runs buddy" }

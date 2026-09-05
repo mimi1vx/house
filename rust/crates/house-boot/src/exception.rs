@@ -205,6 +205,15 @@ house_enter_el0:
     // x0=entry, x1=sp, x2=pdir, x3=asid
     stp     x29, x30, [sp, #-16]!
     mov     x29, sp
+    // Preserve the AAPCS64 callee-saved regs across the EL0 session: the
+    // guest may clobber x19-x28 (hello only uses x0-x2, which is why this
+    // went unnoticed) and svc_exit_trampoline must see Haskell's values.
+    // Frame below x29/x30: 80 B, total 96 B (16-byte aligned).
+    stp     x19, x20, [sp, #-16]!
+    stp     x21, x22, [sp, #-16]!
+    stp     x23, x24, [sp, #-16]!
+    stp     x25, x26, [sp, #-16]!
+    stp     x27, x28, [sp, #-16]!
     // set TTBR0 = pdir | (asid << 48)
     mov     x9, x2
     bfi     x9, x3, #48, #16
@@ -247,6 +256,13 @@ svc_exit_trampoline:
     add     x0, x0, :lo12:exit_msg
     bl      uart_puts
     ldp     x0, x1, [sp], #16
+    // Restore the callee-saved regs stashed by house_enter_el0 (reverse
+    // order), then the x29/x30 pair, and return to the Haskell FFI caller.
+    ldp     x27, x28, [sp], #16
+    ldp     x25, x26, [sp], #16
+    ldp     x23, x24, [sp], #16
+    ldp     x21, x22, [sp], #16
+    ldp     x19, x20, [sp], #16
     ldp     x29, x30, [sp], #16
     ret
     .align 2
