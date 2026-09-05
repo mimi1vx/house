@@ -17,6 +17,7 @@ foreign import ccall unsafe "uart_putc" c_uart_putc :: CChar -> IO ()
 
 -- | Launch PL011 server: new endpoint, register "pl011", loop on recv.
 -- Tag 0: putc each msgWords word (truncated to CChar); tag 1: grant echo; else error reply.
+-- Lock order: 'newEndpoint' releases @endpointSem@ before 'nsRegister' takes @nsSem@ (sequential, never nested).
 launchPL011Server :: H (Either IpcError ())
 launchPL011Server = do
   ep <- newEndpoint

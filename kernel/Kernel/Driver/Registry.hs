@@ -38,9 +38,9 @@ validDriverName s
   | otherwise = Right ()
 
 -- | Register a driver: insert into 'drvMap' then 'nsRegister'. On 'NameExists'
--- roll back the 'drvMap' insert. Lock order @nsSem@ outermost enforced by
--- performing validation outside sems then acquiring @drvSem@ only for map ops
--- and delegating name uniqueness to 'nsRegister' which holds @nsSem@.
+-- roll back the 'drvMap' insert. Lock order @drvSem@ outermost, @nsSem@ inner:
+-- validation runs outside sems, then @drvSem@ is held across 'nsRegister'
+-- (which takes @nsSem@) to keep @drvMap@ and @nsMap@ consistent.
 -- Note: 'NS.nsRegister' handles the global uniqueness check under @nsSem@;
 -- we hold @drvSem@ across the call to keep @drvMap@ and @nsMap@ consistent
 -- without inverting lock order — caller never holds @epSem@ here.
