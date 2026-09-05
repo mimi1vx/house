@@ -54,6 +54,102 @@ expect {
     timeout { puts "\nFAIL: wastemem timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before wastemem"; exit 1 }
 }
+expect {
+    -re "> " { puts "\nPASS: prompt after wastemem" }
+    timeout { puts "\nFAIL: prompt after wastemem timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after wastemem"; exit 1 }
+}
+# line-editor regression: small keystroke bursts (PL011 RX FIFO is 16 deep)
+# with settles so no byte is lost to overrun on slow (tcg) guests.
+# mid-line insert: echo md01ab, Left Left, X => runs "echo md01Xab"
+send "echo "
+after 200
+send "md01ab"
+after 200
+send "\033\[D\033\[D"
+after 300
+send "X\r"
+expect {
+    -re "md01Xab\r*\n" { puts "\nPASS: mid-line insert" }
+    timeout { puts "\nFAIL: mid-line insert timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before mid-line insert"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after insert" }
+    timeout { puts "\nFAIL: prompt after insert timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after insert"; exit 1 }
+}
+# Backspace deletes the char before the cursor: echo md02abc, BS => md02ab
+send "echo "
+after 200
+send "md02abc"
+after 200
+send "\177"
+after 300
+send "\r"
+expect {
+    -re "md02ab\r*\n" { puts "\nPASS: backspace delete" }
+    timeout { puts "\nFAIL: backspace timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before backspace"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after backspace" }
+    timeout { puts "\nFAIL: prompt after backspace timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after backspace"; exit 1 }
+}
+# forward Delete (ESC [ 3 ~) removes the char under the cursor with no
+# "3~" leakage: echo md03ab, Left Left, Del => runs "echo md03b"
+send "echo "
+after 200
+send "md03ab"
+after 200
+send "\033\[D\033\[D"
+after 300
+send "\033\[3~"
+after 300
+send "\r"
+expect {
+    -re "md03b\r*\n" { puts "\nPASS: forward delete" }
+    timeout { puts "\nFAIL: forward delete timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before forward delete"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after forward delete" }
+    timeout { puts "\nFAIL: prompt after forward delete timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after forward delete"; exit 1 }
+}
+# Tab path completion: echo /b<Tab> => echo /bin/
+send "echo "
+after 200
+send "/b"
+after 200
+send "\t"
+after 300
+send "\r"
+expect {
+    -re "/bin/\r*\n" { puts "\nPASS: tab completion" }
+    timeout { puts "\nFAIL: tab completion timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before tab completion"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after tab completion" }
+    timeout { puts "\nFAIL: prompt after tab completion timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after tab completion"; exit 1 }
+}
+# Up recalls the previous line (echo /bin/) and re-runs it
+send "\033\[A"
+after 300
+send "\r"
+expect {
+    -re "/bin/\r*\n" { puts "\nPASS: history recall" }
+    timeout { puts "\nFAIL: history recall timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before history recall"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after history" }
+    timeout { puts "\nFAIL: prompt after history timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after history"; exit 1 }
+}
 puts "\nPASS: shell interactive ok"
 catch {exec kill -9 [exp_pid]}
 exit 0

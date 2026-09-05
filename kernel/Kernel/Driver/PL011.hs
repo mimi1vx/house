@@ -6,6 +6,7 @@ where
 
 import Data.Char (chr)
 import Data.Set qualified as Set
+import qualified Control.Concurrent as C
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CChar (..), CInt (..))
 import H.Concurrency
@@ -51,6 +52,7 @@ launchConsoleDriver = do
     dispatch (MoveCursorBackward n) = mapM_ (\_ -> c_uart_putc 0x08) [1 .. n]
     dispatch ClearScreen = cPutStr "\ESC[2J\ESC[H"
     dispatch ClearEOL = cPutStr "\ESC[K"
+    dispatch (Sync ack) = C.putMVar ack ()
 
 -- | PL011 RX → KeyPress producer. Polls the UART non-blocking register
 -- with a 10 ms threadDelay so the single-capability RTS can still service
@@ -94,6 +96,25 @@ launchPL011KeyboardDriver = do
                 Just 'D' -> writeChan chan (KeyPress Set.empty LeftKey) >> loop
                 Just 'H' -> writeChan chan (KeyPress Set.empty HomeKey) >> loop
                 Just 'F' -> writeChan chan (KeyPress Set.empty EndKey) >> loop
+                Just c3
+                  | c3 >= '0' && c3 <= '9' -> handleTilde [c3] >> loop
+                  | otherwise -> do
+                      writeChan chan (KeyPress Set.empty EscapeKey)
+                      writeChan chan (charToKeyPress c3)
+                      loop
+                Nothing -> do
+                  writeChan chan (KeyPress Set.empty EscapeKey)
+                  loop
+            -- xterm application-cursor mode: ESC O <final>.
+            Just 'O' -> do
+              m3 <- waitByte 5
+              case m3 of
+                Just 'A' -> writeChan chan (KeyPress Set.empty UpKey) >> loop
+                Just 'B' -> writeChan chan (KeyPress Set.empty DownKey) >> loop
+                Just 'C' -> writeChan chan (KeyPress Set.empty RightKey) >> loop
+                Just 'D' -> writeChan chan (KeyPress Set.empty LeftKey) >> loop
+                Just 'H' -> writeChan chan (KeyPress Set.empty HomeKey) >> loop
+                Just 'F' -> writeChan chan (KeyPress Set.empty EndKey) >> loop
                 Just c3 -> do
                   writeChan chan (KeyPress Set.empty EscapeKey)
                   writeChan chan (charToKeyPress c3)
@@ -105,6 +126,31 @@ launchPL011KeyboardDriver = do
               writeChan chan (KeyPress Set.empty EscapeKey)
               writeChan chan (charToKeyPress c2)
               loop
+        -- ESC [ <digits> ~ keypad/function sequences. Digit count is
+        -- bounded and every byte has a timeout, so a hostile or truncated
+        -- sequence can't stall the RX loop. Unknown codes are swallowed:
+        -- emitting nothing keeps stray sequences out of the line buffer.
+        handleTilde digits = do
+          m <- waitByte 5
+          case m of
+            Just '~' -> emitTilde digits
+            Just d
+              | d >= '0' && d <= '9' ->
+                  if length digits < 4
+                    then handleTilde (digits ++ [d])
+                    else handleTilde digits
+            _ -> return ()
+        emitTilde digits =
+          case digits of
+            "2" -> writeChan chan (KeyPress Set.empty InsertKey)
+            "3" -> writeChan chan (KeyPress Set.empty DeleteKey)
+            "5" -> writeChan chan (KeyPress Set.empty PageUpKey)
+            "6" -> writeChan chan (KeyPress Set.empty PageDownKey)
+            "1" -> writeChan chan (KeyPress Set.empty HomeKey)
+            "7" -> writeChan chan (KeyPress Set.empty HomeKey)
+            "4" -> writeChan chan (KeyPress Set.empty EndKey)
+            "8" -> writeChan chan (KeyPress Set.empty EndKey)
+            _ -> return ()
         waitByte :: Int -> H (Maybe Char)
         waitByte 0 = return Nothing
         waitByte n = do

@@ -7,6 +7,7 @@ module Kernel.Console
     clearScreen,
     moveCursorBackward,
     clearEOL,
+    syncConsole,
   )
 where
 
@@ -60,3 +61,12 @@ clearEOL :: Console -> H ()
 clearEOL (Console vConsole) =
   withMVar vConsole $ \console ->
     writeChan (consoleChan console) ClearEOL
+
+-- | Block until all previously queued commands reach the UART.
+syncConsole :: Console -> H ()
+syncConsole (Console vConsole) =
+  withMVar vConsole $ \console ->
+    do
+      ack <- newEmptyMVar
+      writeChan (consoleChan console) (Sync ack)
+      takeMVar ack

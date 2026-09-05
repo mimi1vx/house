@@ -66,8 +66,10 @@ getLine (LineEditor vEditor) prompt =
   withMVar vEditor $ \editor ->
     do
       let con = editorConsole editor
-          gl draw (before, after) len hist = do
-            drawLine draw
+          -- Cursor invariant: the terminal cursor sits `length before`
+          -- past the line start. Every transition redraws from the old
+          -- cursor via `redraw`; unchanged state skips redraw entirely.
+          gl (before, after) hist = do
             key <- readChan (editorChan editor)
             case translateKey key of
               Char c ->
@@ -77,75 +79,105 @@ getLine (LineEditor vEditor) prompt =
                     putChar' con inverseVideo ' '
                     clearEOL con
                     moveCursorBackward con 1
-                    gl False (before ++ [c], []) (len + 1) hist
-                  else gl True (before ++ [c], after) (len + 1) hist
+                    gl (before ++ [c], []) hist
+                  else do
+                    redraw before (before ++ [c]) after
+                    gl (before ++ [c], after) hist
               Accept ->
                 do
-                  putString con before
                   putString con after
                   clearEOL con
+                  putChar con '\n'
+                  -- Barrier: the line echo must hit the UART before the
+                  -- shell's direct-uart command output, else output glues
+                  -- onto the typed line on a real terminal.
+                  syncConsole con
                   return (before ++ after)
               Delete Previous ->
                 if null before
-                  then gl True (before, after) len hist
-                  else gl True (init before, after) (len - 1) hist
+                  then gl (before, after) hist
+                  else do
+                    redraw before (init before) after
+                    gl (init before, after) hist
               Delete Begin ->
-                gl True ([], after) (len - length before) hist
+                if null before
+                  then gl (before, after) hist
+                  else do
+                    redraw before [] after
+                    gl ([], after) hist
               Delete Next ->
                 case after of
-                  [] -> gl True (before, after) len hist
-                  _ : cs -> gl True (before, cs) (len - 1) hist
+                  [] -> gl (before, after) hist
+                  _ : cs -> do
+                    redraw before before cs
+                    gl (before, cs) hist
               Delete End ->
-                gl True (before, []) (len - length after) hist
+                if null after
+                  then gl (before, after) hist
+                  else do
+                    redraw before before []
+                    gl (before, []) hist
               Move Previous ->
                 if null before
-                  then gl True (before, after) len hist
-                  else
-                    gl
-                      True
-                      (init before, (last before) : after)
-                      len
-                      hist
+                  then gl (before, after) hist
+                  else do
+                    let nb = init before
+                        na = last before : after
+                    redraw before nb na
+                    gl (nb, na) hist
               Move Begin ->
-                gl True ([], before ++ after) len hist
+                if null before
+                  then gl (before, after) hist
+                  else do
+                    redraw before [] (before ++ after)
+                    gl ([], before ++ after) hist
               Move Next ->
                 case after of
-                  [] -> gl True (before, after) len hist
-                  c : cs -> gl True (before ++ [c], cs) len hist
+                  [] -> gl (before, after) hist
+                  c : cs -> do
+                    redraw before (before ++ [c]) cs
+                    gl (before ++ [c], cs) hist
               Move End ->
-                gl True (before ++ after, []) len hist
+                if null after
+                  then gl (before, after) hist
+                  else do
+                    redraw before (before ++ after) []
+                    gl (before ++ after, []) hist
               History ->
                 case hist of
-                  (_, []) -> gl True (before, after) len hist
-                  (fut, p : past) ->
-                    gl
-                      True
-                      (p, [])
-                      (length p)
-                      ((before ++ after) : fut, past)
+                  (_, []) -> gl (before, after) hist
+                  (fut, p : past) -> do
+                    redraw before p []
+                    gl (p, []) ((before ++ after) : fut, past)
               Future ->
                 case hist of
-                  ([], _) -> gl True (before, after) len hist
-                  (f : fut, past) ->
-                    gl
-                      True
-                      (f, [])
-                      (length f)
-                      (fut, (before ++ after) : past)
+                  ([], _) -> gl (before, after) hist
+                  (f : fut, past) -> do
+                    redraw before f []
+                    gl (f, []) (fut, (before ++ after) : past)
               Clear ->
                 do
                   clearScreen con
                   putString con prompt
-                  gl True (before, after) len hist
+                  redraw [] before after
+                  gl (before, after) hist
               Complete -> do
                 nb <- completeWord before
-                gl True (nb, after) (len + (length nb - length before)) hist
-              _ -> gl True (before, after) len hist
+                if nb == before
+                  then gl (before, after) hist
+                  else do
+                    redraw before nb after
+                    gl (nb, after) hist
+              _ -> gl (before, after) hist
             where
-              drawLine False = return ()
-              drawLine True = do
-                putString con before
-                case after of
+              -- Back `length oldBefore` to the line start, print the new
+              -- buffer with the cursor cell first, clear any ghost suffix
+              -- from a longer prior line, then sit back on the cursor.
+              redraw oldBefore newBefore newAfter = do
+                unless (null oldBefore) $
+                  moveCursorBackward con (length oldBefore)
+                putString con newBefore
+                case newAfter of
                   [] -> do
                     putChar' con inverseVideo ' '
                     clearEOL con
@@ -154,10 +186,13 @@ getLine (LineEditor vEditor) prompt =
                     putChar' con inverseVideo c
                     putString con cs
                     clearEOL con
-                moveCursorBackward con len
+                    moveCursorBackward con (length newAfter)
       putString con prompt
       history <- readMVar (editorHistory editor)
-      line <- gl True ([], []) 0 ([], history)
+      putChar' con inverseVideo ' '
+      clearEOL con
+      moveCursorBackward con 1
+      line <- gl ([], []) ([], history)
       unless (null line)
         $ modifyMVar_ (editorHistory editor)
         $ return . (line :)
