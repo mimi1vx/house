@@ -214,7 +214,9 @@ pub unsafe extern "C" fn virtio_transport_queue_max_q(slot: i32, qidx: i32, max:
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
     }
-    if qidx < 0 || qidx > 7 {
+    // Queue indices run past 7 on multiport serial buses
+    // (port id N lives on queues 2*N/2*N+1, control on 2/3).
+    if qidx < 0 || qidx > 127 {
         return VIRTIO_ERR_INVAL;
     }
     if max.is_null() {
@@ -252,7 +254,8 @@ pub unsafe extern "C" fn virtio_transport_queue_setup_q(
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
     }
-    if qidx < 0 || qidx > 7 {
+    // See queue_max_q: multiport serial port queues live past index 7.
+    if qidx < 0 || qidx > 127 {
         return VIRTIO_ERR_INVAL;
     }
     unsafe {

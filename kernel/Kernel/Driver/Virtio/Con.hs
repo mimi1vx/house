@@ -3,12 +3,17 @@ module Kernel.Driver.Virtio.Con
   ( ConError (..),
     conErrorToString,
     ConDevice (..),
+    ConKind (..),
     conProbe,
     conSubmitRx,
     conSubmitTx,
     conPollUsed,
     conInvalidate,
     conSaveQueues,
+    conSaveCtrlQueues,
+    conSetPortQueues,
+    conSubmitCtrlRx,
+    conSubmitCtrlTx,
     ConServer (..),
     conServerInit,
     conServerTeardown,
@@ -19,6 +24,6 @@ module Kernel.Driver.Virtio.Con
   )
 where
 
-import Kernel.Driver.Virtio.Con.Device (conInvalidate, conPollUsed, conProbe, conSaveQueues, conSubmitRx, conSubmitTx)
+import Kernel.Driver.Virtio.Con.Device (conInvalidate, conPollUsed, conProbe, conSaveCtrlQueues, conSaveQueues, conSetPortQueues, conSubmitCtrlRx, conSubmitCtrlTx, conSubmitRx, conSubmitTx)
 import Kernel.Driver.Virtio.Con.Server (ConServer (..), conRead, conReadBytes, conServerInit, conServerTeardown, conWrite, conWriteBytes)
-import Kernel.Driver.Virtio.Con.Types (ConDevice (..), ConError (..), conErrorToString)
+import Kernel.Driver.Virtio.Con.Types (ConDevice (..), ConError (..), ConKind (..), conErrorToString)

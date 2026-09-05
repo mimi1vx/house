@@ -293,6 +293,11 @@ are flushed (64 B lines from `pa & !63` to `pa+len`, `checked_add`).
 | `house-hal-aarch64` | `virtio_con_submit_rx` | `int virtio_con_submit_rx(int slot, uint64_t data_pa, uint32_t len, uint32_t *req_id)` | `virtio_con.c` |
 | `house-hal-aarch64` | `virtio_con_submit_tx` | `int virtio_con_submit_tx(int slot, uint64_t data_pa, uint32_t data_len, uint32_t *req_id)` | `virtio_con.c` |
 | `house-hal-aarch64` | `virtio_con_poll_used` | `int virtio_con_poll_used(int slot, int qidx, uint32_t *out_id, uint32_t *out_len)` | `virtio_con.c` |
+| `house-hal-aarch64` | `virtio_con_max_ports` | `int virtio_con_max_ports(int slot, uint32_t *out_ports)` | `virtio_con.c` |
+| `house-hal-aarch64` | `virtio_con_save_ctrl_queues` | `int virtio_con_save_ctrl_queues(int slot, uint64_t crx_desc, uint64_t crx_avail, uint64_t crx_used, uint64_t ctx_desc, uint64_t ctx_avail, uint64_t ctx_used, uint32_t qsize_crx, uint32_t qsize_ctx)` | `virtio_con.c` |
+| `house-hal-aarch64` | `virtio_con_submit_ctrl_rx` | `int virtio_con_submit_ctrl_rx(int slot, uint64_t data_pa, uint32_t len, uint32_t *req_id)` | `virtio_con.c` |
+| `house-hal-aarch64` | `virtio_con_submit_ctrl_tx` | `int virtio_con_submit_ctrl_tx(int slot, uint64_t data_pa, uint32_t data_len, uint32_t *req_id)` | `virtio_con.c` |
+| `house-hal-aarch64` | `virtio_con_set_port_queues` | `int virtio_con_set_port_queues(int slot, uint32_t rx_qidx, uint32_t tx_qidx)` | `virtio_con.c` |
 
 ### `c_start` / `exception` — `house-boot` (`global_asm!` + `c_start.rs`)
 
