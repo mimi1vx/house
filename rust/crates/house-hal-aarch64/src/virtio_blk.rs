@@ -320,9 +320,18 @@ unsafe fn blk_submit(
     let cap_lo = mmio_r32(base + BLK_CFG_OFF_CAPACITY) as u64;
     let cap_hi = mmio_r32(base + BLK_CFG_OFF_CAPACITY + 4) as u64;
     let capacity = (cap_hi << 32) | cap_lo;
-    let sector = lba_blocks * SECTORS_PER_BLOCK;
+    // SAFETY: sector arithmetic is checked — a wrapping LBA from untrusted
+    // input must be rejected, not aliased into range.
+    let sector = match lba_blocks.checked_mul(SECTORS_PER_BLOCK) {
+        Some(s) => s,
+        None => return VIRTIO_ERR_INVAL,
+    };
     let nsectors = nblocks as u64 * SECTORS_PER_BLOCK;
-    if sector + nsectors > capacity {
+    let end = match sector.checked_add(nsectors) {
+        Some(e) => e,
+        None => return VIRTIO_ERR_INVAL,
+    };
+    if end > capacity {
         return VIRTIO_ERR_INVAL;
     }
 
@@ -357,6 +366,12 @@ unsafe fn blk_submit(
     ss.status_byte = 0xff;
 
     let data_len = nblocks as usize * BLOCK_BYTES as usize;
+    // SAFETY: pa+len is checked_add-guarded like virtio_con submit_inner —
+    // dc_cvac_range skips wrapping ranges silently, so reject here instead
+    // of notifying with unflushed data.
+    if data_pa.checked_add(data_len as u64).is_none() {
+        return VIRTIO_ERR_INVAL;
+    }
 
     (*desc.add(head)).addr = req_pa;
     (*desc.add(head)).len = 16;

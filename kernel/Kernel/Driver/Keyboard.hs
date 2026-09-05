@@ -16,7 +16,6 @@ import Prelude hiding (putStrLn)
 -}
 import Control.Monad (mplus)
 import Data.Char
-import Data.Maybe (fromJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word
@@ -156,13 +155,14 @@ interpret ::
 interpret mods dead (KeyPressed (ModKey m)) =
   (Set.insert m mods, dead, [])
 interpret mods dead (KeyPressed (Key c)) =
-  handleMapping
-    $ fromJust
-    $ ( if Shift LSide `Set.member` mods || Shift RSide `Set.member` mods
-          then lookup c shiftMap `mplus` lookup c normalMap
-          else lookup c normalMap
-      )
-      `mplus` Just (Right c)
+  handleMapping $
+    case ( if Shift LSide `Set.member` mods || Shift RSide `Set.member` mods
+             then lookup c shiftMap `mplus` lookup c normalMap
+             else lookup c normalMap
+         )
+      `mplus` Just (Right c) of
+      Just m -> m
+      Nothing -> Right c -- unreachable: fallback above is always Just
   where
     handleMapping (Left dead') =
       case dead of

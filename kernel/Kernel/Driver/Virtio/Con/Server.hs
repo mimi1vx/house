@@ -368,16 +368,19 @@ waitCtrlEvent slot rid ptr tries
       case r of
         Right (Just (cid, _)) ->
           if cid == rid
-            then liftIO $ do
-              b0 <- peek (ptr `plusPtr` 0) :: IO Word8
-              b1 <- peek (ptr `plusPtr` 1) :: IO Word8
-              b2 <- peek (ptr `plusPtr` 2) :: IO Word8
-              b3 <- peek (ptr `plusPtr` 3) :: IO Word8
-              b4 <- peek (ptr `plusPtr` 4) :: IO Word8
-              b5 <- peek (ptr `plusPtr` 5) :: IO Word8
-              let pid = fromIntegral b0 + fromIntegral b1 * 256 + fromIntegral b2 * 65536 + fromIntegral b3 * 16777216 :: Int
-                  ev = fromIntegral b4 + fromIntegral b5 * 256 :: Int
-              return (Just (pid, ev))
+            then do
+              -- Device-written event bytes: invalidate-before-read, same as conReadBytes.
+              conInvalidate (c_pagePa ptr) 256
+              liftIO $ do
+                b0 <- peek (ptr `plusPtr` 0) :: IO Word8
+                b1 <- peek (ptr `plusPtr` 1) :: IO Word8
+                b2 <- peek (ptr `plusPtr` 2) :: IO Word8
+                b3 <- peek (ptr `plusPtr` 3) :: IO Word8
+                b4 <- peek (ptr `plusPtr` 4) :: IO Word8
+                b5 <- peek (ptr `plusPtr` 5) :: IO Word8
+                let pid = fromIntegral b0 + fromIntegral b1 * 256 + fromIntegral b2 * 65536 + fromIntegral b3 * 16777216 :: Int
+                    ev = fromIntegral b4 + fromIntegral b5 * 256 :: Int
+                return (Just (pid, ev))
             else waitCtrlEvent slot rid ptr (tries - 1)
         Right Nothing -> waitCtrlEvent slot rid ptr (tries - 1)
         Left _ -> return Nothing

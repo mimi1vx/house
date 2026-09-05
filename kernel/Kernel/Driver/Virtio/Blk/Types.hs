@@ -52,13 +52,14 @@ maxBlocksPerGrant :: Word32
 maxBlocksPerGrant = 1
 
 -- | Validate LBA (in 4K blocks) + count (blocks) against capacity (sectors).
--- Returns unit on success.
+-- Returns unit on success. Arithmetic runs in Integer so a wrapping
+-- Word64 LBA cannot alias into range (hostile capacity/LBA bytes).
 validateLba :: Word64 -> Word32 -> Word64 -> Either BlkError ()
 validateLba lba count capSectors
   | count == 0 = Left (BlkInvalidArg "count 0")
   | count > maxBlocksPerGrant = Left (BlkInvalidArg "count >1")
-  | sector + nsectors > capSectors = Left (BlkInvalidArg "LBA out of range")
+  | sector + nsectors > toInteger capSectors = Left (BlkInvalidArg "LBA out of range")
   | otherwise = Right ()
   where
-    sector = lba * sectorsPerBlock
-    nsectors = fromIntegral count * sectorsPerBlock
+    sector = toInteger lba * toInteger sectorsPerBlock
+    nsectors = toInteger count * toInteger sectorsPerBlock

@@ -237,6 +237,11 @@ pub unsafe extern "C" fn virtio_net_submit_rx(
     if len == 0 || len > 4096 {
         return VIRTIO_ERR_INVAL;
     }
+    // SAFETY: pa+len is checked_add-guarded — dc_cvac_range skips wrapping
+    // ranges silently, so reject here instead of notifying unflushed data.
+    if data_pa.checked_add(len as u64).is_none() {
+        return VIRTIO_ERR_INVAL;
+    }
     let base = slot_base(slot);
     let magic = mmio_r32(base + OFF_MAGIC);
     let ver = mmio_r32(base + OFF_VERSION);
@@ -310,6 +315,13 @@ pub unsafe extern "C" fn virtio_net_submit_tx(
         return VIRTIO_ERR_INVAL;
     }
     if data_len == 0 || data_len > 4096 - HDR_SIZE {
+        return VIRTIO_ERR_INVAL;
+    }
+    // SAFETY: pa+len checked_add-guarded on both ranges (see submit_rx).
+    if hdr_pa.checked_add(HDR_SIZE as u64).is_none() {
+        return VIRTIO_ERR_INVAL;
+    }
+    if data_pa.checked_add(data_len as u64).is_none() {
         return VIRTIO_ERR_INVAL;
     }
     let base = slot_base(slot);
