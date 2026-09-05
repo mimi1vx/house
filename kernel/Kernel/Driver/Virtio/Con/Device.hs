@@ -183,6 +183,7 @@ conSubmitCtrlTx slot dataPtr dataLen
 conSetPortQueues :: Int -> Word32 -> Word32 -> H (Either ConError ())
 conSetPortQueues slot rxQ txQ
   | not (slotValid slot) = return (Left ConBadSlot)
+  | rxQ > 127 || txQ > 127 = return (Left (ConInvalidArg "port qidx"))
   | otherwise = do
       r <- liftIO $ c_set_port_queues slot rxQ txQ
       if r /= 0 then return (Left (cErrToConError (fromIntegral r))) else return (Right ())

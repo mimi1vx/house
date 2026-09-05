@@ -34,7 +34,7 @@ import qualified Kernel.Driver.IRQ as DIRQ
 import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Con.Device (conInvalidate, conPollUsed, conProbe, conSaveCtrlQueues, conSaveQueues, conSetPortQueues, conSubmitCtrlRx, conSubmitCtrlTx, conSubmitRx, conSubmitTx)
-import Kernel.Driver.Virtio.Con.Types (ConDevice (..), ConError (..), ConKind (..))
+import Kernel.Driver.Virtio.Con.Types (ConDevice (..), ConError (..), ConKind (..), decodeCtrlEvent, portQueuesFor)
 import Kernel.Driver.Virtio.Queue (VirtQueue (..), allocQueue, freeQueue, queueAvailPa, queueDescPa, queueSize, queueUsedPa)
 import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
@@ -157,15 +157,16 @@ conServerInit slot
                                         Right () -> do
                                           -- QEMU queue order: port 0 on 0/1, control on 2/3,
                                           -- port N>=1 on 2*N+2/2*N+3 (port 0 is reserved).
-                                          let rxQ = if pid == 0 then 0 else 2 * pid + 2
-                                              txQ = rxQ + 1
-                                          portRes <- setupPortQueues slot rxQ txQ
-                                          case portRes of
-                                            Left e -> do freeCtrl mCtrl; _ <- liftIO $ c_set_status slot 0; return (Left e)
-                                            Right (vqRx, vqTx, qsizeRx, qsizeTx) -> do
-                                              _ <- conSaveQueues slot (queueDescPa vqRx) (queueAvailPa vqRx) (queueUsedPa vqRx) (queueDescPa vqTx) (queueAvailPa vqTx) (queueUsedPa vqTx) qsizeRx qsizeTx
-                                              _ <- conSetPortQueues slot (fromIntegral rxQ) (fromIntegral txQ)
-                                              attachDevice slot kind vqRx vqTx mCtrl
+                                          case portQueuesFor pid of
+                                            Nothing -> do freeCtrl mCtrl; _ <- liftIO $ c_set_status slot 0; return (Left (ConInvalidArg "port qidx"))
+                                            Just (rxQ, txQ) -> do
+                                              portRes <- setupPortQueues slot rxQ txQ
+                                              case portRes of
+                                                Left e -> do freeCtrl mCtrl; _ <- liftIO $ c_set_status slot 0; return (Left e)
+                                                Right (vqRx, vqTx, qsizeRx, qsizeTx) -> do
+                                                  _ <- conSaveQueues slot (queueDescPa vqRx) (queueAvailPa vqRx) (queueUsedPa vqRx) (queueDescPa vqTx) (queueAvailPa vqTx) (queueUsedPa vqTx) qsizeRx qsizeTx
+                                                  _ <- conSetPortQueues slot (fromIntegral rxQ) (fromIntegral txQ)
+                                                  attachDevice slot kind vqRx vqTx mCtrl
                             Right Nothing -> return (Left (ConInvalidArg "serial ctrl missing"))
 
 -- | Teardown.
@@ -358,7 +359,7 @@ pokeCtrl p i ev v = do
   poke (p `plusPtr` 7) (fromIntegral (v `shiftR` 8) :: Word8)
 
 -- | Wait for the posted control-RX buffer to complete and parse the event
--- as (port id, event). Nothing on timeout or error.
+-- as (port id, event). Nothing on timeout, error, or short (< 8 B) reply.
 waitCtrlEvent :: Int -> Word32 -> Ptr Word8 -> Int -> H (Maybe (Int, Int))
 waitCtrlEvent slot rid ptr tries
   | tries <= 0 = return Nothing
@@ -366,21 +367,24 @@ waitCtrlEvent slot rid ptr tries
       busyDelayUs 2000
       r <- conPollUsed slot 2
       case r of
-        Right (Just (cid, _)) ->
+        Right (Just (cid, ulen)) ->
           if cid == rid
-            then do
-              -- Device-written event bytes: invalidate-before-read, same as conReadBytes.
-              conInvalidate (c_pagePa ptr) 256
-              liftIO $ do
-                b0 <- peek (ptr `plusPtr` 0) :: IO Word8
-                b1 <- peek (ptr `plusPtr` 1) :: IO Word8
-                b2 <- peek (ptr `plusPtr` 2) :: IO Word8
-                b3 <- peek (ptr `plusPtr` 3) :: IO Word8
-                b4 <- peek (ptr `plusPtr` 4) :: IO Word8
-                b5 <- peek (ptr `plusPtr` 5) :: IO Word8
-                let pid = fromIntegral b0 + fromIntegral b1 * 256 + fromIntegral b2 * 65536 + fromIntegral b3 * 16777216 :: Int
-                    ev = fromIntegral b4 + fromIntegral b5 * 256 :: Int
-                return (Just (pid, ev))
+            then
+              if ulen < 8
+                then return Nothing
+                else do
+                  -- Device-written event bytes: invalidate-before-read, same as conReadBytes.
+                  conInvalidate (c_pagePa ptr) 256
+                  liftIO $ do
+                    b0 <- peek (ptr `plusPtr` 0) :: IO Word8
+                    b1 <- peek (ptr `plusPtr` 1) :: IO Word8
+                    b2 <- peek (ptr `plusPtr` 2) :: IO Word8
+                    b3 <- peek (ptr `plusPtr` 3) :: IO Word8
+                    b4 <- peek (ptr `plusPtr` 4) :: IO Word8
+                    b5 <- peek (ptr `plusPtr` 5) :: IO Word8
+                    b6 <- peek (ptr `plusPtr` 6) :: IO Word8
+                    b7 <- peek (ptr `plusPtr` 7) :: IO Word8
+                    return (decodeCtrlEvent [b0, b1, b2, b3, b4, b5, b6, b7])
             else waitCtrlEvent slot rid ptr (tries - 1)
         Right Nothing -> waitCtrlEvent slot rid ptr (tries - 1)
         Left _ -> return Nothing
@@ -459,39 +463,42 @@ openPort slot pid = do
 -- serial port 0 on 0/1, port N>=1 on 2*N+2/2*N+3).
 -- Allocates, flushes, and QueueReady-marks both queues. Cleans up on failure.
 setupPortQueues :: Int -> Int -> Int -> H (Either ConError (VirtQueue, VirtQueue, Word32, Word32))
-setupPortQueues slot rxQ txQ = do
-  qmaxRxRes <- liftIO $ alloca $ \pMax -> do r <- c_qmax_q slot rxQ pMax; if r /= 0 then return (Left r) else do v <- peek pMax; return (Right v)
-  qmaxTxRes <- liftIO $ alloca $ \pMax -> do r <- c_qmax_q slot txQ pMax; if r /= 0 then return (Left r) else do v <- peek pMax; return (Right v)
-  case (qmaxRxRes, qmaxTxRes) of
-    (Right qmaxRx, Right qmaxTx) -> do
-      let qsizeRx = min qmaxRx 64
-          qsizeTx = min qmaxTx 64
-      if qsizeRx == 0 || qsizeTx == 0
-        then return (Left (ConInvalidArg "QueueNumMax 0"))
-        else do
-          qrRx <- allocQueue qsizeRx
-          case qrRx of
-            Left _ -> return (Left ConNoSpace)
-            Right vqRx -> do
-              qrTx <- allocQueue qsizeTx
-              case qrTx of
-                Left _ -> do freeQueue vqRx; return (Left ConNoSpace)
-                Right vqTx -> do
-                  liftIO $ c_dc_flush (queueDescPa vqRx) 4096
-                  liftIO $ c_dc_flush (queueAvailPa vqRx) 4096
-                  liftIO $ c_dc_flush (queueUsedPa vqRx) 4096
-                  liftIO $ c_dc_flush (queueDescPa vqTx) 4096
-                  liftIO $ c_dc_flush (queueAvailPa vqTx) 4096
-                  liftIO $ c_dc_flush (queueUsedPa vqTx) 4096
-                  setupRx <- liftIO $ c_qsetup_q slot rxQ (queueDescPa vqRx) (queueAvailPa vqRx) (queueUsedPa vqRx) qsizeRx
-                  if setupRx /= 0
-                    then do freeQueue vqRx; freeQueue vqTx; Dmesg.dmesgLog ("con setupRx slot " ++ show slot ++ "=" ++ show setupRx); return (Left (ConIoError setupRx))
-                    else do
-                      setupTx <- liftIO $ c_qsetup_q slot txQ (queueDescPa vqTx) (queueAvailPa vqTx) (queueUsedPa vqTx) qsizeTx
-                      if setupTx /= 0
-                        then do freeQueue vqRx; freeQueue vqTx; Dmesg.dmesgLog ("con setupTx slot " ++ show slot ++ "=" ++ show setupTx); return (Left (ConIoError setupTx))
-                        else return (Right (vqRx, vqTx, qsizeRx, qsizeTx))
-    _ -> return (Left (ConIoError 5))
+setupPortQueues slot rxQ txQ
+  | not (slotValid slot) = return (Left ConBadSlot)
+  | rxQ < 0 || rxQ > 127 || txQ < 0 || txQ > 127 = return (Left (ConInvalidArg "port qidx"))
+  | otherwise = do
+      qmaxRxRes <- liftIO $ alloca $ \pMax -> do r <- c_qmax_q slot rxQ pMax; if r /= 0 then return (Left r) else do v <- peek pMax; return (Right v)
+      qmaxTxRes <- liftIO $ alloca $ \pMax -> do r <- c_qmax_q slot txQ pMax; if r /= 0 then return (Left r) else do v <- peek pMax; return (Right v)
+      case (qmaxRxRes, qmaxTxRes) of
+        (Right qmaxRx, Right qmaxTx) -> do
+          let qsizeRx = min qmaxRx 64
+              qsizeTx = min qmaxTx 64
+          if qsizeRx == 0 || qsizeTx == 0
+            then return (Left (ConInvalidArg "QueueNumMax 0"))
+            else do
+              qrRx <- allocQueue qsizeRx
+              case qrRx of
+                Left _ -> return (Left ConNoSpace)
+                Right vqRx -> do
+                  qrTx <- allocQueue qsizeTx
+                  case qrTx of
+                    Left _ -> do freeQueue vqRx; return (Left ConNoSpace)
+                    Right vqTx -> do
+                      liftIO $ c_dc_flush (queueDescPa vqRx) 4096
+                      liftIO $ c_dc_flush (queueAvailPa vqRx) 4096
+                      liftIO $ c_dc_flush (queueUsedPa vqRx) 4096
+                      liftIO $ c_dc_flush (queueDescPa vqTx) 4096
+                      liftIO $ c_dc_flush (queueAvailPa vqTx) 4096
+                      liftIO $ c_dc_flush (queueUsedPa vqTx) 4096
+                      setupRx <- liftIO $ c_qsetup_q slot rxQ (queueDescPa vqRx) (queueAvailPa vqRx) (queueUsedPa vqRx) qsizeRx
+                      if setupRx /= 0
+                        then do freeQueue vqRx; freeQueue vqTx; Dmesg.dmesgLog ("con setupRx slot " ++ show slot ++ "=" ++ show setupRx); return (Left (ConIoError setupRx))
+                        else do
+                          setupTx <- liftIO $ c_qsetup_q slot txQ (queueDescPa vqTx) (queueAvailPa vqTx) (queueUsedPa vqTx) qsizeTx
+                          if setupTx /= 0
+                            then do freeQueue vqRx; freeQueue vqTx; Dmesg.dmesgLog ("con setupTx slot " ++ show slot ++ "=" ++ show setupTx); return (Left (ConIoError setupTx))
+                            else return (Right (vqRx, vqTx, qsizeRx, qsizeTx))
+        _ -> return (Left (ConIoError 5))
 
 -- | Attach a live device: IRQ, endpoint, registry, RX replenish. Shared by
 -- the console and serial init paths.

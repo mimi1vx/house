@@ -9,9 +9,12 @@ module Kernel.Driver.Virtio.Con.Types
     conErrorToString,
     ConDevice (..),
     ConKind (..),
+    decodeCtrlEvent,
+    portQueuesFor,
   )
 where
 
+import Data.Word (Word8)
 import H.Interrupts (IntId)
 import Kernel.Driver.Virtio.Queue (VirtQueue)
 import Kernel.IPC.Types (Endpoint)
@@ -52,3 +55,24 @@ data ConKind
   = ConConsole
   | ConSerial Int
   deriving (Eq, Show)
+
+-- | Total control-event decoder: {id LE32, event LE16, value LE16}.
+-- Needs 8 bytes; Nothing on short input (never index before length check).
+decodeCtrlEvent :: [Word8] -> Maybe (Int, Int)
+decodeCtrlEvent (b0 : b1 : b2 : b3 : b4 : b5 : _ : _ : _) =
+  Just (pid, ev)
+  where
+    pid = fromIntegral b0 + fromIntegral b1 * 256 + fromIntegral b2 * 65536 + fromIntegral b3 * 16777216
+    ev = fromIntegral b4 + fromIntegral b5 * 256
+decodeCtrlEvent _ = Nothing
+
+-- | Transport queue pair for a serial port id: port 0 on 0/1,
+-- port N>=1 on 2*N+2/2*N+3. Total: Nothing outside 0..31.
+portQueuesFor :: Int -> Maybe (Int, Int)
+portQueuesFor pid
+  | pid < 0 || pid > 31 = Nothing
+  | pid == 0 = Just (0, 1)
+  | otherwise =
+      let rx = 2 * pid + 2
+          tx = rx + 1
+       in if tx <= 127 then Just (rx, tx) else Nothing
