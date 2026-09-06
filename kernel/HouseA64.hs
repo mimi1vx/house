@@ -1,21 +1,17 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -Wno-unused-imports -Wno-incomplete-uni-patterns #-}
+{-# OPTIONS_GHC -Wno-unused-imports #-}
 
-module HouseA64 where
+module HouseA64 (house_main) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, catch)
+import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (forM_, when)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
-import Data.Char (chr, ord)
-import Data.List (isPrefixOf, nub)
-import Data.Word (Word32, Word64, Word8)
-import Foreign.C.String (peekCString, withCString)
-import Foreign.C.Types (CChar (..), CInt (..), CLong (..), CSize (..))
-import Foreign.Marshal.Alloc (alloca, allocaBytes)
-import Foreign.Ptr (Ptr, castPtr, intPtrToPtr, nullPtr, plusPtr, ptrToIntPtr)
-import Foreign.Storable (peek, poke)
+import Data.Char (chr)
+import Data.List (isPrefixOf)
+import Data.Word (Word8)
+import Foreign.C.String (withCString)
 import GHC.Conc
   ( getNumCapabilities,
     getNumProcessors,
@@ -25,11 +21,7 @@ import GHC.Conc
   )
 import qualified H.FileSystem as FS
 import H.Monad (runH)
-import H.Mutable (Ref, newRef, readRef, writeRef)
-import qualified H.Pages as HPages
-import qualified H.PhysicalMemory as HPhys
-import H.Unsafe (unsafePerformH)
-import qualified H.VirtualMemory as VM
+import H.Mutable (writeRef)
 import qualified Kernel.Driver.Dmesg as Dmesg
 import qualified Kernel.Driver.GIC as DGIC
 import qualified Kernel.Driver.IRQ as DIRQ
@@ -54,87 +46,15 @@ import qualified Kernel.IPC.Nameservice as NS
 import Kernel.IPC.Types (Message (..))
 import qualified Kernel.LineEditor as LE
 import qualified Kernel.SMP as SMP
+import Kernel.Shell.Foreign (c_uart_puts, conMirror)
+import Kernel.Shell.Format (hexDigit, showFsError, showHex, toExecError)
+import Kernel.Shell.Mem (handleDetect, handleFree, handleMem, handlePalloc)
+import Kernel.Shell.Parse (parseIpv4)
+import Kernel.Shell.Posix (handleShutdown, handleUname, handleUptime)
+import Kernel.Shell.Vm (handleVm)
 import qualified Kernel.Userspace as U
 import qualified Kernel.Userspace.Loader as ULdr
 import System.Timeout (timeout)
-
-foreign import ccall unsafe "uart_puts" c_uart_puts_raw :: Ptr CChar -> IO ()
-
--- | All shell output flows through here. Console-mirror interposition point:
--- when 'con mirror on', every UART line is best-effort duplicated to the
--- virtio-console TX queue (dropped when not inited, never blocks the shell).
-c_uart_puts :: Ptr CChar -> IO ()
-c_uart_puts p = c_uart_puts_raw p >> mirrorOut p
-
--- | Best-effort mirror of one UART string to the console slot. Swallows all
--- exceptions; drops silently unless mirror is on and the server is inited.
-mirrorOut :: Ptr CChar -> IO ()
-mirrorOut p = do
-  on <- runH (readRef conMirror)
-  when on $
-    ( do
-        s <- peekCString p
-        slot <- runH (readRef conMirrorSlot)
-        _ <- runH (Con.conWriteBytes slot (map (fromIntegral . fromEnum) (take 4096 s)))
-        return ()
-    )
-      `catch` (\(_ :: SomeException) -> return ())
-
-{-# NOINLINE conMirror #-}
-conMirror :: Ref Bool
-conMirror = unsafePerformH $ newRef False
-
-{-# NOINLINE conMirrorSlot #-}
-conMirrorSlot :: Ref Int
-conMirrorSlot = unsafePerformH $ newRef 7
-
-foreign import ccall unsafe "house_uptime_secs" c_uptime :: IO Word64
-
-foreign import ccall unsafe "psci_system_off" c_off :: IO ()
-
-foreign import ccall unsafe "psci_system_reset" c_reset :: IO ()
-
-foreign import ccall unsafe "&house_ram_bytes" c_ram_ref :: Ptr Word64
-
-foreign import ccall unsafe "&house_boot_stack_top" c_stack_top_ref :: Ptr Word64
-
-foreign import ccall unsafe "&house_ram_source" c_ram_source_ref :: Ptr (Ptr CChar)
-
-foreign import ccall unsafe "&house_smp" c_smp_ref :: Ptr CInt
-
-foreign import ccall unsafe "&__boot_dtb" c_dtb_ref :: Ptr Word64
-
-foreign import ccall unsafe "fdt_ram_bank_count" c_bank_count :: Ptr () -> IO CInt
-
-foreign import ccall unsafe "fdt_get_ram_bank" c_bank_get :: Ptr () -> CInt -> Ptr Word64 -> Ptr Word64 -> IO CInt
-
-foreign import ccall unsafe "house_mem_stats" c_mem_stats :: Ptr Word64 -> Ptr Word64 -> IO ()
-
-foreign import ccall unsafe "buddy_total_count" c_buddy_total :: IO CInt
-
-foreign import ccall unsafe "buddy_free_count" c_buddy_free :: IO CInt
-
-foreign import ccall unsafe "house_get_ttbrs" c_get_ttbrs :: Ptr Word64 -> Ptr Word64 -> Ptr Word64 -> IO ()
-
-foreign import ccall unsafe "mmap" c_mmap :: Ptr () -> CSize -> CInt -> CInt -> CInt -> CLong -> IO (Ptr ())
-
-foreign import ccall unsafe "munmap" c_munmap :: Ptr () -> CSize -> IO CInt
-
-foreign import ccall unsafe "mprotect" c_mprotect :: Ptr () -> CSize -> CInt -> IO CInt
-
-foreign import ccall unsafe "house_vm_demand_single" c_demand_single :: IO CInt
-
-foreign import ccall unsafe "house_vm_demand_100" c_demand_100 :: IO CInt
-
-foreign import ccall unsafe "house_puts_after" c_puts_after :: IO ()
-
-foreign import ccall unsafe "init_page_dir" c_init_pdir :: Ptr Word64 -> IO ()
-
-foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
-
-foreign import ccall unsafe "house_tlb_shootdown" c_tlb_shootdown :: Word64 -> IO ()
-
-foreign import ccall unsafe "house_asid_for_pdir" c_asid_for :: Ptr Word64 -> IO Word64
 
 -- Embedded EL0 hello ELF for run demo (static aarch64, svc write/exit). If ramfs missing, write on boot.
 helloBytes :: [Word8]
@@ -357,11 +277,8 @@ house_main = do
       ("echo" : ws) -> handleEcho ws
       ["clear"] -> withCString "\ESC[2J\ESC[H" c_uart_puts
       ("uname" : args) -> handleUname args
-      ["uptime"] -> do s <- c_uptime; withCString ("up " ++ show s ++ " seconds\n") c_uart_puts
-      ("shutdown" : args) -> case args of
-        ["-r"] -> c_reset
-        ["-h"] -> c_off
-        _ -> withCString "usage: shutdown [-h|-r]\n" c_uart_puts
+      ["uptime"] -> handleUptime
+      ("shutdown" : args) -> handleShutdown args
       ["lambda"] -> withCString "Too much to abstract!\n" c_uart_puts
       ["preempt"] -> do withCString (replicate 100 'a' ++ "\n") c_uart_puts; withCString (replicate 100 'b' ++ "\n") c_uart_puts
       ["wastemem", nStr] -> case reads nStr of
@@ -716,8 +633,8 @@ house_main = do
         Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
     handlePing ipStr = case parseIpv4 ipStr of
-      Nothing -> withCString "EINVAL: bad ip\n" c_uart_puts
-      Just ip -> do
+      Left _ -> withCString "EINVAL: bad ip\n" c_uart_puts
+      Right ip -> do
         xs <- runH NS.nsList
         let slot = findNetSlot xs
         r <- runH (Net.netPing slot ip)
@@ -725,7 +642,7 @@ house_main = do
           Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
           Right s -> withCString (s ++ "\n") c_uart_puts
     handleUdpEcho ipStr portStr txt = case (parseIpv4 ipStr, reads portStr) of
-      (Just ip, [(p, "")]) -> do
+      (Right ip, [(p, "")]) -> do
         xs <- runH NS.nsList
         let slot = findNetSlot xs
         r <- runH (Net.netUdpSend slot ip p txt)
@@ -789,7 +706,7 @@ house_main = do
     handleArpLs = do
       xs <- runH Net.netArpLs
       let showIpv4' (NetTypes.Ipv4 a b c d) = show a ++ "." ++ show b ++ "." ++ show c ++ "." ++ show d
-          showMac' (NetTypes.Mac a b c d e f) = let h = "0123456789abcdef"; hex2 w = [h !! fromIntegral (w `shiftR` 4), h !! fromIntegral (w .&. 0xF)] in hex2 a ++ ":" ++ hex2 b ++ ":" ++ hex2 c ++ ":" ++ hex2 d ++ ":" ++ hex2 e ++ ":" ++ hex2 f
+          showMac' (NetTypes.Mac a b c d e f) = let hex2 w = [hexDigit (fromIntegral (w `shiftR` 4)), hexDigit (fromIntegral (w .&. 0xF))] in hex2 a ++ ":" ++ hex2 b ++ ":" ++ hex2 c ++ ":" ++ hex2 d ++ ":" ++ hex2 e ++ ":" ++ hex2 f
       if null xs
         then withCString "(empty)\n" c_uart_puts
         else withCString (unlines (map (\(ip, mac) -> showIpv4' ip ++ " -> " ++ showMac' mac) xs)) c_uart_puts
@@ -800,186 +717,6 @@ house_main = do
       case r of
         Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
-    handleFree = do
-      fc <- runH HPages.freePageCount
-      tot <- c_buddy_total
-      freeB <- c_buddy_free
-      ram <- peek c_ram_ref
-      srcPtr <- peek c_ram_source_ref
-      src <- peekCString srcPtr
-      smpV <- peek c_smp_ref
-      alloca $ \pTot -> alloca $ \pFree -> do
-        c_mem_stats pTot pFree
-        t <- peek pTot
-        f <- peek pFree
-        withCString ("free: H.Pages=" ++ show fc ++ " buddy " ++ show freeB ++ "/" ++ show tot ++ " mem " ++ show f ++ "/" ++ show t ++ " ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " smp=" ++ show smpV ++ "\n") c_uart_puts
-    handleMem = do
-      ram <- peek c_ram_ref
-      stk <- peek c_stack_top_ref
-      srcPtr <- peek c_ram_source_ref
-      src <- peekCString srcPtr
-      smpV <- peek c_smp_ref
-      dtbAddr <- peek c_dtb_ref
-      let dtbPtr = intPtrToPtr (fromIntegral dtbAddr) :: Ptr ()
-      nb <- c_bank_count dtbPtr
-      b0 <- alloca $ \pBase -> alloca $ \pSize ->
-        if nb > 0
-          then do
-            r <- c_bank_get dtbPtr 0 pBase pSize
-            if r /= 0
-              then do
-                b <- peek pBase
-                s <- peek pSize
-                return (" bank0 base=0x" ++ showHex64 b ++ " size=" ++ show (s `div` (1024 * 1024)) ++ "M")
-              else return ""
-          else return ""
-      tot <- c_buddy_total
-      fr <- c_buddy_free
-      alloca $ \p0 -> alloca $ \p1 -> alloca $ \pt -> do
-        c_get_ttbrs p0 p1 pt
-        t0 <- peek p0
-        t1 <- peek p1
-        tc <- peek pt
-        withCString ("mem: ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " banks=" ++ show nb ++ b0 ++ " smp=" ++ show smpV ++ " stack_top 0x" ++ showHex (fromIntegral stk) ++ " buddy " ++ show fr ++ "/" ++ show tot ++ " pages ttbr0 0x" ++ showHex64 t0 ++ " ttbr1 0x" ++ showHex64 t1 ++ " tcr 0x" ++ showHex64 tc ++ "\n") c_uart_puts
-    handleDetect = do
-      ram <- peek c_ram_ref
-      stk <- peek c_stack_top_ref
-      srcPtr <- peek c_ram_source_ref
-      src <- peekCString srcPtr
-      smpV <- peek c_smp_ref
-      dtbAddr <- peek c_dtb_ref
-      let dtbPtr = intPtrToPtr (fromIntegral dtbAddr) :: Ptr ()
-      nb <- c_bank_count dtbPtr
-      caps <- getNumCapabilities
-      procs <- getNumProcessors
-      withCString ("detect: ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " banks=" ++ show nb ++ " smp=" ++ show smpV ++ " stack_top 0x" ++ showHex (fromIntegral stk) ++ " caps=" ++ show caps ++ " procs=" ++ show procs ++ "\n") c_uart_puts
-    handleVm = do
-      -- wrapper that prints vm-ok on full pass, vm-fail otherwise; all sub-steps catch exceptions
-      ok <- vmTest `catch` (\(_ :: SomeException) -> return False)
-      if ok
-        then withCString "vm-ok\n" c_uart_puts
-        else withCString "vm-fail\n" c_uart_puts
-    vmTest :: IO Bool
-    vmTest = do
-      withCString "vm: start\n" c_uart_puts
-      r1 <- vmDemand `catch` (\(_ :: SomeException) -> withCString "vm: demand fail\n" c_uart_puts >> return False)
-      r2 <- vmMmap `catch` (\(_ :: SomeException) -> withCString "vm: mmap fail\n" c_uart_puts >> return False)
-      r3 <- vmIsolate `catch` (\(_ :: SomeException) -> withCString "vm: isolate fail\n" c_uart_puts >> return False)
-      r4 <- vmShootdown `catch` (\(_ :: SomeException) -> withCString "vm: shootdown fail\n" c_uart_puts >> return False)
-      r5 <- vmAsid `catch` (\(_ :: SomeException) -> withCString "vm: asid fail\n" c_uart_puts >> return False)
-      withCString ("vm: r1=" ++ show r1 ++ " r2=" ++ show r2 ++ " r3=" ++ show r3 ++ " r4=" ++ show r4 ++ " r5=" ++ show r5 ++ "\n") c_uart_puts
-      let ok = r1 && r2 && r3 && r4 && r5
-      withCString (if ok then "vm: all ok\n" else "vm: some fail\n") c_uart_puts
-      return ok
-    vmDemand :: IO Bool
-    vmDemand = do
-      r1 <- c_demand_single
-      let ok1 = r1 /= 0
-      withCString ("vm: demand fault ok pattern " ++ (if ok1 then "ok" else "fail") ++ "\n") c_uart_puts
-      r2 <- c_demand_100
-      let ok2 = r2 /= 0
-      withCString ("vm: demand ok 100 pages " ++ (if ok2 then "ok" else "fail") ++ "\n") c_uart_puts
-      -- tolerate single-page failure if 100-page passes (probe vs demand race on hvf)
-      return (ok2 || ok1)
-    vmMmap :: IO Bool
-    vmMmap = do
-      let len = 1024 * 1024 :: CSize
-      ptr <- c_mmap nullPtr len 3 0x02 (-1) 0 -- PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS (0x02)
-      if ptr == intPtrToPtr (-1) || ptr == nullPtr
-        then withCString "vm: mmap fail ptr\n" c_uart_puts >> return False
-        else do
-          -- write 4K (1 page) to ensure it is faulted and mapped
-          let n = 4096 :: Int
-          forM_ [0 .. n - 1] $ \i -> poke (ptr `plusPtr` i) (fromIntegral (i `mod` 256) :: Word8)
-          -- mprotect RO only the written 256K (prot 1 = READ)
-          rc <- c_mprotect ptr (fromIntegral n) 1
-          let okProt = rc == 0
-          withCString ("vm: mprotect RO " ++ (if okProt then "ok" else "fail") ++ "\n") c_uart_puts
-          -- trigger perm fault RO write (should log [demand] perm fault RO and skip)
-          poke (castPtr ptr :: Ptr Word8) 0xFF
-          withCString "mprotect RO perm logged\n" c_uart_puts
-          -- munmap
-          rc2 <- c_munmap ptr len
-          let okUnmap = rc2 == 0
-          withCString ("vm: munmap " ++ (if okUnmap then "ok" else "fail") ++ "\n") c_uart_puts
-          withCString "munmap unmap fault\n" c_uart_puts
-          return (okProt && okUnmap)
-    vmIsolate :: IO Bool
-    vmIsolate = do
-      ok <- runH isolateCheck `catch` (\(_ :: SomeException) -> return False)
-      if ok
-        then withCString "isolate ok\n" c_uart_puts >> return True
-        else withCString "isolate fail\n" c_uart_puts >> return False
-      where
-        isolateCheck = do
-          m1 <- VM.allocPageMap
-          m2 <- VM.allocPageMap
-          case (m1, m2) of
-            (Just p1, Just p2) -> do
-              ma <- HPages.allocPage
-              mb <- HPages.allocPage
-              case (ma, mb) of
-                (Just rawA, Just rawB) -> do
-                  let pa = rawA :: Ptr Word8
-                      pb = rawB :: Ptr Word8
-                  HPages.zeroPage pa
-                  HPages.zeroPage pb
-                  let va = VM.minVAddr
-                      infoA = VM.PageInfo {VM.physPage = HPhys.toPhysPage pa, VM.writable = True, VM.dirty = False, VM.accessed = False}
-                      infoB = VM.PageInfo {VM.physPage = HPhys.toPhysPage pb, VM.writable = True, VM.dirty = False, VM.accessed = False}
-                  ok1 <- VM.setPage p1 va (Just infoA)
-                  ok2 <- VM.setPage p2 va (Just infoB)
-                  g1 <- VM.getPage p1 va
-                  g2 <- VM.getPage p2 va
-                  _ <- VM.setPage p1 va Nothing
-                  _ <- VM.setPage p2 va Nothing
-                  HPages.freePage pa
-                  HPages.freePage pb
-                  case (g1, g2) of
-                    (Just i1, Just i2) -> return (ok1 && ok2 && VM.physPage i1 /= VM.physPage i2)
-                    _ -> return False
-                _ -> return False
-            _ -> return False
-    vmShootdown :: IO Bool
-    vmShootdown = do
-      let len = 4096 :: CSize
-      ptr <- c_mmap nullPtr len 3 0x02 (-1) 0
-      if ptr == intPtrToPtr (-1) || ptr == nullPtr
-        then withCString "shootdown fail mmap\n" c_uart_puts >> return False
-        else do
-          poke (castPtr ptr :: Ptr Word8) (0xAA :: Word8)
-          v0 <- peek (castPtr ptr :: Ptr Word8) :: IO Word8
-          rcProt <- c_mprotect ptr len 1
-          c_tlb_shootdown (fromIntegral (ptrToIntPtr ptr) :: Word64)
-          v1 <- peek (castPtr ptr :: Ptr Word8) :: IO Word8
-          rcUnmap <- c_munmap ptr len
-          let ok = v0 == 0xAA && v1 == 0xAA && rcProt == 0 && rcUnmap == 0
-          withCString (if ok then "smp shootdown ok\n" else "shootdown fail\n") c_uart_puts
-          return ok
-    vmAsid :: IO Bool
-    vmAsid = do
-      mpair <- runH asidAllocs `catch` (\(_ :: SomeException) -> return (Nothing, Nothing))
-      case mpair of
-        (Just p1, Just p2) -> do
-          let q1 = VM.fromPageMap p1
-              q2 = VM.fromPageMap p2
-          a1 <- c_asid_for q1
-          a2 <- c_asid_for q2
-          a1' <- c_asid_for q1
-          let ok = a1 /= 0 && a2 /= 0 && a1 /= a2 && a1' == a1
-          withCString (if ok then "vm: asid ok\n" else "vm: asid fail\n") c_uart_puts
-          return ok
-        _ -> withCString "vm: asid fail\n" c_uart_puts >> return False
-      where
-        asidAllocs = do
-          m1 <- VM.allocPageMap
-          m2 <- VM.allocPageMap
-          return (m1, m2)
-    handlePalloc = do
-      r <- runH HPages.allocPage `catch` (\(_ :: SomeException) -> return Nothing)
-      case r of
-        Nothing -> withCString "palloc fail\n" c_uart_puts
-        Just p -> withCString ("palloc ok " ++ show (ptrToIntPtr (castPtr p)) ++ "\n") c_uart_puts
     defaultEnv = ["HOUSE=1", "PATH=/bin"]
     handleRun path args = do
       r <- runH $ do
@@ -999,97 +736,6 @@ house_main = do
       case r of
         Left e -> withCString (e ++ "\n") c_uart_puts
         Right code -> withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
-    parseIpv4 s = case splitDot s of
-      [a, b, c, d] -> case (reads a, reads b, reads c, reads d) of
-        ([(av, "")], [(bv, "")], [(cv, "")], [(dv, "")]) -> Just (NetTypes.Ipv4 av bv cv dv)
-        _ -> Nothing
-      _ -> Nothing
-    splitDot str = splitOn '.' str
-      where
-        splitOn _ [] = [""]
-        splitOn c (x : xs) = if x == c then "" : splitOn c xs else let (h : t) = splitOn c xs in (x : h) : t
-    handleUname args = do
-      let sysname = "House"
-          nodename = "house"
-          release = "0.8.93"
-          version = "#1 SMP 2026-09-01 House/hOp GHC-9.14.1 QEMU-virt"
-          machine = "aarch64"
-          processor = "aarch64"
-          hw = "QEMU-virt"
-          os = "House"
-          canon = "snrvmpio" :: String
-          merge sel flags =
-            let combined = nub (sel ++ flags)
-             in filter (`elem` combined) canon
-          flagToStr c = case c of
-            's' -> sysname
-            'n' -> nodename
-            'r' -> release
-            'v' -> version
-            'm' -> machine
-            'p' -> processor
-            'i' -> hw
-            'o' -> os
-            _ -> ""
-          unameHelp =
-            unlines
-              [ "Usage: uname [OPTION]...",
-                "Print certain system information.  With no OPTION, same as -s.",
-                "",
-                "  -a, --all                print all information, in the following order,",
-                "                             except omit -p and -i if unknown:",
-                "                             -s -n -r -v -m -p -i -o",
-                "  -s, --kernel-name        print the kernel name",
-                "  -n, --nodename           print the network node hostname",
-                "  -r, --kernel-release     print the kernel release",
-                "  -v, --kernel-version     print the kernel version",
-                "  -m, --machine            print the machine hardware name",
-                "  -p, --processor          print the processor type",
-                "  -i, --hardware-platform  print the hardware platform",
-                "  -o, --operating-system   print the operating system",
-                "      --help               display this help and exit",
-                "      --version            output version information and exit"
-              ]
-          unameVersionStr = sysname ++ " " ++ release ++ " (" ++ version ++ ") " ++ machine ++ "\n"
-          parse [] sel = Right sel
-          parse (a : as) sel
-            | a == "--help" = Left unameHelp
-            | a == "--version" = Left unameVersionStr
-            | a == "--all" || a == "-a" = parse as (merge sel canon)
-            | a == "--kernel-name" = parse as (merge sel "s")
-            | a == "--nodename" = parse as (merge sel "n")
-            | a == "--kernel-release" = parse as (merge sel "r")
-            | a == "--kernel-version" = parse as (merge sel "v")
-            | a == "--machine" = parse as (merge sel "m")
-            | a == "--processor" = parse as (merge sel "p")
-            | a == "--hardware-platform" = parse as (merge sel "i")
-            | a == "--operating-system" = parse as (merge sel "o")
-            | "-" `isPrefixOf` a && not ("--" `isPrefixOf` a) =
-                let flags = drop 1 a
-                 in if null flags
-                      then Left ("uname: invalid option -- '" ++ a ++ "'\nTry 'uname --help' for more information.\n")
-                      else
-                        let bad = filter (`notElem` canon) flags
-                         in case bad of
-                              (b : _) -> Left ("uname: invalid option -- '" ++ [b] ++ "'\nTry 'uname --help' for more information.\n")
-                              [] -> parse as (merge sel flags)
-            | otherwise = Left ("uname: extra operand '" ++ a ++ "'\nTry 'uname --help' for more information.\n")
-      case parse args [] of
-        Left msg -> withCString msg c_uart_puts
-        Right [] -> withCString (sysname ++ "\n") c_uart_puts
-        Right sel -> withCString (unwords (map flagToStr (filter (`elem` sel) canon)) ++ "\n") c_uart_puts
-    showFsError e = case e of
-      FS.ENOENT -> "ENOENT: No such file or directory"
-      FS.EEXIST -> "EEXIST: File exists"
-      FS.ENOTDIR -> "ENOTDIR: Not a directory"
-      FS.EISDIR -> "EISDIR: Is a directory"
-      FS.ENOSPC -> "ENOSPC: No space left on device"
-      FS.EINVAL s -> "EINVAL: " ++ s
-    toExecError le = case le of
-      ULdr.BadMagic -> "EBADEXEC: not ELF64 LE"
-      ULdr.BadArch -> "EBADEXEC: need AArch64"
-      ULdr.BadType -> "EBADEXEC: need ET_EXEC"
-      _ -> ULdr.loadErrorToString le
     usage =
       unlines
         [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname [-asnrvmio] | uptime | shutdown [-h|-r] -- halt or reboot the machine",
@@ -1136,10 +782,12 @@ house_main = do
       | n < 24 = return (parFib n)
       | otherwise = do
           mv <- newEmptyMVar
-          _ <- forkIO $ putMVar mv (parFib (n - 1))
-          let b = parFib (n - 2)
-          a <- takeMVar mv
-          return (a + b)
+          -- Bracket the helper thread: an async exception while waiting
+          -- must not orphan the forked putter.
+          bracket (forkIO $ putMVar mv (parFib (n - 1))) killThread $ \_ -> do
+            let b = parFib (n - 2)
+            a <- takeMVar mv
+            return (a + b)
     mvarTest :: Int -> IO Bool
     mvarTest n = do
       let n' = min n 5000
@@ -1152,7 +800,3 @@ house_main = do
       where
         sumMVars 0 _ acc = return acc
         sumMVars k mv acc = do v <- takeMVar mv; sumMVars (k - 1) mv (acc + v)
-    showHex :: Int -> String
-    showHex m = let h = "0123456789abcdef" in if m < 16 then [h !! m] else showHex (m `div` 16) ++ [h !! (m `mod` 16)]
-    showHex64 :: Word64 -> String
-    showHex64 w = let h = "0123456789abcdef"; go n | n < 16 = [h !! fromIntegral n] | otherwise = go (n `div` 16) ++ [h !! fromIntegral (n `mod` 16)] in if w == 0 then "0" else go w

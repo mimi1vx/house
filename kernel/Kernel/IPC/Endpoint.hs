@@ -14,12 +14,13 @@ where
 
 import Control.Concurrent (MVar, tryPutMVar)
 import qualified Control.Concurrent as C
+import Control.Exception (bracketOnError)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word64)
 import H.Concurrency (QSem, newQSem, withQSem)
 import qualified H.Concurrency as HC
-import H.Monad (H, liftIO)
+import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import qualified H.Pages as P
 import H.Unsafe (unsafePerformH)
@@ -113,7 +114,19 @@ send ep msg = do
             return (Right ())
   case enqRes of
     Left e -> return (Left e)
-    Right () -> liftIO $ C.takeMVar replyVar
+    -- Bracket the rendezvous: an async exception while blocked in
+    -- takeMVar dequeues our entry so no orphaned slot is left behind.
+    Right () -> liftIO $ bracketOnError (return ()) (\_ -> runH (dequeueReply replyVar ep)) (\_ -> C.takeMVar replyVar)
+
+-- | Remove one queued rendezvous by reply-slot identity (abort path).
+dequeueReply :: MVar (Either IpcError Message) -> Endpoint -> H ()
+dequeueReply var ep = withQSem endpointSem $ do
+  tbl <- readRef endpointTable
+  case Map.lookup (epId ep) tbl of
+    Nothing -> return ()
+    Just st -> do
+      qs <- readRef st
+      writeRef st (qs {esQueue = filter ((/= var) . rvReplyVar) (esQueue qs)})
 
 -- | Non-blocking trySend: fire-and-forget enqueue, no reply wait.
 -- Returns Left QueueFull/NoSuchEndpoint immediately, Right () on enqueued.
