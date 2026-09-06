@@ -159,6 +159,8 @@ encodeIpv4 src dst proto payload =
     ipv4ToList (Ipv4 a b c d) = [a, b, c, d]
 
 -- | Decode IPv4. Returns packet or error.
+-- Bounds: IHL>=5, hdrLen=IHL*4 <= frame, hdrLen <= totalLen <= frame;
+-- trailing Ethernet padding beyond totalLen is ignored.
 decodeIpv4 :: [Word8] -> Either NetError Ipv4Packet
 decodeIpv4 bytes
   | length bytes < 20 = Left (NetInvalidArg "ipv4 short")
@@ -174,12 +176,18 @@ decodeIpv4 bytes
                   proto = bytes !! 9
                   src = Ipv4 (bytes !! 12) (bytes !! 13) (bytes !! 14) (bytes !! 15)
                   dst = Ipv4 (bytes !! 16) (bytes !! 17) (bytes !! 18) (bytes !! 19)
-                  hdrLen = fromIntegral ihl * 4
-               in if length bytes < totalLen
-                    then Left (NetInvalidArg "ipv4 len")
+                  hdrLen = fromIntegral ihl * 4 :: Int
+               in if hdrLen > length bytes
+                    then Left (NetInvalidArg "ipv4 hlen")
                     else
-                      let payload = take (totalLen - hdrLen) (drop hdrLen bytes)
-                       in Right (Ipv4Packet src dst proto ttl payload)
+                      if totalLen < hdrLen || totalLen < 20
+                        then Left (NetInvalidArg "ipv4 len")
+                        else
+                          if length bytes < totalLen
+                            then Left (NetInvalidArg "ipv4 len")
+                            else
+                              let payload = take (totalLen - hdrLen) (drop hdrLen bytes)
+                               in Right (Ipv4Packet src dst proto ttl payload)
 
 -- | Encode UDP: srcPort 2, dstPort 2, len 2, csum 2 (zero) + payload.
 encodeUdp :: Word16 -> Word16 -> [Word8] -> [Word8]
@@ -284,6 +292,8 @@ arpTableLookup :: Ipv4 -> [(Ipv4, Mac)] -> Maybe Mac
 arpTableLookup ip tbl = lookup ip (take 32 tbl)
 
 -- | Decode minimal DHCP BOOTREPLY. Total; options TLV walk bounded by packet length.
+-- Cursor is (offset, remaining): each step consumes >=1 byte, TLV needs
+-- 2+len <= remaining (checked_add style); truncated headers/values reject.
 decodeDhcp :: [Word8] -> Either NetError DhcpMsg
 decodeDhcp bytes
   | length bytes < 240 = Left (NetInvalidArg "dhcp short")
@@ -300,23 +310,27 @@ decodeDhcp bytes
           cookie = take 4 (drop 236 bytes)
        in if op /= 2 || cookie /= [0x63, 0x82, 0x53, 0x63]
             then Left (NetInvalidArg "dhcp header")
-            else case parseOpts (drop 240 bytes) Nothing Nothing of
-              Nothing -> Left (NetInvalidArg "dhcp opts")
-              Just (mtype, server) -> case mtype of
+            else case parseOpts 0 (drop 240 bytes) Nothing Nothing of
+              Left e -> Left e
+              Right (mtype, server) -> case mtype of
                 Nothing -> Left (NetInvalidArg "dhcp no type")
                 Just t -> Right (DhcpMsg xid yiaddr siaddr t server)
   where
-    parseOpts [] mt sv = Just (mt, sv)
-    parseOpts (255 : _) mt sv = Just (mt, sv)
-    parseOpts (0 : rest) mt sv = parseOpts rest mt sv
-    parseOpts (tag : len : rest) mt sv
-      | tag == 53 && len == 1 && not (null rest) = parseOpts (drop 1 rest) (Just (rest !! 0)) sv
-      | tag == 54 && len == 4 && length rest >= 4 =
-          let svIp = Ipv4 (rest !! 0) (rest !! 1) (rest !! 2) (rest !! 3)
-           in parseOpts (drop 4 rest) mt (Just svIp)
-      | otherwise =
-          let n = fromIntegral len
-           in if n < 0 || length rest < n
-                then Nothing
-                else parseOpts (drop n rest) mt sv
-    parseOpts [_] mt sv = Just (mt, sv)
+    parseOpts :: Int -> [Word8] -> Maybe Word8 -> Maybe Ipv4 -> Either NetError (Maybe Word8, Maybe Ipv4)
+    parseOpts _ [] mt sv = Right (mt, sv)
+    parseOpts _ (255 : _) mt sv = Right (mt, sv)
+    parseOpts off (0 : rest) mt sv = parseOpts (off + 1) rest mt sv
+    parseOpts off (tag : lenB : rest) mt sv =
+      let n = fromIntegral lenB :: Int
+          need = 2 + n
+          remaining = 2 + length rest
+       in if need > remaining || off > maxBound - need
+            then Left (NetInvalidArg "dhcp opts trunc")
+            else case (tag, lenB) of
+              (53, 1) | not (null rest) -> parseOpts (off + need) (drop 1 rest) (Just (rest !! 0)) sv
+              (54, 4)
+                | length rest >= 4 ->
+                    let svIp = Ipv4 (rest !! 0) (rest !! 1) (rest !! 2) (rest !! 3)
+                     in parseOpts (off + need) (drop 4 rest) mt (Just svIp)
+              _ -> parseOpts (off + need) (drop n rest) mt sv
+    parseOpts _ [_] _ _ = Left (NetInvalidArg "dhcp opts trunc")

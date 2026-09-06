@@ -37,7 +37,7 @@ import qualified Kernel.Driver.IRQ as DIRQ
 import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Net.Device (netInvalidate, netPollUsed, netProbeMac, netSaveQueues, netSubmitRx, netSubmitTx)
-import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), decodeArp, decodeDhcp, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
+import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), UdpPacket (..), decodeArp, decodeDhcp, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), macBroadcast, showIpv4, showMac, virtioNetHdrSize)
 import Kernel.Driver.Virtio.Queue (allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
@@ -592,10 +592,12 @@ drainRx slot = go (16 :: Int)
                       writeRef netIcmpSeen (Map.insert (ident, seqN) now m)
                   _ -> return ()
                 17 -> case decodeUdp (ipv4Payload ipkt) of
-                  Right _udp ->
-                    case decodeDhcp (drop 8 (ipv4Payload ipkt)) of
-                      Right dhcp -> withQSem netSem $ do writeRef netDhcpSeen (Just dhcp)
-                      Left _ -> return ()
+                  Right udp
+                    | udpSrcPort udp == 67 && udpDstPort udp == 68 ->
+                        case decodeDhcp (udpPayload udp) of
+                          Right dhcp -> withQSem netSem $ do writeRef netDhcpSeen (Just dhcp)
+                          Left _ -> return ()
+                    | otherwise -> return ()
                   Left _ -> return ()
                 _ -> return ()
         | otherwise -> return ()

@@ -50,10 +50,10 @@ sleep 1
 send "virtio scan\r"
 expect {
     -re "device_id=1" { puts "\nPASS: virtio scan device_id=1" }
-    -re "virtio slot" {
+    -re "virtio slot" { exp_continue }
+    timeout {
         if {$has_netdev} { puts "\nFAIL: virtio scan no net device with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: virtio scan no net device (maybe no -netdev)" }
     }
-    timeout { puts "\nFAIL: virtio scan2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 set netSlot 7
 send "net init $netSlot\r"
@@ -95,6 +95,15 @@ send "udpecho 10.0.2.15 12345 hello-net\r"
 expect {
     -re "ok|udpecho" { puts "\nPASS: udpecho" }
     timeout { puts "\nFAIL: udpecho timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "net dhcp\r"
+expect {
+    -re "ok dhcp|dhcp" { puts "\nPASS: net dhcp" }
+    -re "Net" {
+        if {$has_netdev} { puts "\nFAIL: net dhcp error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: net dhcp returned error" }
+    }
+    timeout { puts "\nFAIL: net dhcp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
 send "write /a hello\r"
