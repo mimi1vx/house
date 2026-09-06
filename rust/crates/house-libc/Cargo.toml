@@ -3,6 +3,7 @@ name = "house-libc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lib]
 # staticlib required — single panic owner house-libc provides __stack_chk_guard,
