@@ -6,13 +6,13 @@
 
 const HOUSE_MAX_SMP: usize = 32;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_isr_active: i32 = 0;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_isr_pending: [u64; 32] = [0; 32];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_timer_interval: u32 = 0;
 
 static mut HOUSE_BOOT_TICKS: [u64; 32] = [0; 32];
@@ -22,14 +22,10 @@ unsafe fn cntfrq() -> u64 {
     unsafe {
         core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) f, options(nostack, preserves_flags))
     }
-    if f == 0 {
-        62500000
-    } else {
-        f
-    }
+    if f == 0 { 62500000 } else { f }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_uptime_secs() -> u64 {
     let now: u64;
     unsafe {
@@ -86,17 +82,17 @@ unsafe fn timer_init_for_core(core: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_init() {
     unsafe { timer_init_for_core(0) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_init_secondary(core: u32) {
     unsafe { timer_init_for_core(core) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_rearm_virt() {
     unsafe {
         let iv = house_timer_interval as u64;
@@ -105,7 +101,7 @@ pub unsafe extern "C" fn house_timer_rearm_virt() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_rearm_phys() {
     unsafe {
         let iv = house_timer_interval as u64;

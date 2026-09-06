@@ -8,9 +8,9 @@ const PAGE_POOL_N: usize = 512;
 struct PagePool([u8; PAGE_POOL_N * PAGE_SIZE]);
 static mut PAGE_POOL: PagePool = PagePool([0; PAGE_POOL_N * PAGE_SIZE]);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut min_user_addr: *mut u8 = core::ptr::null_mut();
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut max_user_addr: *mut u8 = core::ptr::null_mut();
 
 static mut RECORDED_PDIR: *mut u8 = core::ptr::null_mut();
@@ -20,7 +20,7 @@ const ASID_MAP_CAP: usize = 64;
 static mut ASID_MAP: [(*mut u8, u16); 64] = [(core::ptr::null_mut(), 0); 64];
 static mut ASID_MAP_LEN: usize = 0;
 
-extern "C" {
+unsafe extern "C" {
     static ttbr0_l0: [u64; 512];
     fn buddy_alloc_page() -> *mut u8;
     fn buddy_free_page(p: *mut u8);
@@ -29,7 +29,7 @@ extern "C" {
     fn house_mmu_set_ttbr0(pdir: *mut u8, asid: u64);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_userspace_init() {
     unsafe {
         if RECORDED_PDIR.is_null() {
@@ -83,7 +83,7 @@ unsafe fn asid_for_pdir(pdir: *mut u8) -> u16 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn init_page_dir(pdir: *mut u8) {
     if pdir.is_null() || (pdir as usize & 4095) != 0 {
         return;
@@ -96,19 +96,19 @@ pub unsafe extern "C" fn init_page_dir(pdir: *mut u8) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn current_pdir() -> *mut u8 {
     unsafe { RECORDED_PDIR }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_set_recorded_pdir(pdir: *mut u8) {
     unsafe {
         RECORDED_PDIR = pdir;
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_asid_for_pdir(pdir: *mut u8) -> u64 {
     if pdir.is_null() {
         return 0;
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn house_asid_for_pdir(pdir: *mut u8) -> u64 {
     unsafe { asid_for_pdir(pdir) as u64 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
     let va = va & !4095;
     unsafe {
@@ -153,15 +153,11 @@ pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
             return 0;
         }
         let ap = (d3 >> 6) & 0x3;
-        if ap == 0x3 {
-            1
-        } else {
-            0
-        }
+        if ap == 0x3 { 1 } else { 0 }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
     unsafe {
         let va = vaddr >> 12;
@@ -169,9 +165,9 @@ pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
-    extern "C" {
+    unsafe extern "C" {
         static mut house_smp_online_mask: u32;
         fn house_gic_send_sgi_to_core(sgi: u32, core: u32);
     }
@@ -200,7 +196,7 @@ pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
     const MIN_V: u64 = 0x01000000;
     // Matches mm/vm.rs HOUSE_USER_VA_MAX: demand window covers anon base

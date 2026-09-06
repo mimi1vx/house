@@ -210,6 +210,15 @@ house-vm-check: vm-check
 # Scaling legs (vm-check 512M/2+4G/4+6G/4+8G/4+16G/4 single-build, smp-check-8) stay out of default `check`.
 run: house-run
 
+# --- Track H: Haskell hygiene gates (host tools, pure logic only) ---
+# fourmolu/hlint are scoped to kernel/test/: legacy kernel/ sources predate
+# the formatter config (mass reformat out of scope). cabal runs the
+# QuickCheck + golden suite with FFI stubbed (never executed).
+haskell-check:
+	fourmolu -m check kernel/test/Main.hs
+	hlint kernel/test/Main.hs
+	cd kernel/test && cabal test all
+
 check:
 	$(MAKE) spike-check
 	$(MAKE) irq-check
@@ -217,8 +226,9 @@ check:
 	$(MAKE) house-shell-check
 	$(MAKE) house-posix-check
 	$(MAKE) rust-check
+	$(MAKE) haskell-check
 	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust) =="
 
 .PHONY: container-image container-shell spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean run check
+        house-build house-run house-check house-shell-check house-posix-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check

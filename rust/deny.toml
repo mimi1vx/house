@@ -1,0 +1,33 @@
+# cargo-deny policy for the freestanding workspace (Track R step 1).
+#
+# Invoke from this directory (workspace has zero third-party deps today, so
+# both gates are trivially clean; they bite the moment a dep is added):
+#   cargo deny --manifest-path Cargo.toml check
+#   cargo audit --file Cargo.lock
+# In CI add the scheduled re-check: new RUSTSEC advisories land against old
+# lockfiles, so the audit gate must run on a timer, not just on PRs.
+# No Miri/loom jobs here by design (Track R follow-up owns the proof job
+# once free-list semantics are stable).
+
+[graph]
+targets = ["aarch64-unknown-none"]
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+# Tight on purpose: the workspace is MIT-only with zero third-party deps, so
+# any new license fails the gate until it is reviewed and listed here.
+allow = ["MIT"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

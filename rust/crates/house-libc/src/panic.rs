@@ -22,11 +22,11 @@ fn panic(_info: &PanicInfo) -> ! {
 
 /// Stack-protector guard for Debian-built RTS archives that were compiled with
 /// `-fstack-protector`. Value matches `tinylibc/sys.c:uintptr_t __stack_chk_guard`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static __stack_chk_guard: u64 = 0xdeadbeef_cafef00d;
 
 /// Stack-smash failure — halts like `panic` (no unwinding in `panic="abort"` kernel).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn __stack_chk_fail() -> ! {
     loop {
         // SAFETY: `wfi` is always safe — same as `panic` above.

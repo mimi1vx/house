@@ -4,6 +4,7 @@ import Data.Bits
 import Data.Ix
 import Data.Ratio
 import Data.Word (Word32)
+import GHC.Stack (HasCallStack)
 
 newtype Word12 = Word12 {unWord12 :: Word32}
   deriving (Eq, Ord)
@@ -49,7 +50,11 @@ instance Real Word12 where
 {- following Enum support stuff stolen from GHC libraries -}
 
 {-# NOINLINE toEnumError #-}
-toEnumError :: (Show a) => String -> Int -> (a, a) -> b
+
+-- | Invariant: called only when Enum.toEnum receives an out-of-range tag.
+-- Required by the Enum class contract (result type is @b@, no Either);
+-- call sites are hostile-input parsers that must range-check first.
+toEnumError :: (HasCallStack, Show a) => String -> Int -> (a, a) -> b
 toEnumError inst_ty i bnds =
   error $
     "Enum.toEnum{"
@@ -60,12 +65,18 @@ toEnumError inst_ty i bnds =
       ++ show bnds
 
 {-# NOINLINE succError #-}
-succError :: String -> a
+
+-- | Invariant: called only on succ maxBound / pred minBound.
+-- Required by the Enum class contract; bounded-enumeration callers
+-- must guard the boundary first.
+succError :: (HasCallStack) => String -> a
 succError inst_ty =
   error $ "Enum.succ{" ++ inst_ty ++ "}: tried to take `succ' of maxBound"
 
 {-# NOINLINE predError #-}
-predError :: String -> a
+
+-- | Invariant: see succError; Enum contract, guard pred minBound first.
+predError :: (HasCallStack) => String -> a
 predError inst_ty =
   error $ "Enum.pred{" ++ inst_ty ++ "}: tried to take `pred' of minBound"
 
@@ -108,6 +119,8 @@ instance Ix Word12 where
   range (m, n) = [m .. n]
   index b@(m, _) i
     | inRange b i = fromIntegral (i - m)
+    -- Invariant: Ix contract returns Int, so out-of-range is ErrorCall;
+    -- callers must inRange-check hostile indexes first (HasCallStack pinpoints them).
     | otherwise = error "Error in array index"
   inRange (m, n) i = m <= i && i <= n
 

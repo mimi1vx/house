@@ -86,7 +86,30 @@ loadErrorToString e = case e of
   Truncated -> "Truncated"
 
 showHex64 :: Word64 -> String
-showHex64 w = let h = "0123456789abcdef"; go n | n < 16 = [h !! fromIntegral n] | otherwise = go (n `div` 16) ++ [h !! fromIntegral (n `mod` 16)] in if w == 0 then "0" else go w
+showHex64 w = if w == 0 then "0" else go w
+  where
+    go n
+      | n < 16 = [hexDigit (fromIntegral n)]
+      | otherwise = go (n `div` 16) ++ [hexDigit (fromIntegral (n `mod` 16))]
+    -- \| Total nibble render; index reduced mod 16.
+    hexDigit :: Int -> Char
+    hexDigit n = case n `mod` 16 of
+      0 -> '0'
+      1 -> '1'
+      2 -> '2'
+      3 -> '3'
+      4 -> '4'
+      5 -> '5'
+      6 -> '6'
+      7 -> '7'
+      8 -> '8'
+      9 -> '9'
+      10 -> 'a'
+      11 -> 'b'
+      12 -> 'c'
+      13 -> 'd'
+      14 -> 'e'
+      _ -> 'f'
 
 -- | Total ELF parser. No head/fromJust/!!.
 loadElf :: [Word8] -> Either LoadError Elf
@@ -213,38 +236,56 @@ validateSegments segs bytes entry =
 getWord16LE :: [Word8] -> Int -> Either LoadError Word64
 getWord16LE bs off
   | off < 0 || off + 2 > length bs = Left Truncated
-  | otherwise =
-      let b0 = fromIntegral (index bs off) :: Word64
-          b1 = fromIntegral (index bs (off + 1)) :: Word64
-       in Right (b0 .|. (b1 `shiftL` 8))
+  | otherwise = do
+      b0 <- index bs off
+      b1 <- index bs (off + 1)
+      let w0 = fromIntegral b0 :: Word64
+          w1 = fromIntegral b1 :: Word64
+      Right (w0 .|. (w1 `shiftL` 8))
 
 getWord32LE :: [Word8] -> Int -> Either LoadError Word32
 getWord32LE bs off
   | off < 0 || off + 4 > length bs = Left Truncated
-  | otherwise =
-      let b0 = fromIntegral (index bs off) :: Word32
-          b1 = fromIntegral (index bs (off + 1)) :: Word32
-          b2 = fromIntegral (index bs (off + 2)) :: Word32
-          b3 = fromIntegral (index bs (off + 3)) :: Word32
-       in Right (b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24))
+  | otherwise = do
+      b0 <- index bs off
+      b1 <- index bs (off + 1)
+      b2 <- index bs (off + 2)
+      b3 <- index bs (off + 3)
+      let w0 = fromIntegral b0 :: Word32
+          w1 = fromIntegral b1 :: Word32
+          w2 = fromIntegral b2 :: Word32
+          w3 = fromIntegral b3 :: Word32
+      Right (w0 .|. (w1 `shiftL` 8) .|. (w2 `shiftL` 16) .|. (w3 `shiftL` 24))
 
 getWord64LE :: [Word8] -> Int -> Either LoadError Word64
 getWord64LE bs off
   | off < 0 || off + 8 > length bs = Left Truncated
-  | otherwise =
-      let b0 = fromIntegral (index bs off) :: Word64
-          b1 = fromIntegral (index bs (off + 1)) :: Word64
-          b2 = fromIntegral (index bs (off + 2)) :: Word64
-          b3 = fromIntegral (index bs (off + 3)) :: Word64
-          b4 = fromIntegral (index bs (off + 4)) :: Word64
-          b5 = fromIntegral (index bs (off + 5)) :: Word64
-          b6 = fromIntegral (index bs (off + 6)) :: Word64
-          b7 = fromIntegral (index bs (off + 7)) :: Word64
-       in Right (b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24) .|. (b4 `shiftL` 32) .|. (b5 `shiftL` 40) .|. (b6 `shiftL` 48) .|. (b7 `shiftL` 56))
+  | otherwise = do
+      b0 <- index bs off
+      b1 <- index bs (off + 1)
+      b2 <- index bs (off + 2)
+      b3 <- index bs (off + 3)
+      b4 <- index bs (off + 4)
+      b5 <- index bs (off + 5)
+      b6 <- index bs (off + 6)
+      b7 <- index bs (off + 7)
+      let w0 = fromIntegral b0 :: Word64
+          w1 = fromIntegral b1 :: Word64
+          w2 = fromIntegral b2 :: Word64
+          w3 = fromIntegral b3 :: Word64
+          w4 = fromIntegral b4 :: Word64
+          w5 = fromIntegral b5 :: Word64
+          w6 = fromIntegral b6 :: Word64
+          w7 = fromIntegral b7 :: Word64
+      Right (w0 .|. (w1 `shiftL` 8) .|. (w2 `shiftL` 16) .|. (w3 `shiftL` 24) .|. (w4 `shiftL` 32) .|. (w5 `shiftL` 40) .|. (w6 `shiftL` 48) .|. (w7 `shiftL` 56))
 
-index :: [a] -> Int -> a
-index xs i = go xs i
+-- | Total index; Left Truncated on out-of-range (callers pre-check bounds,
+-- so Left is unreachable in practice but typed, never ErrorCall).
+index :: [Word8] -> Int -> Either LoadError Word8
+index = go
   where
-    go [] _ = error "index out of bounds (unreachable after bounds check)"
-    go (y : _) 0 = y
-    go (_ : ys) n = go ys (n - 1)
+    go [] _ = Left Truncated
+    go (y : _) 0 = Right y
+    go (_ : ys) n
+      | n < 0 = Left Truncated
+      | otherwise = go ys (n - 1)

@@ -15,7 +15,7 @@ fn be32(p: *const u8) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_valid(dtb: *const u8) -> i32 {
     if dtb.is_null() {
         return 0;
@@ -77,7 +77,7 @@ fn align4(v: u32) -> u32 {
 }
 
 /// uint64_t fdt_get_ram_bytes(const void *dtb) — sum of `reg` sizes for `memory` nodes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
     if unsafe { fdt_valid(dtb) } == 0 {
         return 0;
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
                     break;
                 }
                 namelen += 1; // include nul
-                              // track memory node startswith "memory"
+                // track memory node startswith "memory"
                 let is_mem = if !name_ptr.is_null() {
                     // "memory" or "memory@..." — not "memory-controller" etc.
                     let n0 = *name_ptr;
@@ -189,11 +189,7 @@ pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
                                         break;
                                     }
                                 }
-                                if eq {
-                                    *s.add(ac.len()) == 0
-                                } else {
-                                    false
-                                }
+                                if eq { *s.add(ac.len()) == 0 } else { false }
                             };
                             let is_sc = {
                                 let mut eq = true;
@@ -203,11 +199,7 @@ pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
                                         break;
                                     }
                                 }
-                                if eq {
-                                    *s.add(sc.len()) == 0
-                                } else {
-                                    false
-                                }
+                                if eq { *s.add(sc.len()) == 0 } else { false }
                             };
                             if is_ac {
                                 let v = be32(prop_ptr);
@@ -270,7 +262,7 @@ pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_get_cpu_count(dtb: *const u8) -> i32 {
     if unsafe { fdt_valid(dtb) } == 0 {
         return 0;
@@ -554,7 +546,7 @@ unsafe fn ram_bank_at(
 }
 
 /// int fdt_ram_bank_count(const void *dtb) — number of `memory` `reg` entries.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_ram_bank_count(dtb: *const u8) -> i32 {
     if unsafe { fdt_valid(dtb) } == 0 {
         return 0;
@@ -565,7 +557,7 @@ pub unsafe extern "C" fn fdt_ram_bank_count(dtb: *const u8) -> i32 {
 
 /// int fdt_get_ram_bank(const void *dtb, int i, uint64_t *base, uint64_t *size)
 /// — 1 on success, 0 when missing/out of range.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_get_ram_bank(
     dtb: *const u8,
     idx: i32,

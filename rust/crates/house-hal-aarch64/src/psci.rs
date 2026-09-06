@@ -15,7 +15,7 @@ unsafe fn psci_call3(fid: u64, a1: u64, a2: u64, a3: u64, use_smc: bool) -> i64 
     x0 as i64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_system_off() -> ! {
     unsafe {
         psci_call3(0x84000008, 0, 0, 0, false);
@@ -25,7 +25,7 @@ pub unsafe extern "C" fn psci_system_off() -> ! {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_system_reset() -> ! {
     unsafe {
         psci_call3(0x84000009, 0, 0, 0, false);
@@ -35,7 +35,7 @@ pub unsafe extern "C" fn psci_system_reset() -> ! {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_cpu_on(mpidr: u64, entry: u64, ctx: u64) -> i64 {
     let r = unsafe { psci_call3(0xC4000003, mpidr, entry, ctx, false) };
     if r == -1 {
@@ -46,7 +46,7 @@ pub unsafe extern "C" fn psci_cpu_on(mpidr: u64, entry: u64, ctx: u64) -> i64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_cpu_off() -> i64 {
     let r = unsafe { psci_call3(0x84000002, 0, 0, 0, false) };
     if r == -1 {
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn psci_cpu_off() -> i64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_affinity_info(mpidr: u64, lowest: u64) -> i64 {
     let r = unsafe { psci_call3(0xC4000004, mpidr, lowest, 0, false) };
     if r == -1 {

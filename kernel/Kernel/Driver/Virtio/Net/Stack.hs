@@ -32,6 +32,16 @@ import Data.List (foldl')
 import Data.Word (Word16, Word32, Word8)
 import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetError (..), macBroadcast, showIpv4, showMac)
 
+-- | Total index into hostile bytes; Nothing on out-of-range.
+safeIndex :: [Word8] -> Int -> Maybe Word8
+safeIndex xs i
+  | i < 0 = Nothing
+  | otherwise = go xs i
+  where
+    go [] _ = Nothing
+    go (y : _) 0 = Just y
+    go (_ : ys) n = go ys (n - 1)
+
 -- | ARP packet.
 data ArpPacket = ArpPacket
   { arpOp :: Word16,
@@ -87,9 +97,9 @@ decodeEthernet bytes
           (etB, payload) = splitAt 2 rest2
           dst = listToMac dstB
           src = listToMac srcB
-          et = (fromIntegral (etB !! 0) `shiftL` 8) .|. fromIntegral (etB !! 1)
-       in case (dst, src) of
-            (Just d, Just s) -> Right (d, s, et, payload)
+       in case (dst, src, safeIndex etB 0, safeIndex etB 1) of
+            (Just d, Just s, Just hi, Just lo) ->
+              Right (d, s, (fromIntegral hi `shiftL` 8) .|. fromIntegral lo, payload)
             _ -> Left (NetInvalidArg "eth mac")
   where
     listToMac [a, b, c, d, e, f] = Just (Mac a b c d e f)
@@ -113,20 +123,48 @@ encodeArp p =
 decodeArp :: [Word8] -> Either NetError ArpPacket
 decodeArp bytes
   | length bytes < 28 = Left (NetInvalidArg "arp short")
-  | otherwise =
-      let htype = (fromIntegral (bytes !! 0) `shiftL` 8) .|. fromIntegral (bytes !! 1) :: Word16
-          ptype = (fromIntegral (bytes !! 2) `shiftL` 8) .|. fromIntegral (bytes !! 3) :: Word16
-          hlen = bytes !! 4
-          plen = bytes !! 5
-          op = (fromIntegral (bytes !! 6) `shiftL` 8) .|. fromIntegral (bytes !! 7) :: Word16
-       in if htype /= 1 || ptype /= 0x0800 || hlen /= 6 || plen /= 4
-            then Left (NetInvalidArg "arp header")
-            else
-              let sha = Mac (bytes !! 8) (bytes !! 9) (bytes !! 10) (bytes !! 11) (bytes !! 12) (bytes !! 13)
-                  spa = Ipv4 (bytes !! 14) (bytes !! 15) (bytes !! 16) (bytes !! 17)
-                  tha = Mac (bytes !! 18) (bytes !! 19) (bytes !! 20) (bytes !! 21) (bytes !! 22) (bytes !! 23)
-                  tpa = Ipv4 (bytes !! 24) (bytes !! 25) (bytes !! 26) (bytes !! 27)
-               in Right (ArpPacket op sha spa tha tpa)
+  | otherwise = do
+      b0 <- at 0
+      b1 <- at 1
+      b2 <- at 2
+      b3 <- at 3
+      hlen <- at 4
+      plen <- at 5
+      b6 <- at 6
+      b7 <- at 7
+      let htype = (fromIntegral b0 `shiftL` 8) .|. fromIntegral b1 :: Word16
+          ptype = (fromIntegral b2 `shiftL` 8) .|. fromIntegral b3 :: Word16
+          op = (fromIntegral b6 `shiftL` 8) .|. fromIntegral b7 :: Word16
+      if htype /= 1 || ptype /= 0x0800 || hlen /= 6 || plen /= 4
+        then Left (NetInvalidArg "arp header")
+        else do
+          s0 <- at 8
+          s1 <- at 9
+          s2 <- at 10
+          s3 <- at 11
+          s4 <- at 12
+          s5 <- at 13
+          p0 <- at 14
+          p1 <- at 15
+          p2 <- at 16
+          p3 <- at 17
+          t0 <- at 18
+          t1 <- at 19
+          t2 <- at 20
+          t3 <- at 21
+          t4 <- at 22
+          t5 <- at 23
+          q0 <- at 24
+          q1 <- at 25
+          q2 <- at 26
+          q3 <- at 27
+          let sha = Mac s0 s1 s2 s3 s4 s5
+              spa = Ipv4 p0 p1 p2 p3
+              tha = Mac t0 t1 t2 t3 t4 t5
+              tpa = Ipv4 q0 q1 q2 q3
+          Right (ArpPacket op sha spa tha tpa)
+  where
+    at i = maybe (Left (NetInvalidArg "arp trunc")) Right (safeIndex bytes i)
 
 -- | Compute IPv4 header checksum (ones complement).
 ipv4Checksum :: [Word8] -> Word16
@@ -164,30 +202,42 @@ encodeIpv4 src dst proto payload =
 decodeIpv4 :: [Word8] -> Either NetError Ipv4Packet
 decodeIpv4 bytes
   | length bytes < 20 = Left (NetInvalidArg "ipv4 short")
-  | otherwise =
-      let verIhl = bytes !! 0
-          ver = verIhl `shiftR` 4
+  | otherwise = do
+      verIhl <- at 0
+      let ver = verIhl `shiftR` 4
           ihl = verIhl .&. 0x0F
-       in if ver /= 4 || ihl < 5
-            then Left (NetInvalidArg "ipv4 ver/ihl")
+      if ver /= 4 || ihl < 5
+        then Left (NetInvalidArg "ipv4 ver/ihl")
+        else do
+          b2 <- at 2
+          b3 <- at 3
+          ttl <- at 8
+          proto <- at 9
+          s0 <- at 12
+          s1 <- at 13
+          s2 <- at 14
+          s3 <- at 15
+          d0 <- at 16
+          d1 <- at 17
+          d2 <- at 18
+          d3 <- at 19
+          let totalLen = (fromIntegral b2 `shiftL` 8) .|. fromIntegral b3 :: Int
+              src = Ipv4 s0 s1 s2 s3
+              dst = Ipv4 d0 d1 d2 d3
+              hdrLen = fromIntegral ihl * 4 :: Int
+          if hdrLen > length bytes
+            then Left (NetInvalidArg "ipv4 hlen")
             else
-              let totalLen = (fromIntegral (bytes !! 2) `shiftL` 8) .|. fromIntegral (bytes !! 3) :: Int
-                  ttl = bytes !! 8
-                  proto = bytes !! 9
-                  src = Ipv4 (bytes !! 12) (bytes !! 13) (bytes !! 14) (bytes !! 15)
-                  dst = Ipv4 (bytes !! 16) (bytes !! 17) (bytes !! 18) (bytes !! 19)
-                  hdrLen = fromIntegral ihl * 4 :: Int
-               in if hdrLen > length bytes
-                    then Left (NetInvalidArg "ipv4 hlen")
+              if totalLen < hdrLen || totalLen < 20
+                then Left (NetInvalidArg "ipv4 len")
+                else
+                  if length bytes < totalLen
+                    then Left (NetInvalidArg "ipv4 len")
                     else
-                      if totalLen < hdrLen || totalLen < 20
-                        then Left (NetInvalidArg "ipv4 len")
-                        else
-                          if length bytes < totalLen
-                            then Left (NetInvalidArg "ipv4 len")
-                            else
-                              let payload = take (totalLen - hdrLen) (drop hdrLen bytes)
-                               in Right (Ipv4Packet src dst proto ttl payload)
+                      let payload = take (totalLen - hdrLen) (drop hdrLen bytes)
+                       in Right (Ipv4Packet src dst proto ttl payload)
+  where
+    at i = maybe (Left (NetInvalidArg "ipv4 trunc")) Right (safeIndex bytes i)
 
 -- | Encode UDP: srcPort 2, dstPort 2, len 2, csum 2 (zero) + payload.
 encodeUdp :: Word16 -> Word16 -> [Word8] -> [Word8]
@@ -201,13 +251,21 @@ encodeUdp src dst payload =
 decodeUdp :: [Word8] -> Either NetError UdpPacket
 decodeUdp bytes
   | length bytes < 8 = Left (NetInvalidArg "udp short")
-  | otherwise =
-      let src = (fromIntegral (bytes !! 0) `shiftL` 8) .|. fromIntegral (bytes !! 1) :: Word16
-          dst = (fromIntegral (bytes !! 2) `shiftL` 8) .|. fromIntegral (bytes !! 3) :: Word16
-          len = (fromIntegral (bytes !! 4) `shiftL` 8) .|. fromIntegral (bytes !! 5) :: Int
-       in if len < 8 || length bytes < len
-            then Left (NetInvalidArg "udp len")
-            else Right (UdpPacket src dst (take (len - 8) (drop 8 bytes)))
+  | otherwise = do
+      b0 <- at 0
+      b1 <- at 1
+      b2 <- at 2
+      b3 <- at 3
+      b4 <- at 4
+      b5 <- at 5
+      let src = (fromIntegral b0 `shiftL` 8) .|. fromIntegral b1 :: Word16
+          dst = (fromIntegral b2 `shiftL` 8) .|. fromIntegral b3 :: Word16
+          len = (fromIntegral b4 `shiftL` 8) .|. fromIntegral b5 :: Int
+      if len < 8 || length bytes < len
+        then Left (NetInvalidArg "udp len")
+        else Right (UdpPacket src dst (take (len - 8) (drop 8 bytes)))
+  where
+    at i = maybe (Left (NetInvalidArg "udp trunc")) Right (safeIndex bytes i)
 
 -- | UDP checksum (pseudo header) — if we send 0, receiver accepts 0. Compute optionally.
 udpChecksum :: Ipv4 -> Ipv4 -> [Word8] -> Word16
@@ -230,12 +288,18 @@ encodeIcmpEcho ident seqNum payload =
 decodeIcmpEcho :: [Word8] -> Either NetError (Word8, Word16, Word16, [Word8])
 decodeIcmpEcho bytes
   | length bytes < 8 = Left (NetInvalidArg "icmp short")
-  | otherwise =
-      let typ = bytes !! 0
-          ident = (fromIntegral (bytes !! 4) `shiftL` 8) .|. fromIntegral (bytes !! 5) :: Word16
-          seqNum = (fromIntegral (bytes !! 6) `shiftL` 8) .|. fromIntegral (bytes !! 7) :: Word16
+  | otherwise = do
+      typ <- at 0
+      b4 <- at 4
+      b5 <- at 5
+      b6 <- at 6
+      b7 <- at 7
+      let ident = (fromIntegral b4 `shiftL` 8) .|. fromIntegral b5 :: Word16
+          seqNum = (fromIntegral b6 `shiftL` 8) .|. fromIntegral b7 :: Word16
           payload = drop 8 bytes
-       in Right (typ, ident, seqNum, payload)
+      Right (typ, ident, seqNum, payload)
+  where
+    at i = maybe (Left (NetInvalidArg "icmp trunc")) Right (safeIndex bytes i)
 
 -- | Encode DHCP Discover (BOOTREQUEST). xid random.
 encodeDhcpDiscover :: Word32 -> Mac -> [Word8]
@@ -297,25 +361,38 @@ arpTableLookup ip tbl = lookup ip (take 32 tbl)
 decodeDhcp :: [Word8] -> Either NetError DhcpMsg
 decodeDhcp bytes
   | length bytes < 240 = Left (NetInvalidArg "dhcp short")
-  | otherwise =
-      let op = bytes !! 0
-          xid =
-            (fromIntegral (bytes !! 4) `shiftL` 24)
-              .|. (fromIntegral (bytes !! 5) `shiftL` 16)
-              .|. (fromIntegral (bytes !! 6) `shiftL` 8)
-              .|. fromIntegral (bytes !! 7) ::
+  | otherwise = do
+      op <- at 0
+      b4 <- at 4
+      b5 <- at 5
+      b6 <- at 6
+      b7 <- at 7
+      y0 <- at 16
+      y1 <- at 17
+      y2 <- at 18
+      y3 <- at 19
+      s0 <- at 20
+      s1 <- at 21
+      s2 <- at 22
+      s3 <- at 23
+      let xid =
+            (fromIntegral b4 `shiftL` 24)
+              .|. (fromIntegral b5 `shiftL` 16)
+              .|. (fromIntegral b6 `shiftL` 8)
+              .|. fromIntegral b7 ::
               Word32
-          yiaddr = Ipv4 (bytes !! 16) (bytes !! 17) (bytes !! 18) (bytes !! 19)
-          siaddr = Ipv4 (bytes !! 20) (bytes !! 21) (bytes !! 22) (bytes !! 23)
+          yiaddr = Ipv4 y0 y1 y2 y3
+          siaddr = Ipv4 s0 s1 s2 s3
           cookie = take 4 (drop 236 bytes)
-       in if op /= 2 || cookie /= [0x63, 0x82, 0x53, 0x63]
-            then Left (NetInvalidArg "dhcp header")
-            else case parseOpts 0 (drop 240 bytes) Nothing Nothing of
-              Left e -> Left e
-              Right (mtype, server) -> case mtype of
-                Nothing -> Left (NetInvalidArg "dhcp no type")
-                Just t -> Right (DhcpMsg xid yiaddr siaddr t server)
+      if op /= 2 || cookie /= [0x63, 0x82, 0x53, 0x63]
+        then Left (NetInvalidArg "dhcp header")
+        else case parseOpts 0 (drop 240 bytes) Nothing Nothing of
+          Left e -> Left e
+          Right (mtype, server) -> case mtype of
+            Nothing -> Left (NetInvalidArg "dhcp no type")
+            Just t -> Right (DhcpMsg xid yiaddr siaddr t server)
   where
+    at i = maybe (Left (NetInvalidArg "dhcp trunc")) Right (safeIndex bytes i)
     parseOpts :: Int -> [Word8] -> Maybe Word8 -> Maybe Ipv4 -> Either NetError (Maybe Word8, Maybe Ipv4)
     parseOpts _ [] mt sv = Right (mt, sv)
     parseOpts _ (255 : _) mt sv = Right (mt, sv)
@@ -327,10 +404,13 @@ decodeDhcp bytes
        in if need > remaining || off > maxBound - need
             then Left (NetInvalidArg "dhcp opts trunc")
             else case (tag, lenB) of
-              (53, 1) | not (null rest) -> parseOpts (off + need) (drop 1 rest) (Just (rest !! 0)) sv
-              (54, 4)
-                | length rest >= 4 ->
-                    let svIp = Ipv4 (rest !! 0) (rest !! 1) (rest !! 2) (rest !! 3)
-                     in parseOpts (off + need) (drop 4 rest) mt (Just svIp)
+              (53, 1) -> case rest of
+                (b : _) -> parseOpts (off + need) (drop 1 rest) (Just b) sv
+                [] -> Left (NetInvalidArg "dhcp opts trunc")
+              (54, 4) -> case rest of
+                (a : b : c : d : _) ->
+                  let svIp = Ipv4 a b c d
+                   in parseOpts (off + need) (drop 4 rest) mt (Just svIp)
+                _ -> Left (NetInvalidArg "dhcp opts trunc")
               _ -> parseOpts (off + need) (drop n rest) mt sv
     parseOpts _ [_] _ _ = Left (NetInvalidArg "dhcp opts trunc")

@@ -189,7 +189,7 @@ fn check_ready(slot: i32) -> i32 {
 }
 
 // SAFETY: pa/len describe a Normal WB guest buffer; len 0 flushes nothing.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_invalidate(pa: u64, len: usize) {
     if len == 0 {
         return;
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn virtio_con_invalidate(pa: u64, len: usize) {
 }
 
 // SAFETY: queue PAs are 4 KiB Grant-backed pages owned by the guest driver.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_save_queues(
     slot: i32,
     rx_desc: u64,
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn virtio_con_save_queues(
 }
 
 // SAFETY: slot reset only clears guest-side indices; device re-init via transport.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_reset_slot(slot: i32) {
     if !slot_valid(slot) {
         return;
@@ -317,7 +317,7 @@ fn submit_inner(
 // SAFETY: data_pa is a guest Grant page; len 1..4096; req_id non-null.
 // Port RX uses state pair 0 and notifies the mapped port queue
 // (0/1 console default, 2*id/2*id+1 after con_set_port_queues).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_submit_rx(
     slot: i32,
     data_pa: u64,
@@ -333,7 +333,7 @@ pub unsafe extern "C" fn virtio_con_submit_rx(
 
 // SAFETY: data_pa is a guest Grant page; data_len 1..4096; req_id non-null.
 // Port TX uses state pair 1 and notifies the mapped port queue.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_submit_tx(
     slot: i32,
     data_pa: u64,
@@ -349,7 +349,7 @@ pub unsafe extern "C" fn virtio_con_submit_tx(
 
 // SAFETY: data_pa is a guest Grant page; len 1..4096; req_id non-null.
 // Control RX (queue 2): device-written event bytes, same contract as port RX.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_submit_ctrl_rx(
     slot: i32,
     data_pa: u64,
@@ -362,7 +362,7 @@ pub unsafe extern "C" fn virtio_con_submit_ctrl_rx(
 // SAFETY: data_pa is a guest Grant page; data_len 1..4096; req_id non-null.
 // Control TX (queue 3): 8-byte {id LE32, event LE16, value LE16} messages
 // (DEVICE_READY 0 / PORT_READY 3 / PORT_OPEN 6 per Linux virtio_console.h).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_submit_ctrl_tx(
     slot: i32,
     data_pa: u64,
@@ -373,7 +373,7 @@ pub unsafe extern "C" fn virtio_con_submit_ctrl_tx(
 }
 
 // SAFETY: qidx 0|1 port queues, 2|3 serial control queues; out_id/out_len non-null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_poll_used(
     slot: i32,
     qidx: i32,
@@ -430,7 +430,7 @@ pub unsafe extern "C" fn virtio_con_poll_used(
 // clamped here, and the Haskell side re-checks 1..=32 before driving port 0).
 // Pure 2-queue consoles expose only cols/rows here, so the read yields 0 and
 // the caller stays on the classic path.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_max_ports(slot: i32, out_ports: *mut u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -461,7 +461,7 @@ pub unsafe extern "C" fn virtio_con_max_ports(slot: i32, out_ports: *mut u32) ->
 }
 
 // SAFETY: queue PAs are 4 KiB Grant-backed pages owned by the guest driver.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_save_ctrl_queues(
     slot: i32,
     crx_desc: u64,
@@ -495,7 +495,7 @@ pub unsafe extern "C" fn virtio_con_save_ctrl_queues(
 // Transport queue indices for the port pair (submit notify values).
 // Defaults 0/1 (console); serial sets 2*id/2*id+1 after PORT_ADD discovery.
 // SAFETY: pure index mapping, no DMA; qidx values are bounded to real queues.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_set_port_queues(slot: i32, rx_qidx: u32, tx_qidx: u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;

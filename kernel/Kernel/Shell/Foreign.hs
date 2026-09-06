@@ -24,6 +24,7 @@ module Kernel.Shell.Foreign
     c_mprotect,
     c_demand_single,
     c_demand_100,
+    c_is_ro_page,
     c_tlb_shootdown,
     c_asid_for,
   )
@@ -107,6 +108,8 @@ foreign import ccall unsafe "mprotect" c_mprotect :: Ptr () -> CSize -> CInt -> 
 foreign import ccall unsafe "house_vm_demand_single" c_demand_single :: IO CInt
 
 foreign import ccall unsafe "house_vm_demand_100" c_demand_100 :: IO CInt
+
+foreign import ccall unsafe "house_is_ro_page" c_is_ro_page :: Word64 -> IO CInt
 
 foreign import ccall unsafe "house_tlb_shootdown" c_tlb_shootdown :: Word64 -> IO ()
 

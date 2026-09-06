@@ -13,7 +13,7 @@ riscv64 = ["house-hal/riscv64"]
 default = ["aarch64"]
 
 [dependencies]
-house-hal = { path = "../house-hal" }
+house-hal.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,63 @@
+cabal-version: 3.0
+name: house-pure-tests
+version: 0.1.0.0
+synopsis: Pure regression tests for Track H (no QEMU, no FFI execution)
+description:
+  QuickCheck round-trips and golden truncated vectors for the hostile-input
+  decoders hardened in Track H: Net.Stack, Loader, BlkPersist.encode/decode,
+  H.FileSystem.splitPath, plus Util.Word12 contract errors.
+license: MIT
+license-file: ../../LICENSE
+author: house
+maintainer: house
+build-type: Simple
+extra-source-files: cbits/stubs.c
+
+test-suite house-pure
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: . ..
+  other-modules:
+    H.AdHocMem
+    H.Concurrency
+    H.FileSystem
+    H.Interrupts
+    H.Monad
+    H.Mutable
+    H.Pages
+    H.PhysicalMemory
+    H.Unsafe
+    H.Utils
+    H.VirtualMemory
+    Kernel.Debug
+    Kernel.Console
+    Kernel.Driver.Dmesg
+    Kernel.Driver.Registry
+    Kernel.Driver.Types
+    Kernel.Driver.Virtio.Blk.Server
+    Kernel.Driver.Virtio.Blk.Types
+    Kernel.Driver.Virtio.Con.Server
+    Kernel.Driver.Virtio.Net.Server
+    Kernel.Driver.Virtio.Net.Stack
+    Kernel.Driver.Virtio.Net.Types
+    Kernel.Driver.Virtio.Queue
+    Kernel.Driver.Virtio.Transport
+    Kernel.Driver.VirtioProbe
+    Kernel.FileSystem.BlkPersist
+    Kernel.IPC.Endpoint
+    Kernel.IPC.Grant
+    Kernel.IPC.Nameservice
+    Kernel.IPC.Types
+    Kernel.Userspace.Loader
+    Kernel.Userspace.Types
+    Util.Word12
+  c-sources: cbits/stubs.c
+  build-depends:
+    base >= 4.18 && < 5,
+    array,
+    containers,
+    mtl,
+    pretty,
+    QuickCheck >= 2.14 && < 3
+  default-language: GHC2024
+  ghc-options: -Wall

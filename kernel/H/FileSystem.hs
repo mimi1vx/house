@@ -13,6 +13,7 @@ module H.FileSystem
     fsRm,
     fsStat,
     fsReadBytes,
+    splitPath,
     freePageCount,
   )
 where

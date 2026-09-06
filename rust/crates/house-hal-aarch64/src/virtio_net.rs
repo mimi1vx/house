@@ -141,7 +141,7 @@ fn slot_valid(slot: i32) -> bool {
     slot >= 0 && slot < NUM_SLOTS_H
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_invalidate(pa: u64, len: usize) {
     if len == 0 {
         return;
@@ -149,7 +149,7 @@ pub unsafe extern "C" fn virtio_net_invalidate(pa: u64, len: usize) {
     unsafe { dc_ivac_range(pa, len) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_save_queues(
     slot: i32,
     rx_desc: u64,
@@ -181,7 +181,7 @@ pub unsafe extern "C" fn virtio_net_save_queues(
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_probe_mac(slot: i32, mac: *mut u8) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn virtio_net_probe_mac(slot: i32, mac: *mut u8) -> i32 {
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_submit_rx(
     slot: i32,
     data_pa: u64,
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn virtio_net_submit_rx(
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_submit_tx(
     slot: i32,
     hdr_pa: u64,
@@ -393,7 +393,7 @@ pub unsafe extern "C" fn virtio_net_submit_tx(
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_poll_used(
     slot: i32,
     qidx: i32,

@@ -93,6 +93,16 @@ netDhcpSeen = unsafePerformH $ newRef Nothing
 netRxGrants :: Ref (Map Int (Map Word32 Grant))
 netRxGrants = unsafePerformH $ newRef Map.empty
 
+-- | RX batch-cap drop counter (Track S): drainRx is bounded per call so a
+-- hostile RX burst degrades to drops + dmesg instead of starving RTS caps.
+{-# NOINLINE netRxDrops #-}
+netRxDrops :: Ref Word64
+netRxDrops = unsafePerformH $ newRef 0
+
+-- | RX completions drained per call (≤ 32 queue depth discipline).
+netRxBatchCap :: Int
+netRxBatchCap = 16
+
 busyDelayUs :: Int -> H ()
 busyDelayUs us = liftIO $ do
   t0 <- c_uptime_ns
@@ -434,21 +444,23 @@ waitDhcpMsg :: Int -> Word32 -> Word8 -> Int -> H (Maybe Stack.DhcpMsg)
 waitDhcpMsg slot xid wantType waitedMs
   | waitedMs <= 0 = do
       drainRx slot
-      withQSem netSem $ do
-        m <- readRef netDhcpSeen
-        case m of
-          Just d | Stack.dhcpXid d == xid && Stack.dhcpMsgType d == wantType -> return (Just d)
-          _ -> return Nothing
+      m <- withQSem netSem $ readRef netDhcpSeen
+      case m of
+        Just d | Stack.dhcpXid d == xid && Stack.dhcpMsgType d == wantType -> return (Just d)
+        Just d | Stack.dhcpXid d /= xid -> do
+          Dmesg.dmesgLog ("dhcp xid mismatch slot " ++ show slot ++ " want=" ++ show xid ++ " seen=" ++ show (Stack.dhcpXid d))
+          return Nothing
+        _ -> return Nothing
   | otherwise = do
       drainRx slot
-      found <- withQSem netSem $ do
-        m <- readRef netDhcpSeen
-        case m of
-          Just d | Stack.dhcpXid d == xid && Stack.dhcpMsgType d == wantType -> return (Just d)
-          _ -> return Nothing
-      case found of
-        Just d -> return (Just d)
-        Nothing -> do busyDelayUs 20000; waitDhcpMsg slot xid wantType (waitedMs - 20)
+      m <- withQSem netSem $ readRef netDhcpSeen
+      case m of
+        Just d | Stack.dhcpXid d == xid && Stack.dhcpMsgType d == wantType -> return (Just d)
+        Just d | Stack.dhcpXid d /= xid -> do
+          Dmesg.dmesgLog ("dhcp xid mismatch slot " ++ show slot ++ " want=" ++ show xid ++ " seen=" ++ show (Stack.dhcpXid d))
+          withQSem netSem $ writeRef netDhcpSeen Nothing
+          busyDelayUs 20000 >> waitDhcpMsg slot xid wantType (waitedMs - 20)
+        _ -> do busyDelayUs 20000; waitDhcpMsg slot xid wantType (waitedMs - 20)
 
 -- | ARP ls with 60 s expiry.
 netArpLs :: H [(Ipv4, Mac)]
@@ -536,10 +548,21 @@ sendArpRequest slot dev target = do
   txPacket slot eth
 
 -- | Drain RX completions, learn ARP, stash ICMP/DHCP replies, replenish grants.
+-- Bounded 'netRxBatchCap' per call; overflow is counted + dmesg-logged.
 drainRx :: Int -> H ()
-drainRx slot = go (16 :: Int)
+drainRx slot = go netRxBatchCap
   where
-    go 0 = return ()
+    go 0 = do
+      r <- netPollUsed slot 0
+      case r of
+        Right (Just _) -> do
+          n <- withQSem netSem $ do
+            c <- readRef netRxDrops
+            let c' = c + 1
+            writeRef netRxDrops c'
+            return c'
+          Dmesg.dmesgLog ("net rx batch cap slot " ++ show slot ++ " drops=" ++ show n)
+        _ -> return ()
     go n = do
       r <- netPollUsed slot 0
       case r of

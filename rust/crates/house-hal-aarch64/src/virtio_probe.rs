@@ -7,7 +7,7 @@ const VIRTIO_STRIDE: u64 = 0x200;
 const VIRTIO_NUM_SLOTS: i32 = 8;
 const VIRTIO_MAGIC: u32 = 0x74726976;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_probe_slot(
     slot: i32,
     dev: *mut u32,
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn virtio_probe_slot(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_page_pa(p: *mut u8) -> u64 {
     // Identity-mapped RAM at 0x40000000.
     p as u64

@@ -1,5 +1,8 @@
 -- | L4 sync rendezvous Endpoint — bounded queue 32, QSem+MVar.
 -- Send blocks until paired recv/reply; trySend is non-blocking fire-and-forget.
+-- Capability slice (Track S, log-only): 'newEndpoint' mints an owner 'CapToken';
+-- 'checkCap'/'nsLookupChecked' log mismatches to dmesg but still allow, so no
+-- gate bricks until a deny-by-default landing proves green on both accels.
 module Kernel.IPC.Endpoint
   ( newEndpoint,
     freeEndpoint,
@@ -7,8 +10,12 @@ module Kernel.IPC.Endpoint
     recv,
     reply,
     call,
+    callTimeout,
     trySend,
     endpointId,
+    CapToken (..),
+    endpointToken,
+    checkCap,
   )
 where
 
@@ -24,6 +31,7 @@ import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import qualified H.Pages as P
 import H.Unsafe (unsafePerformH)
+import qualified Kernel.Driver.Dmesg as Dmesg
 import Kernel.IPC.Types
   ( Endpoint (..),
     EndpointId (..),
@@ -31,6 +39,7 @@ import Kernel.IPC.Types
     IpcError (..),
     Message (..),
   )
+import qualified System.Timeout as T
 
 -- | Maximum rendezvous queued per endpoint (HIGH OOM bound).
 maxQueueDepth :: Int
@@ -61,7 +70,29 @@ endpointSem = unsafePerformH $ newQSem 1
 nextEpId :: Ref Word64
 nextEpId = unsafePerformH $ newRef 0
 
--- | Create a new endpoint (capability). Id minted under QSem.
+-- | Owner capability token minted per endpoint (Track S, log-only slice).
+newtype CapToken = CapToken Word64
+  deriving (Eq, Show)
+
+{-# NOINLINE endpointOwner #-}
+endpointOwner :: Ref (Map EndpointId CapToken)
+endpointOwner = unsafePerformH $ newRef Map.empty
+
+{-# NOINLINE capViolations #-}
+capViolations :: Ref Word64
+capViolations = unsafePerformH $ newRef 0
+
+-- | Count + dmesg a capability/lookup violation. Log-only: never denies.
+logCap :: String -> H ()
+logCap why = do
+  n <- withQSem endpointSem $ do
+    c <- readRef capViolations
+    let c' = c + 1
+    writeRef capViolations c'
+    return c'
+  Dmesg.dmesgLog ("ipc cap[" ++ show n ++ "]: " ++ why)
+
+-- | Create a new endpoint (capability). Id + owner token minted under QSem.
 newEndpoint :: H Endpoint
 newEndpoint = withQSem endpointSem $ do
   n <- readRef nextEpId
@@ -69,6 +100,7 @@ newEndpoint = withQSem endpointSem $ do
   let eid = EndpointId n
   st <- newRef (EndpointState [])
   modifyRef endpointTable (Map.insert eid st)
+  modifyRef endpointOwner (Map.insert eid (CapToken n))
   return (Endpoint eid)
 
 -- | Destroy endpoint, waking pending senders with NoSuchEndpoint and freeing grant pages.
@@ -80,6 +112,7 @@ freeEndpoint (Endpoint eid) = do
       Nothing -> return Nothing
       Just st -> do
         writeRef endpointTable (Map.delete eid tbl)
+        modifyRef endpointOwner (Map.delete eid)
         return (Just st)
   case mSt of
     Nothing -> return ()
@@ -95,6 +128,24 @@ freeEndpoint (Endpoint eid) = do
         Just gg -> P.freePage (grantPage gg)
       _ <- liftIO $ tryPutMVar (rvReplyVar rv) (Left NoSuchEndpoint)
       return ()
+
+-- | Project owner token (Nothing after freeEndpoint).
+endpointToken :: Endpoint -> H (Maybe CapToken)
+endpointToken (Endpoint eid) = withQSem endpointSem $ do
+  m <- readRef endpointOwner
+  return (Map.lookup eid m)
+
+-- | Capability check, log-only: anonymous (Nothing) stays silent for compat;
+-- a wrong token or freed id logs to dmesg but still allows. Deny-by-default
+-- lands once ipc ping/grant stay green on both accels with this on.
+checkCap :: Endpoint -> Maybe CapToken -> H Bool
+checkCap ep@(Endpoint eid) mtok = case mtok of
+  Nothing -> return True
+  Just t -> do
+    owned <- endpointToken ep
+    case owned of
+      Just o | o == t -> return True
+      _ -> do logCap ("mismatch ep=" ++ show eid); return True
 
 -- | Blocking send: enqueue and wait for reply. Returns Left on QueueFull or NoSuchEndpoint.
 send :: Endpoint -> Message -> H (Either IpcError Message)
@@ -113,6 +164,7 @@ send ep msg = do
             writeRef st (qs {esQueue = esQueue qs ++ [rv]})
             return (Right ())
   case enqRes of
+    Left NoSuchEndpoint -> do logCap ("send to freed ep=" ++ show (epId ep)); return (Left NoSuchEndpoint)
     Left e -> return (Left e)
     -- Bracket the rendezvous: an async exception while blocked in
     -- takeMVar dequeues our entry so no orphaned slot is left behind.
@@ -134,7 +186,7 @@ trySend :: Endpoint -> Message -> H (Either IpcError ())
 trySend ep msg = do
   replyVar <- liftIO C.newEmptyMVar
   let rv = Rendezvous msg replyVar
-  withQSem endpointSem $ do
+  r <- withQSem endpointSem $ do
     tbl <- readRef endpointTable
     case Map.lookup (epId ep) tbl of
       Nothing -> return (Left NoSuchEndpoint)
@@ -145,6 +197,9 @@ trySend ep msg = do
           else do
             writeRef st (qs {esQueue = esQueue qs ++ [rv]})
             return (Right ())
+  case r of
+    Left NoSuchEndpoint -> do logCap ("trySend to freed ep=" ++ show (epId ep)); return r
+    _ -> return r
 
 -- | Blocking recv: dequeue next rendezvous, returning message + reply handle.
 -- Blocks (polls) until a sender arrives.
@@ -182,6 +237,15 @@ reply var res = do
 -- | Call is alias for send (sync RPC).
 call :: Endpoint -> Message -> H (Either IpcError Message)
 call = send
+
+-- | Bounded call: 'send' with a reply timeout (µs). Times out to WouldBlock +
+-- dmesg instead of blocking forever on a wedged server (CWE-400).
+callTimeout :: Int -> Endpoint -> Message -> H (Either IpcError Message)
+callTimeout us ep msg = do
+  r <- liftIO $ T.timeout us (runH (send ep msg))
+  case r of
+    Nothing -> do logCap ("call timeout ep=" ++ show (epId ep)); return (Left WouldBlock)
+    Just res -> return res
 
 -- | Project endpoint id.
 endpointId :: Endpoint -> EndpointId

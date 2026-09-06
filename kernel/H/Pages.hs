@@ -42,7 +42,11 @@ foreign import ccall unsafe "&min_user_addr" minAddrRef :: Ptr (Ptr a)
 foreign import ccall unsafe "&max_user_addr" maxAddrRef :: Ptr (Ptr a)
 
 minAddr, maxAddr :: Ptr a
+-- Single shared snapshot of the C address range (cf. Endpoint.endpointTable).
+{-# NOINLINE minAddr #-}
 minAddr = unsafePerformH (peek minAddrRef)
+-- Single shared snapshot of the C address range (cf. Endpoint.endpointTable).
+{-# NOINLINE maxAddr #-}
 maxAddr = unsafePerformH (peek maxAddrRef)
 
 foreign import ccall unsafe "buddy_alloc_page" buddyAllocPageIO :: IO (Ptr a)

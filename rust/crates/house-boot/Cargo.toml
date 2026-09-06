@@ -8,7 +8,7 @@ license.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
-house-hal-aarch64 = { path = "../house-hal-aarch64" }
+house-hal-aarch64.workspace = true
 
 [lints]
 workspace = true

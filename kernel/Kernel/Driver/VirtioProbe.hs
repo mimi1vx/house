@@ -50,6 +50,26 @@ virtioScan = mapM probeOne [0 .. 7]
       return info
 
 showHex :: Word32 -> String
-showHex v =
-  let h = "0123456789abcdef"
-   in if v < 16 then [h !! fromIntegral v] else showHex (v `div` 16) ++ [h !! fromIntegral (v `mod` 16)]
+showHex v
+  | v < 16 = [hexDigit (fromIntegral v)]
+  | otherwise = showHex (v `div` 16) ++ [hexDigit (fromIntegral (v `mod` 16))]
+  where
+    -- \| Total nibble render; index reduced mod 16.
+    hexDigit :: Int -> Char
+    hexDigit n = case n `mod` 16 of
+      0 -> '0'
+      1 -> '1'
+      2 -> '2'
+      3 -> '3'
+      4 -> '4'
+      5 -> '5'
+      6 -> '6'
+      7 -> '7'
+      8 -> '8'
+      9 -> '9'
+      10 -> 'a'
+      11 -> 'b'
+      12 -> 'c'
+      13 -> 'd'
+      14 -> 'e'
+      _ -> 'f'

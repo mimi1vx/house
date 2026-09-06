@@ -17,7 +17,7 @@ const SGI_OFF: u32 = 7;
 static mut OFF_REQ: [u32; 32] = [0; 32];
 static mut EPOCH: [u32; 32] = [0; 32];
 
-extern "C" {
+unsafe extern "C" {
     static mut house_smp_online_mask: u32;
     static mut house_smp_n: i32;
     fn secondary_entry();
@@ -46,7 +46,7 @@ fn cntfrq() -> u64 {
 ///
 /// # Safety
 /// EL1 only; single 32-bit volatile read.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_online() -> u32 {
     // SAFETY: mask is u32 single-def in house-boot, volatile read is race-safe.
     unsafe { core::ptr::read_volatile(&raw const house_smp_online_mask) }
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn house_smp_online() -> u32 {
 ///
 /// # Safety
 /// `core` is bounds-checked; out-of-range returns 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_should_off(core: u32) -> i32 {
     if (core as usize) >= HOUSE_MAX_SMP {
         return 0;
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn house_smp_should_off(core: u32) -> i32 {
 ///
 /// # Safety
 /// EL1 only, `secondary_entry` valid, `core` is the PSCI MPIDR (0..32).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_up(core: u32) -> i32 {
     if (core as usize) >= HOUSE_MAX_SMP {
         return -22;
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn house_smp_up(core: u32) -> i32 {
 /// # Safety
 /// EL1 only; the target must be parked in `c_start_secondary`'s
 /// `wfe`/`house_sched_yield` loop with IRQs enabled so SGI 7 lands.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_down(core: u32) -> i32 {
     if (core as usize) >= HOUSE_MAX_SMP {
         return -22;

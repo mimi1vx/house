@@ -27,7 +27,7 @@ unsafe fn mmio_r32_u(addr: u64) -> u32 {
 }
 
 /// void uart_init(void)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_init() {
     // SAFETY: PL011 base 0x09000000 identity-mapped by TTBR1 L1 block 0 (Device).
     unsafe {
@@ -47,7 +47,7 @@ pub unsafe extern "C" fn uart_init() {
 }
 
 /// void uart_putc(char c)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_putc(c: u8) {
     UART_LOCK.lock();
     // SAFETY: PL011 FR/DR MMIO valid while lock held; polling TXFF preserves ordering.
@@ -67,13 +67,15 @@ pub unsafe extern "C" fn uart_putc(c: u8) {
 }
 
 /// void uart_puts(const char *s) — null-terminated, 4K cap.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_puts(s: *const u8) {
     if s.is_null() {
         return;
     }
     UART_LOCK.lock();
-    // SAFETY: s is null-terminated C string; caller guarantees nul within 4K (Haskell hPutStr/printk).
+    // SAFETY: s is a null-terminated C string with NUL within 4K — trust
+    // boundary (rust/c-abi.md): callers bound first; Haskell withCString
+    // upholds it, EL0/virtio must not pass raw device bytes here.
     // Cap at 4096 to avoid unbounded read if caller passes non-nul (Security 01 allowlist + defense).
     unsafe {
         let mut p = s;
@@ -99,7 +101,7 @@ pub unsafe extern "C" fn uart_puts(s: *const u8) {
 }
 
 /// int uart_getc_blocking(void)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_getc_blocking() -> i32 {
     // SAFETY: PL011 MMIO valid.
     unsafe {
@@ -111,7 +113,7 @@ pub unsafe extern "C" fn uart_getc_blocking() -> i32 {
 }
 
 /// int uart_getc_nonblock(void) — returns -1 if RXFE.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_getc_nonblock() -> i32 {
     // SAFETY: PL011 MMIO valid.
     unsafe {

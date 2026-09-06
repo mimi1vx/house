@@ -78,7 +78,7 @@ send "arp ls\r"
 expect { -re ">" { puts "\nPASS: arp ls" } timeout { puts "\nFAIL: arp ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
 send "ping 10.0.2.2\r"
 expect {
-    -re "64 bytes from 10.0.2.2|bytes from|ok" { puts "\nPASS: ping 10.0.2.2" }
+    -re "64 bytes from 10.0.2.2" { puts "\nPASS: ping 10.0.2.2" }
     -re "Net" {
         if {$has_netdev} { puts "\nFAIL: ping error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: ping returned error" }
     }
@@ -87,19 +87,23 @@ expect {
 sleep 1
 send "ping 10.0.2.2\r"
 expect {
-    -re "ok|bytes from" { puts "\nPASS: second ping" }
+    -re "64 bytes from 10.0.2.2" { puts "\nPASS: second ping" }
+    -re "Net" { puts "\nFAIL: second ping net error"; catch {exec kill -9 [exp_pid]}; exit 1 }
     timeout { puts "\nFAIL: second ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
 send "udpecho 10.0.2.15 12345 hello-net\r"
 expect {
-    -re "ok|udpecho" { puts "\nPASS: udpecho" }
+    -re "ok" { puts "\nPASS: udpecho" }
+    -re "Net" {
+        if {$has_netdev} { puts "\nFAIL: udpecho error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: udpecho returned error" }
+    }
     timeout { puts "\nFAIL: udpecho timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
 send "net dhcp\r"
 expect {
-    -re "ok dhcp|dhcp" { puts "\nPASS: net dhcp" }
+    -re "ok dhcp" { puts "\nPASS: net dhcp" }
     -re "Net" {
         if {$has_netdev} { puts "\nFAIL: net dhcp error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: net dhcp returned error" }
     }
@@ -115,7 +119,7 @@ send "ns ls\r"
 expect { -re ">" { puts "\nPASS: ns ls after net" } timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
 send "net teardown $netSlot\r"
 expect {
-    -re "teardown ok|ok" { puts "\nPASS: net teardown $netSlot" }
+    -re "teardown ok" { puts "\nPASS: net teardown $netSlot" }
     -re "Net" {
         if {$has_netdev} { puts "\nFAIL: net teardown error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: net teardown error" }
     }
@@ -133,7 +137,8 @@ expect {
 sleep 1
 send "ping 10.0.2.2\r"
 expect {
-    -re "ok|bytes from" { puts "\nPASS: ping after re-init" }
+    -re "64 bytes from 10.0.2.2" { puts "\nPASS: ping after re-init" }
+    -re "Net" { puts "\nFAIL: ping after re-init net error"; catch {exec kill -9 [exp_pid]}; exit 1 }
     timeout { puts "\nFAIL: ping after re-init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1

@@ -22,7 +22,7 @@ static mut FREE_PAGES: u64 = 0;
 static mut FREE_HEAD: *mut FreeBlock = core::ptr::null_mut();
 
 /// void buddy_init(uint64_t start, uint64_t end)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_init(start: u64, end: u64) {
     let mut s = start;
     let mut e = end;
@@ -53,7 +53,7 @@ pub unsafe extern "C" fn buddy_init(start: u64, end: u64) {
 }
 
 /// void *buddy_alloc_page(void)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_alloc_page() -> *mut u8 {
     let mut p: *mut u8 = core::ptr::null_mut();
     LOCK.lock();
@@ -89,7 +89,7 @@ pub unsafe extern "C" fn buddy_alloc_page() -> *mut u8 {
 }
 
 /// void buddy_free_page(void *p)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_free_page(p: *mut u8) {
     if p.is_null() {
         return;
@@ -117,20 +117,20 @@ pub unsafe extern "C" fn buddy_free_page(p: *mut u8) {
 }
 
 /// int buddy_free_count(void) — compat shim, saturates at INT_MAX.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_free_count() -> i32 {
     // SAFETY: reading FREE_PAGES is racy but single word; no lock needed for count query (C does same).
     unsafe { FREE_PAGES.min(i32::MAX as u64) as i32 }
 }
 
 /// int buddy_total_count(void) — compat shim, saturates at INT_MAX.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_total_count() -> i32 {
     unsafe { TOTAL_PAGES.min(i32::MAX as u64) as i32 }
 }
 
 /// void house_mem_stats(uint64_t *total, uint64_t *free_pages_out)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mem_stats(total: *mut u64, free_out: *mut u64) {
     let (tp, fp): (u64, u64);
     LOCK.lock();
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn house_mem_stats(total: *mut u64, free_out: *mut u64) {
 }
 
 /// int buddy_contains(void *p)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_contains(p: *mut u8) -> i32 {
     if p.is_null() {
         return 0;
@@ -161,9 +161,5 @@ pub unsafe extern "C" fn buddy_contains(p: *mut u8) -> i32 {
         return 0;
     }
     let (s, e) = unsafe { (BUDDY_START, BUDDY_END) };
-    if v >= s && v < e {
-        1
-    } else {
-        0
-    }
+    if v >= s && v < e { 1 } else { 0 }
 }

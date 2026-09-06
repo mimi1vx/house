@@ -189,7 +189,7 @@ unsafe fn queue_used_pa(slot: i32) -> u64 {
     (hi << 32) | lo
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_blk_save_queue(
     slot: i32,
     desc_pa: u64,
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn virtio_blk_save_queue(
     ss.qsize = qsize;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_blk_reset_slot(slot: i32) {
     if !slot_valid(slot) {
         return;
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn virtio_blk_reset_slot(slot: i32) {
     ss.req_buf = [0; 16];
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_blk_invalidate(pa: u64, len: usize) {
     if len == 0 {
         return;
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn virtio_blk_invalidate(pa: u64, len: usize) {
     unsafe { dc_ivac_range(pa, len) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_blk_probe_capacity(slot: i32, cap: *mut u64) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -415,7 +415,7 @@ unsafe fn blk_submit(
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_blk_submit_read(
     slot: i32,
     lba: u64,
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn virtio_blk_submit_read(
     unsafe { blk_submit(slot, lba, pa, n, id, BLK_T_IN) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_blk_submit_write(
     slot: i32,
     lba: u64,
@@ -437,7 +437,7 @@ pub unsafe extern "C" fn virtio_blk_submit_write(
     unsafe { blk_submit(slot, lba, pa, n, id, BLK_T_OUT) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_blk_poll_used(
     slot: i32,
     out_id: *mut u32,

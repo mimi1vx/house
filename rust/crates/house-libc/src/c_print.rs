@@ -1,10 +1,10 @@
 #![allow(clippy::all)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_print(s: *const u8) {
     if s.is_null() {
         return;
     }
-    extern "C" {
+    unsafe extern "C" {
         fn uart_putc(c: u8);
     }
     let mut p = s;

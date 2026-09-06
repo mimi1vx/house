@@ -65,8 +65,26 @@ data Mac = Mac Word8 Word8 Word8 Word8 Word8 Word8
 showMac :: Mac -> String
 showMac (Mac a b c d e f) = hex2 a ++ ":" ++ hex2 b ++ ":" ++ hex2 c ++ ":" ++ hex2 d ++ ":" ++ hex2 e ++ ":" ++ hex2 f
   where
-    hex2 w = [h !! fromIntegral (w `shiftR` 4), h !! fromIntegral (w .&. 0xF)]
-    h = "0123456789abcdef"
+    hex2 w = [hexDigit (fromIntegral (w `shiftR` 4)), hexDigit (fromIntegral (w .&. 0xF))]
+    -- \| Total nibble render; inputs are masked to 4 bits.
+    hexDigit :: Int -> Char
+    hexDigit n = case n `mod` 16 of
+      0 -> '0'
+      1 -> '1'
+      2 -> '2'
+      3 -> '3'
+      4 -> '4'
+      5 -> '5'
+      6 -> '6'
+      7 -> '7'
+      8 -> '8'
+      9 -> '9'
+      10 -> 'a'
+      11 -> 'b'
+      12 -> 'c'
+      13 -> 'd'
+      14 -> 'e'
+      _ -> 'f'
 
 -- | Broadcast MAC ff:ff:ff:ff:ff:ff
 macBroadcast :: Mac

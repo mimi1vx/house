@@ -58,7 +58,7 @@ fn slot_valid(slot: i32) -> bool {
     slot >= 0 && slot < NUM_SLOTS_H
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_dc_flush(pa: u64, len: usize) {
     if len == 0 {
         return;
@@ -85,7 +85,7 @@ pub unsafe extern "C" fn virtio_transport_dc_flush(pa: u64, len: usize) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_get_status(slot: i32, status: *mut u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn virtio_transport_get_status(slot: i32, status: *mut u32
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_set_status(slot: i32, status: u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn virtio_transport_set_status(slot: i32, status: u32) -> 
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_init(slot: i32, lo: *mut u32, hi: *mut u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn virtio_transport_init(slot: i32, lo: *mut u32, hi: *mut
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_set_features(slot: i32, wanted: u64) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn virtio_transport_set_features(slot: i32, wanted: u64) -
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_max(slot: i32, max: *mut u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -218,7 +218,7 @@ pub unsafe extern "C" fn virtio_transport_queue_max(slot: i32, max: *mut u32) ->
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_max_q(slot: i32, qidx: i32, max: *mut u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn virtio_transport_queue_max_q(slot: i32, qidx: i32, max:
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_setup(
     slot: i32,
     desc_pa: u64,
@@ -251,7 +251,7 @@ pub unsafe extern "C" fn virtio_transport_queue_setup(
     unsafe { virtio_transport_queue_setup_q(slot, 0, desc_pa, avail_pa, used_pa, qsize) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_setup_q(
     slot: i32,
     qidx: i32,
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn virtio_transport_queue_setup_q(
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_notify(slot: i32, qidx: u32) -> i32 {
     if !slot_valid(slot) {
         return VIRTIO_ERR_BAD_SLOT;
@@ -298,7 +298,7 @@ pub unsafe extern "C" fn virtio_transport_notify(slot: i32, qidx: u32) -> i32 {
     VIRTIO_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_interrupt_status(slot: i32) -> u32 {
     if !slot_valid(slot) {
         return 0;
@@ -306,7 +306,7 @@ pub unsafe extern "C" fn virtio_transport_interrupt_status(slot: i32) -> u32 {
     unsafe { mmio_r32(slot_base(slot) + OFF_INTERRUPT_STATUS) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_ack(slot: i32, mask: u32) {
     if !slot_valid(slot) {
         return;

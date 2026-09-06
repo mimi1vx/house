@@ -49,6 +49,10 @@ Future symbol additions that touch these paths get bounds review first
   in `Kernel/Driver/Virtio/Net/Stack.hs`) do their own length checks on top.
   RX-replenish keeps the Track B `pollTx`/locking order; the IRQ→Endpoint push
   path (`house_irq_push`, `ba5acfa`) stays byte-identical.
+- **ARP/DHCP in the virt lab.** ARP/DHCP are spoofable in the virt lab
+  (`10.0.2.0/24` user-mode NAT); there is no DNSSEC/TLS in this slice
+  (accepted risk — Track S). The guest still expires ARP entries after 60 s
+  and logs DHCP xid mismatches to `dmesg` instead of accepting them.
 - **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`) and
   `house_ipc_svc_dispatch` (`IPC 0x10..0x14`) take raw `imm`/`x0..x3` from EL0;
   unknown `imm` returns an error, user pointers are validated before
@@ -56,6 +60,13 @@ Future symbol additions that touch these paths get bounds review first
 - **Buddy containment.** `buddy_free_page`/`buddy_contains` reject null,
    misaligned, and out-of-range (`BUDDY_START..BUDDY_END`) pages; the managed
    window is `__heap_base+64M .. stack_top-N*64K` (N = detected cores).
+- **C strings (`strlen`/`strcpy`/`strcat`/`strcmp`/`strchr`/`strrchr`/
+  `strcasecmp`/`strdup`, `uart_puts`, `c_print`).** Unbounded NUL scanners:
+  callers bound first — every entry carries a `strnlen`-capped `debug_assert`
+  probe (4K, matching `uart_puts`' cap) plus a trust-boundary `SAFETY` note.
+  Haskell `withCString` upholds NUL-termination at every current call site;
+  EL0/virtio must not pass raw device bytes here — pre-bound with `strnlen`
+  before crossing. (`strnlen`/`strncmp`/`strncpy` are bounded by construction.)
 - **C-vs-Rust cache/TLBI parity.** The C provenance is fully
   ported — no `dc cvac|dc ivac|dsb sy|tlbi` sites remain under
   `platform/aarch64` (only `aarch64.ld`/`Makefile`/Haskell harnesses); `rg`

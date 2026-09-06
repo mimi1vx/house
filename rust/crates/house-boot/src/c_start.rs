@@ -46,13 +46,13 @@ check_house_spike_main:
 const HOUSE_MAX_SMP: usize = 32;
 
 // Single definition — other crates declare `extern "C" static mut house_smp_n`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_smp_n: i32 = 2;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_smp_online_mask: u32 = 1;
 
-extern "C" {
+unsafe extern "C" {
     static mut house_ram_bytes: u64;
     static mut house_boot_stack_top: u64;
     static mut house_smp: i32;
@@ -101,7 +101,7 @@ extern "C" {
     fn check_house_spike_main() -> usize;
 }
 
-extern "C" {
+unsafe extern "C" {
     // Access timer globals by name as C defines them (owned by house-hal-aarch64::timer)
     #[link_name = "house_isr_active"]
     static mut __c_house_isr_active: i32;
@@ -134,7 +134,7 @@ unsafe fn puthex(v: u64) {
 }
 
 // SAFETY: EL1 fault handler, gpr points to 896B frame saved in exception.rs vec_sync (x0-x30 @0, SP @248).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_handle_sync(
     esr: u64,
     far: u64,
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn c_handle_sync(
 }
 
 // SAFETY: IRQ handler, reads ICC_IAR1_EL1, may push to irq ring or rearm timer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
     let iar: u64;
     // SAFETY: EL1 GIC SRE enabled, ICC_IAR1_EL1 valid.
@@ -374,7 +374,7 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fatal_exception() {
     let esr: u64;
     let far: u64;
@@ -396,7 +396,7 @@ pub unsafe extern "C" fn fatal_exception() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_start_secondary(core_id: u64) {
     let core = core_id as u32;
     // SAFETY: early secondary, DAIF masked, per-core init.
@@ -438,7 +438,7 @@ pub unsafe extern "C" fn c_start_secondary(core_id: u64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_start() {
     // SAFETY: primary entry after entry.rs _start, single core, BSS clear, VBAR set, MMU early done.
     unsafe {

@@ -13,7 +13,7 @@ static mut RING_TAIL: u32 = 0;
 static mut PIPE_R: i32 = -1;
 static mut PIPE_W: i32 = -1;
 
-extern "C" {
+unsafe extern "C" {
     fn pipe(fds: *mut i32) -> i32;
     fn write(fd: i32, buf: *const u8, n: usize) -> isize;
     fn read(fd: i32, buf: *mut u8, n: usize) -> isize;
@@ -25,7 +25,7 @@ extern "C" {
     fn house_fd_pipe_readable(fd: i32) -> i32;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_init() {
     // SAFETY: called early, single core, BSS clear.
     unsafe {
@@ -48,7 +48,7 @@ pub unsafe extern "C" fn house_irq_init() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_push(intid: u32) {
     // SAFETY: producer is c_handle_irq (IRQ masked, single core) — lock-free, no races on head.
     // Ack a pending virtio used-ring interrupt at the source first: the level
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn house_irq_push(intid: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pop() -> i32 {
     unsafe {
         let t = RING_TAIL;
@@ -96,12 +96,12 @@ pub unsafe extern "C" fn house_irq_pop() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pipe_fd() -> i32 {
     unsafe { PIPE_R }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pipe_drain() {
     unsafe {
         if PIPE_R < 0 {
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn house_irq_pipe_drain() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pipe_readable(fd: i32) -> i32 {
     // SAFETY: house_fd_pipe_readable is poll-like check.
     unsafe { house_fd_pipe_readable(fd) }

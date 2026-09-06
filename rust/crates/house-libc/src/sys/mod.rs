@@ -11,7 +11,7 @@ pub mod time;
 
 use core::ffi::c_void;
 
-extern "C" {
+unsafe extern "C" {
     fn uart_putc(c: u8);
     fn __errno_location() -> *mut i32;
     static mut house_isr_active: i32;
@@ -75,16 +75,12 @@ fn fd_slot(fd: i32) -> Option<usize> {
         return None;
     }
     let s = (fd - FAKE_FD_BASE) as usize;
-    if s < FAKE_FD_N {
-        Some(s)
-    } else {
-        None
-    }
+    if s < FAKE_FD_N { Some(s) } else { None }
 }
 
 static mut TICK_INTERVAL_NS: u64 = 0;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut environ: *mut *mut u8 = &raw mut EMPTY_ENV as *mut *mut u8;
 
 static mut EMPTY_ENV: *mut u8 = core::ptr::null_mut();
@@ -95,11 +91,7 @@ fn counter_hz() -> u64 {
     unsafe {
         core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) f, options(nostack, preserves_flags))
     };
-    if f == 0 {
-        62500000
-    } else {
-        f
-    }
+    if f == 0 { 62500000 } else { f }
 }
 
 // SAFETY: reads CNTVCT, always safe.
@@ -114,7 +106,7 @@ unsafe fn house_uptime_ns_raw() -> u64 {
 
 const FAKE_EPOCH: u64 = 1785000000;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn write(fd: i32, buf: *const u8, n: usize) -> isize {
     if let Some(s) = fd_slot(fd) {
         let entry = unsafe { &mut FDT[s] };
@@ -159,7 +151,7 @@ pub unsafe extern "C" fn write(fd: i32, buf: *const u8, n: usize) -> isize {
     -1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: i32, buf: *mut u8, n: usize) -> isize {
     let Some(s) = fd_slot(fd) else {
         return 0;
@@ -225,7 +217,7 @@ pub unsafe extern "C" fn read(fd: i32, buf: *mut u8, n: usize) -> isize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pipe(fds: *mut i32) -> i32 {
     if fds.is_null() {
         unsafe { *__errno_location() = 14 };
@@ -260,7 +252,7 @@ pub unsafe extern "C" fn pipe(fds: *mut i32) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn close(fd: i32) -> i32 {
     if let Some(s) = fd_slot(fd) {
         let e = unsafe { &mut FDT[s] };
@@ -274,7 +266,7 @@ pub unsafe extern "C" fn close(fd: i32) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
     let _ = flags;
     for i in 0..FAKE_FD_N {
@@ -291,7 +283,7 @@ pub unsafe extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
     -1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
     let Some(s) = fd_slot(fd) else {
         unsafe { *__errno_location() = 9 };
@@ -306,7 +298,7 @@ pub unsafe extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
     if value.is_null() {
         unsafe { *__errno_location() = 14 };
@@ -330,7 +322,7 @@ pub unsafe extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_create(_size: i32) -> i32 {
     for i in 0..FAKE_FD_N {
         if unsafe { FDT[i].kind } == FdKind::Free {
@@ -345,7 +337,7 @@ pub unsafe extern "C" fn epoll_create(_size: i32) -> i32 {
     -1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_create1(flags: i32) -> i32 {
     let _ = flags;
     unsafe { epoll_create(1) }
@@ -359,7 +351,7 @@ struct EpollEvent {
 
 const EPOLLIN: u32 = 0x001;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, ev: *mut c_void) -> i32 {
     let Some(s) = fd_slot(epfd) else {
         unsafe { *__errno_location() = 9 };
@@ -440,7 +432,7 @@ unsafe fn fd_ready(fd: i32) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_wait(
     epfd: i32,
     events: *mut c_void,
@@ -448,7 +440,7 @@ pub unsafe extern "C" fn epoll_wait(
     timeout: i32,
 ) -> i32 {
     // SAFETY: blocking yield/wfi matches tinylibc/sys.c epoll_wait; no locks held.
-    extern "C" {
+    unsafe extern "C" {
         fn house_sched_yield();
         static house_thr_mode: i32;
     }
@@ -532,7 +524,7 @@ pub unsafe extern "C" fn epoll_wait(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_pwait(
     epfd: i32,
     events: *mut c_void,
@@ -544,7 +536,7 @@ pub unsafe extern "C" fn epoll_pwait(
     unsafe { epoll_wait(epfd, events, maxevents, timeout) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_pwait2(
     epfd: i32,
     events: *mut c_void,
@@ -562,7 +554,7 @@ pub unsafe extern "C" fn epoll_pwait2(
     unsafe { epoll_pwait(epfd, events, maxevents, to, sigmask) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     let _ = clockid;
     let _ = flags;
@@ -580,7 +572,7 @@ pub unsafe extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     -1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timerfd_settime(
     _fd: i32,
     _flags: i32,
@@ -601,7 +593,7 @@ pub unsafe extern "C" fn timerfd_settime(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timerfd_gettime(_fd: i32, v: *mut c_void) -> i32 {
     if v.is_null() {
         return 0;
@@ -618,7 +610,7 @@ pub unsafe extern "C" fn timerfd_gettime(_fd: i32, v: *mut c_void) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timerfd_due(fd: i32) -> i32 {
     let Some(s) = fd_slot(fd) else {
         return 0;
@@ -649,7 +641,7 @@ pub unsafe extern "C" fn house_timerfd_due(fd: i32) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_fd_pipe_readable(fd: i32) -> i32 {
     let Some(s) = fd_slot(fd) else {
         return 0;
@@ -663,33 +655,29 @@ pub unsafe extern "C" fn house_fd_pipe_readable(fd: i32) -> i32 {
 }
 
 // ---- remaining stubs (keep minimal) ----
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn open(_p: *const u8, _f: i32) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lseek(_fd: i32, _o: i64, _w: i32) -> i64 {
     unsafe { *__errno_location() = 29 };
     -1
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fcntl(_fd: i32, _c: i32) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ioctl(_fd: i32, _r: u64) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn isatty(fd: i32) -> i32 {
-    if fd <= 2 {
-        1
-    } else {
-        0
-    }
+    if fd <= 2 { 1 } else { 0 }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstat(_fd: i32, _st: *mut u8) -> i32 {
     // SAFETY: matches tinylibc/sys.c fstat: zeroed stat, S_IFCHR|0666, blksize 4096.
     if !_st.is_null() {
@@ -703,22 +691,22 @@ pub unsafe extern "C" fn fstat(_fd: i32, _st: *mut u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn stat(_p: *const u8, _st: *mut u8) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(_p: *const u8) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(_p: *const u8) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getcwd(buf: *mut u8, n: usize) -> *mut u8 {
     if buf.is_null() || n < 2 {
         return core::ptr::null_mut();
@@ -729,7 +717,7 @@ pub unsafe extern "C" fn getcwd(buf: *mut u8, n: usize) -> *mut u8 {
     };
     buf
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getenv(n: *const u8) -> *mut u8 {
     if n.is_null() {
         return core::ptr::null_mut();
@@ -742,36 +730,36 @@ pub unsafe extern "C" fn getenv(n: *const u8) -> *mut u8 {
     }
     core::ptr::null_mut()
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dup(_fd: i32) -> i32 {
     unsafe { *__errno_location() = 9 };
     -1
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dup2(_o: i32, n: i32) -> i32 {
     n
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpid() -> i32 {
     42
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getuid() -> u32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn geteuid() -> u32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgid() -> u32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getegid() -> u32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_gettime(clk: i32, tp: *mut u8) -> i32 {
     if tp.is_null() {
         return 0;
@@ -790,7 +778,7 @@ pub unsafe extern "C" fn clock_gettime(clk: i32, tp: *mut u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_getres(_c: i32, res: *mut u8) -> i32 {
     if res.is_null() {
         return 0;
@@ -801,7 +789,7 @@ pub unsafe extern "C" fn clock_getres(_c: i32, res: *mut u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn gettimeofday(tv: *mut u8, _tz: *mut c_void) -> i32 {
     if tv.is_null() {
         return 0;
@@ -813,7 +801,7 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut u8, _tz: *mut c_void) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn times(t: *mut u8) -> i64 {
     let ticks = (unsafe { house_uptime_ns_raw() } / 10000000) as i64;
     if !t.is_null() {
@@ -827,21 +815,21 @@ pub unsafe extern "C" fn times(t: *mut u8) -> i64 {
     }
     ticks
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigemptyset(s: *mut u8) -> i32 {
     if !s.is_null() {
         unsafe { core::ptr::write_bytes(s, 0, 16) };
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigfillset(s: *mut u8) -> i32 {
     if !s.is_null() {
         unsafe { core::ptr::write_bytes(s, 0xff, 16) };
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaddset(s: *mut u8, n: i32) -> i32 {
     if s.is_null() || n <= 0 {
         return 0;
@@ -850,7 +838,7 @@ pub unsafe extern "C" fn sigaddset(s: *mut u8, n: i32) -> i32 {
     unsafe { *w.add(((n - 1) as usize) / 64) |= 1u64 << ((n - 1) % 64) };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigdelset(s: *mut u8, n: i32) -> i32 {
     if s.is_null() || n <= 0 {
         return 0;
@@ -859,7 +847,7 @@ pub unsafe extern "C" fn sigdelset(s: *mut u8, n: i32) -> i32 {
     unsafe { *w.add(((n - 1) as usize) / 64) &= !(1u64 << ((n - 1) % 64)) };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigismember(s: *const u8, n: i32) -> i32 {
     if s.is_null() || n <= 0 {
         return 0;
@@ -897,7 +885,7 @@ const SIG_UNBLOCK: i32 = 1;
 const SIG_SETMASK: i32 = 2;
 const EINVAL: i32 = 22;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(sig: i32, act: *const c_void, old: *mut c_void) -> i32 {
     // SAFETY: sig validated 1..31, act/old valid for SigAction if non-null
     if sig <= 0 || sig >= 32 {
@@ -945,10 +933,10 @@ unsafe fn deliver(sig: i32) {
     unsafe { f(sig) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigprocmask(how: i32, set: *const c_void, old: *mut c_void) -> i32 {
     // SAFETY: per-thread sigmask when house_thr_mode, else global CURMASK
-    extern "C" {
+    unsafe extern "C" {
         static house_thr_mode: i32;
         fn house_thread_current() -> *mut u8;
     }
@@ -990,21 +978,21 @@ pub unsafe extern "C" fn sigprocmask(how: i32, set: *const c_void, old: *mut c_v
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn raise(sig: i32) -> i32 {
     // SAFETY: deliver replays handler
     unsafe { deliver(sig) };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kill(_p: i32, sig: i32) -> i32 {
     unsafe { deliver(sig) };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_rts_tick() {
     // SAFETY: only deliver when not in threaded mode, matches tinylibc/sys.c
-    extern "C" {
+    unsafe extern "C" {
         static house_thr_mode: i32;
     }
     let mode = unsafe { core::ptr::read_volatile(&raw const house_thr_mode) };
@@ -1013,7 +1001,7 @@ pub unsafe extern "C" fn house_rts_tick() {
     }
     unsafe { deliver(SIGVTALRM) };
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn setitimer(_w: i32, nv: *const c_void, ov: *mut c_void) -> i32 {
     // SAFETY: nv/ov point to itimerval { it_interval, it_value } each = timeval { sec, usec }
     if !ov.is_null() {
@@ -1028,7 +1016,7 @@ pub unsafe extern "C" fn setitimer(_w: i32, nv: *const c_void, ov: *mut c_void) 
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getitimer(_w: i32, v: *mut c_void) -> i32 {
     if v.is_null() {
         return 0;
@@ -1044,7 +1032,7 @@ pub unsafe extern "C" fn getitimer(_w: i32, v: *mut c_void) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_create(_c: i32, _e: *const c_void, _t: *mut u64) -> i32 {
     static mut NEXT: u64 = 1;
     if _t.is_null() {
@@ -1056,7 +1044,7 @@ pub unsafe extern "C" fn timer_create(_c: i32, _e: *const c_void, _t: *mut u64) 
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_settime(
     _t: u64,
     _f: i32,
@@ -1073,7 +1061,7 @@ pub unsafe extern "C" fn timer_settime(
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_gettime(_t: u64, _v: *mut c_void) -> i32 {
     if _v.is_null() {
         return 0;
@@ -1087,18 +1075,18 @@ pub unsafe extern "C" fn timer_gettime(_t: u64, _v: *mut c_void) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_getoverrun(_t: u64) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_delete(_t: u64) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sysconf(n: i32) -> i64 {
     // SAFETY: matches tinylibc/sys.c sysconf cases
-    extern "C" {
+    unsafe extern "C" {
         static house_smp_n: i32;
         static house_ram_bytes: u64;
         fn buddy_free_count() -> i32;
@@ -1107,11 +1095,7 @@ pub unsafe extern "C" fn sysconf(n: i32) -> i64 {
         30 => 4096, // _SC_PAGESIZE
         83 | 84 => unsafe {
             let v = core::ptr::read_volatile(&raw const house_smp_n);
-            if v == 0 {
-                1
-            } else {
-                v as i64
-            }
+            if v == 0 { 1 } else { v as i64 }
         },
         85 => unsafe {
             let ram = core::ptr::read_volatile(&raw const house_ram_bytes);
@@ -1120,11 +1104,7 @@ pub unsafe extern "C" fn sysconf(n: i32) -> i64 {
         },
         96 => unsafe {
             let bc = buddy_free_count();
-            if bc > 0 {
-                bc as i64 + 512
-            } else {
-                100000
-            }
+            if bc > 0 { bc as i64 + 512 } else { 100000 }
         }, // _SC_AVPHYS_PAGES
         2 => 100,              // _SC_CLK_TCK
         4 => FAKE_FD_N as i64, // _SC_OPEN_MAX
@@ -1134,29 +1114,29 @@ pub unsafe extern "C" fn sysconf(n: i32) -> i64 {
         }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpagesize() -> i32 {
     4096
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(_s: i32) -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _exit(_s: i32) -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _Exit(_s: i32) -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn abort() -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
@@ -1174,7 +1154,7 @@ fn digit_val(c: u8) -> i32 {
         -1
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtol(n: *const u8, end: *mut *mut u8, base: i32) -> i64 {
     // SAFETY: n is NUL-terminated per C contract, end may be null
     if n.is_null() {
@@ -1222,22 +1202,18 @@ pub unsafe extern "C" fn strtol(n: *const u8, end: *mut *mut u8, base: i32) -> i
             *end = p as *mut u8;
         }
     }
-    if neg {
-        -(v as i64)
-    } else {
-        v as i64
-    }
+    if neg { -(v as i64) } else { v as i64 }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoul(n: *const u8, end: *mut *mut u8, base: i32) -> u64 {
     // SAFETY: delegate to strtol bit pattern
     unsafe { strtol(n, end, base) as u64 }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoi(n: *const u8) -> i32 {
     unsafe { strtol(n, core::ptr::null_mut(), 10) as i32 }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strerror(_e: i32) -> *mut u8 {
     b"house error\0".as_ptr() as *mut u8
 }

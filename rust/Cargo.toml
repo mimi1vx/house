@@ -4,19 +4,32 @@ resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 
 [workspace.lints.rust]
-unsafe_op_in_unsafe_fn = "warn"
+unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
 
+# Internal path deps with pinned versions so `cargo deny` bans::wildcards
+# stays "deny": a version-less path dep reads as `*` to the audit gate.
+[workspace.dependencies]
+house-hal = { path = "crates/house-hal", version = "0.1.0" }
+house-hal-aarch64 = { path = "crates/house-hal-aarch64", version = "0.1.0" }
+
 [profile.dev]
+# Freestanding .bin: no unwinder on bare metal, so unwinding would need
+# eh_personality/lang_items the RTS link never provides; abort keeps the
+# flat binary linkable.
 panic = "abort"
 
 [profile.release]
 panic = "abort"
+# lto = "off": full LTO across GHC RTS archives + Rust rlibs inflates link
+# time/memory for a --gc-sections flat .bin; re-enable only with numbers.
 lto = "off"
+# opt-level = 2: size/speed balance for the MMU + virtio hot paths;
+# 3/s/z unmeasured — change only with a .bin-size + boot-time note.
 opt-level = 2

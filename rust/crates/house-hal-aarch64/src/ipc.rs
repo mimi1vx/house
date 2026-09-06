@@ -7,6 +7,14 @@
 //! validation passes — the queue itself stays Haskell-owned until a future
 //! trap-safe delegation ring lands. Unknown `op` returns `-22`, never traps.
 //!
+//! Errno mapping once the ring lands (mirrors `Kernel.Userspace.Syscall` and
+//! `Kernel.IPC.Types`): unknown/freed endpoint id → `NoSuchEndpoint` (-2,
+//! `ENOENT`; the `nsLookupChecked` miss path, dmesg-logged); capability
+//! mismatch → `NotOwner` (-1, `EPERM`; log-only in this slice via `checkCap`);
+//! full queue → `QueueFull` (`EAGAIN`); `callTimeout` expiry → `WouldBlock`.
+//! Capability tokens are minted in `newEndpoint`; the trap boundary keeps
+//! non-blocking try semantics so a hostile EL0 caller cannot wedge the queue.
+//!
 //! Arg convention: SEND/CALL/REPLY take `(ep, va, nwords, tag)`; RECV takes
 //! `(ep, va, nwords, _)` with `(0, 0)` meaning no reply buffer; GRANT_MAP
 //! takes `(ep, page_va, perm, _)` with `perm` 0 = RO, 1 = RW.
@@ -48,7 +56,7 @@ unsafe fn inline_words_ok(va: u64, nwords: u64) -> i64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_ipc_svc_dispatch(
     op: u32,
     x0: u64,
@@ -103,7 +111,7 @@ fn range_in_window(ptr: u64, end: u64) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_ipc_copy_msg(src: *const u8, dst: *mut u8, len: usize) {
     if src.is_null() || dst.is_null() {
         return;

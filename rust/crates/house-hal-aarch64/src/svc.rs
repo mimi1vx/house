@@ -12,7 +12,7 @@ const HOUSE_SVC_IPC_GRANT_MAP: u32 = 0x14;
 static mut HOUSE_USER_EXITED: i32 = 0;
 static mut HOUSE_USER_EXIT_CODE: i32 = 0;
 
-extern "C" {
+unsafe extern "C" {
     fn uart_puts(s: *const u8);
     fn uart_putc(c: u8);
     fn house_ipc_svc_dispatch(op: u32, x0: u64, x1: u64, x2: u64, x3: u64) -> i64;
@@ -86,7 +86,7 @@ pub(crate) unsafe fn validate_user_buffer(va: u64, len: u64) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_set_exit(code: i32) {
     unsafe {
         HOUSE_USER_EXIT_CODE = code;
@@ -95,12 +95,12 @@ pub unsafe extern "C" fn house_set_exit(code: i32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_get_exit_code() -> i32 {
     unsafe { HOUSE_USER_EXIT_CODE }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_clear_exit() {
     unsafe {
         HOUSE_USER_EXITED = 0;
@@ -109,12 +109,12 @@ pub unsafe extern "C" fn house_clear_exit() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_is_exited() -> i32 {
     unsafe { HOUSE_USER_EXITED }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_svc_dispatch(
     imm: u32,
     x0: u64,

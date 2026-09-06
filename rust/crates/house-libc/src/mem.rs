@@ -7,7 +7,7 @@ use core::ptr;
 
 // SAFETY: caller guarantees dst and src valid for n bytes, n <= isize::MAX,
 // dst/src not overlapping for memcpy (for memmove overlap direction is handled).
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     // Byte-wise copy to avoid unaligned 8-byte accesses that may fault on some QEMU/hvf configs
@@ -27,7 +27,7 @@ pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut 
     dst
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if dst == src as *mut u8 || n == 0 {
@@ -64,7 +64,7 @@ pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
     let val = c as u8;
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
     dst
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     for i in 0..n {
@@ -94,7 +94,7 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
     let target = c as u8;
     for i in 0..n {
@@ -107,10 +107,20 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
     core::ptr::null_mut()
 }
 
-#[no_mangle]
+// Debug-build bound for the trust-boundary probes below: every unbounded
+// NUL scanner asserts a NUL within this many bytes. Matches uart_puts' 4K
+// cap. Release keeps zero cost (debug_assert compiled out under panic=abort).
+const CSTR_DEBUG_CAP: usize = 4096;
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    // Trust boundary (rust/c-abi.md): caller guarantees NUL-termination —
+    // Haskell withCString upholds it; device/EL0 bytes must be
+    // strnlen-pre-bound before reaching here. The probe trips in debug builds
+    // on a violated contract instead of wandering unmapped memory.
+    debug_assert!(unsafe { strnlen(s, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     let mut p = s;
-    // SAFETY: s is NUL-terminated per C contract.
+    // SAFETY: s is NUL-terminated per C contract (see trust boundary above).
     unsafe {
         while ptr::read(p) != 0 {
             p = p.add(1);
@@ -119,7 +129,7 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
     let mut p = s;
     let mut remaining = max;
@@ -132,8 +142,12 @@ pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
+    // Trust boundary (rust/c-abi.md): both inputs NUL-terminated by the
+    // caller; device/EL0 bytes must be strnlen-pre-bound before reaching here.
+    debug_assert!(unsafe { strnlen(a, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
+    debug_assert!(unsafe { strnlen(b, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     let mut pa = a;
     let mut pb = b;
     loop {
@@ -150,7 +164,7 @@ pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     for i in 0..n {
         let ca = unsafe { ptr::read(a.add(i)) };
@@ -165,8 +179,11 @@ pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
+    // Trust boundary (rust/c-abi.md): src NUL-terminated and dst sized by the
+    // caller; device/EL0 bytes must be strnlen-pre-bound before reaching here.
+    debug_assert!(unsafe { strnlen(src, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     let mut d = dst;
     let mut s = src;
     loop {
@@ -183,7 +200,7 @@ pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     dst
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut d = dst;
     let mut s = src;
@@ -217,16 +234,24 @@ pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
+    // Trust boundary (rust/c-abi.md): both inputs NUL-terminated and dst
+    // sized by the caller (strlen/strcpy below re-probe). Device/EL0 bytes
+    // must be strnlen-pre-bound before reaching here.
+    debug_assert!(unsafe { strnlen(dst, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
+    debug_assert!(unsafe { strnlen(src, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     // dst + strlen(dst)
     let len = strlen(dst);
     strcpy(dst.add(len), src);
     dst
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *mut u8 {
+    // Trust boundary (rust/c-abi.md): s NUL-terminated by the caller;
+    // device/EL0 bytes must be strnlen-pre-bound before reaching here.
+    debug_assert!(unsafe { strnlen(s, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     let target = c as u8;
     let mut p = s;
     loop {
@@ -241,8 +266,11 @@ pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *mut u8 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *mut u8 {
+    // Trust boundary (rust/c-abi.md): s NUL-terminated by the caller;
+    // device/EL0 bytes must be strnlen-pre-bound before reaching here.
+    debug_assert!(unsafe { strnlen(s, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     let target = c as u8;
     let mut last: *mut u8 = core::ptr::null_mut();
     let mut p = s;
@@ -259,8 +287,12 @@ pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *mut u8 {
     last
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcasecmp(a: *const u8, b: *const u8) -> i32 {
+    // Trust boundary (rust/c-abi.md): both inputs NUL-terminated by the
+    // caller; device/EL0 bytes must be strnlen-pre-bound before reaching here.
+    debug_assert!(unsafe { strnlen(a, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
+    debug_assert!(unsafe { strnlen(b, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     let mut pa = a;
     let mut pb = b;
     loop {

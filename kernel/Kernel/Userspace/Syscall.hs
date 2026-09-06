@@ -5,14 +5,19 @@ Module      : Kernel.Userspace.Syscall
 Description : SVC -> IPC shims docs.
 Stability   : experimental
 
-Syscalls 0x10..0x14 delegate to Kernel.IPC.Endpoint bounds via SVC
-dispatch in Rust (`ipc.rs` validates op, word count ≤ 8, user-VA window,
-grant alignment/perm with precise errno; the rendezvous queue itself stays
-EL1 Haskell and validated calls return ENOSYS until a trap-safe delegation
-ring lands). Haskell IPC remains QSem+MVar EL1; EL0 svc path uses
-non-blocking try semantics at the trap boundary.
-For slice, syscalls are handled in Rust (uart/exit) with IPC args validated.
-This module documents the contract and re-exports minimal helpers.
+ Syscalls 0x10..0x14 delegate to Kernel.IPC.Endpoint bounds via SVC
+ dispatch in Rust (`ipc.rs` validates op, word count ≤ 8, user-VA window,
+ grant alignment/perm with precise errno; the rendezvous queue itself stays
+ EL1 Haskell and validated calls return ENOSYS until a trap-safe delegation
+ ring lands). Haskell IPC remains QSem+MVar EL1; EL0 svc path uses
+ non-blocking try semantics at the trap boundary.
+ For slice, syscalls are handled in Rust (uart/exit) with IPC args validated.
++Errno mapping once the delegation ring lands: unknown/freed endpoint id ->
++`NoSuchEndpoint` (~ENOENT -2, also the `nsLookupChecked` miss path, logged to
++dmesg); capability mismatch -> `NotOwner` (~EPERM -1, log-only in this slice:
++allowed + dmesg via `checkCap`); full queue -> `QueueFull` (~EAGAIN);
++`callTimeout` expiry -> `WouldBlock`.
+ This module documents the contract and re-exports minimal helpers.
 -}
 module Kernel.Userspace.Syscall
   ( syscallWrite,

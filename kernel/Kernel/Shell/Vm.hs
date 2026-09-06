@@ -6,10 +6,10 @@ module Kernel.Shell.Vm
 where
 
 import Control.Exception (SomeException, catch)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Data.Word (Word64, Word8)
 import Foreign.C.String (withCString)
-import Foreign.C.Types (CSize)
+import Foreign.C.Types (CInt, CSize)
 import Foreign.Ptr (Ptr, castPtr, intPtrToPtr, nullPtr, plusPtr, ptrToIntPtr)
 import Foreign.Storable (peek, poke)
 import H.Monad (runH)
@@ -20,6 +20,7 @@ import Kernel.Shell.Foreign
   ( c_asid_for,
     c_demand_100,
     c_demand_single,
+    c_is_ro_page,
     c_mmap,
     c_mprotect,
     c_munmap,
@@ -28,13 +29,13 @@ import Kernel.Shell.Foreign
   )
 
 handleVm :: IO ()
-
 handleVm = do
   -- wrapper that prints vm-ok on full pass, vm-fail otherwise; all sub-steps catch exceptions
   ok <- vmTest `catch` (\(_ :: SomeException) -> return False)
   if ok
     then withCString "vm-ok\n" c_uart_puts
     else withCString "vm-fail\n" c_uart_puts
+
 vmTest :: IO Bool
 vmTest = do
   withCString "vm: start\n" c_uart_puts
@@ -47,6 +48,7 @@ vmTest = do
   let ok = r1 && r2 && r3 && r4 && r5
   withCString (if ok then "vm: all ok\n" else "vm: some fail\n") c_uart_puts
   return ok
+
 vmDemand :: IO Bool
 vmDemand = do
   r1 <- c_demand_single
@@ -55,8 +57,12 @@ vmDemand = do
   r2 <- c_demand_100
   let ok2 = r2 /= 0
   withCString ("vm: demand ok 100 pages " ++ (if ok2 then "ok" else "fail") ++ "\n") c_uart_puts
-  -- tolerate single-page failure if 100-page passes (probe vs demand race on hvf)
-  return (ok2 || ok1)
+  -- Strict gate: both legs must pass. A single-page failure under a
+  -- 100-page pass is logged as an explicit hvf quirk, never tolerated.
+  when (ok2 && not ok1) $
+    withCString "vm: demand quirk hvf single-page race\n" c_uart_puts
+  return (ok1 && ok2)
+
 vmMmap :: IO Bool
 vmMmap = do
   let len = 1024 * 1024 :: CSize
@@ -71,15 +77,30 @@ vmMmap = do
       rc <- c_mprotect ptr (fromIntegral n) 1
       let okProt = rc == 0
       withCString ("vm: mprotect RO " ++ (if okProt then "ok" else "fail") ++ "\n") c_uart_puts
+      -- Prove the page is really RO: house_is_ro_page must say so.
+      isRo <- c_is_ro_page (fromIntegral (ptrToIntPtr ptr) :: Word64)
+      let okRo = isRo /= (0 :: CInt)
+      withCString ("vm: ro page " ++ (if okRo then "ok" else "fail") ++ "\n") c_uart_puts
+      -- Prove the perm fault fired and the store was skipped: the byte
+      -- written above (offset 0 holds 0) must be unchanged after the poke.
+      old <- peek (castPtr ptr :: Ptr Word8)
       -- trigger perm fault RO write (should log [demand] perm fault RO and skip)
       poke (castPtr ptr :: Ptr Word8) 0xFF
+      new <- peek (castPtr ptr :: Ptr Word8)
+      let okPermSkip = new == old
+      withCString ("vm: perm skip " ++ (if okPermSkip then "ok" else "fail") ++ "\n") c_uart_puts
       withCString "mprotect RO perm logged\n" c_uart_puts
       -- munmap
       rc2 <- c_munmap ptr len
       let okUnmap = rc2 == 0
       withCString ("vm: munmap " ++ (if okUnmap then "ok" else "fail") ++ "\n") c_uart_puts
-      withCString "munmap unmap fault\n" c_uart_puts
-      return (okProt && okUnmap)
+      -- Prove the range is really unmapped: mprotect on a PTE-invalid
+      -- range must fail. If munmap left the mapping, this succeeds.
+      rc3 <- c_mprotect ptr (fromIntegral n) 1
+      let okUnmapped = rc3 /= 0
+      withCString ("vm: unmapped " ++ (if okUnmapped then "ok" else "fail") ++ "\n") c_uart_puts
+      return (okProt && okRo && okPermSkip && okUnmap && okUnmapped)
+
 vmIsolate :: IO Bool
 vmIsolate = do
   ok <- runH isolateCheck `catch` (\(_ :: SomeException) -> return False)
@@ -120,6 +141,7 @@ vmIsolate = do
               maybe (return ()) HPages.freePage mb
               return False
         _ -> return False
+
 vmShootdown :: IO Bool
 vmShootdown = do
   let len = 4096 :: CSize
@@ -136,6 +158,7 @@ vmShootdown = do
       let ok = v0 == 0xAA && v1 == 0xAA && rcProt == 0 && rcUnmap == 0
       withCString (if ok then "smp shootdown ok\n" else "shootdown fail\n") c_uart_puts
       return ok
+
 vmAsid :: IO Bool
 vmAsid = do
   mpair <- runH asidAllocs `catch` (\(_ :: SomeException) -> return (Nothing, Nothing))

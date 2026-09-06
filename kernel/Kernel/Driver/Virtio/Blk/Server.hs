@@ -79,6 +79,11 @@ foreign import ccall unsafe "virtio_blk_reset_slot" c_reset_slot :: Int -> IO ()
 slotValid :: Int -> Bool
 slotValid n = n >= 0 && n < 8
 
+-- | Shell write bound: one 4K block per call; over-length input is truncated
+-- (graceful, + dmesg) so a hostile/long line cannot starve the server.
+maxBlkWriteBytes :: Int
+maxBlkWriteBytes = 4096
+
 -- | Copy Haskell String into Grant page (up to 4096, zero pad).
 fillGrant :: Grant -> String -> H ()
 fillGrant (Grant p _) s = liftIO $ do
@@ -215,6 +220,10 @@ blkWriteBlocks slot lba txt = do
         Right cap -> case validateLba lba 1 cap of
           Left e -> return (Left e)
           Right () -> do
+            _ <-
+              if length txt > maxBlkWriteBytes
+                then Dmesg.dmesgLog ("blk write truncated slot " ++ show slot ++ " len=" ++ show (length txt))
+                else return ()
             mg <- G.grantAlloc
             case mg of
               Left _ -> return (Left BlkNoSpace)

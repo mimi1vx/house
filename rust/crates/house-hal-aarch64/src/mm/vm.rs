@@ -40,7 +40,7 @@ static mut VM_RESV: [(*mut u8, *mut u8); 32] = [(core::ptr::null_mut(), core::pt
 static mut VM_N_RESV: i32 = 0;
 static mut VM_MMAP_CUR: *mut u8 = core::ptr::null_mut();
 
-extern "C" {
+unsafe extern "C" {
     static mut __heap_base: u8;
     static mut house_ram_bytes: u64;
     static mut house_smp_n: i32;
@@ -55,11 +55,7 @@ extern "C" {
 #[inline]
 unsafe fn runtime_ram_bytes() -> u64 {
     let v = unsafe { core::ptr::read_volatile(&raw const house_ram_bytes) };
-    if v != 0 {
-        v
-    } else {
-        512 << 20
-    }
+    if v != 0 { v } else { 512 << 20 }
 }
 
 #[inline]
@@ -289,7 +285,7 @@ pub(crate) unsafe fn vm_split_slot(slot: *mut u64, level: u8) -> bool {
 }
 
 // # Safety: caller must ensure addr/len valid, fd/off checked.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_mmap(
     addr: *mut u8,
     len: usize,
@@ -388,7 +384,7 @@ pub unsafe extern "C" fn house_vm_mmap(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
     if addr.is_null() {
         return 0;
@@ -448,7 +444,7 @@ pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32) -> i32 {
     unsafe { uart_puts(b"[mprotect] start\n\0".as_ptr()) };
     if addr.is_null() {
@@ -518,7 +514,7 @@ pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32)
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_demand_single() -> i32 {
     unsafe { uart_puts(b"[vm] demand single start\n\0".as_ptr()) };
     // 32GB: above any RAM identity block, so the access truly faults and the
@@ -530,15 +526,11 @@ pub unsafe extern "C" fn house_vm_demand_single() -> i32 {
         uart_puts(b"[vm] demand single store done\n\0".as_ptr());
         let v = core::ptr::read_volatile(p);
         uart_puts(b"[vm] demand single load done\n\0".as_ptr());
-        if v == 0xdeadbeef {
-            1
-        } else {
-            0
-        }
+        if v == 0xdeadbeef { 1 } else { 0 }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_demand_100() -> i32 {
     unsafe { uart_puts(b"[vm] demand 100 start\n\0".as_ptr()) };
     for i in 0..100 {
@@ -557,7 +549,7 @@ pub unsafe extern "C" fn house_vm_demand_100() -> i32 {
     1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_puts_after() {
     unsafe { uart_puts(b"[vm] after alloc\n\0".as_ptr()) };
 }

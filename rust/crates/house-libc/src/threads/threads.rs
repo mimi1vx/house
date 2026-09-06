@@ -63,20 +63,20 @@ static mut THREADS: [HouseThread; 64] = [HouseThread {
     affinity: 0,
 }; 64];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_current_thr: [*mut HouseThread; 32] = [core::ptr::null_mut(); 32];
 
 static mut RUN_HEAD: [*mut HouseThread; 32] = [core::ptr::null_mut(); 32];
 static mut RUN_TAIL: [*mut HouseThread; 32] = [core::ptr::null_mut(); 32];
 static mut NEXT_TID: i32 = 1;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_thr_mode: i32 = 1;
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_ipi_pending: [i32; 32] = [0; 32];
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_sched_deferred: [i32; 32] = [0; 32];
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut sched_lock: u32 = 0;
 
 #[allow(suspicious_runtime_symbol_definitions)]
@@ -243,7 +243,7 @@ unsafe fn queued_anywhere(thr: *mut HouseThread) -> bool {
     false
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_threads_init() {
     for i in 0..HOUSE_MAX_THREADS {
         unsafe { THREADS[i].state = HOUSE_THR_UNUSED };
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn house_threads_init() {
     unsafe { sched_lock = 0 };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_thread_init_main() {
     unsafe { house_threads_init() };
     let thr = unsafe { alloc_thread() };
@@ -295,7 +295,7 @@ pub unsafe extern "C" fn house_thread_init_main() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_threads_init_secondary(core: u32) {
     if core as usize >= HOUSE_MAX_SMP {
         return;
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn house_threads_init_secondary(core: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_threads_rebalance() {
     unsafe { house_sched_lock_acquire() };
     let smp = unsafe { core::ptr::read_volatile(&raw const house_smp_n) };
@@ -398,14 +398,14 @@ pub unsafe extern "C" fn house_threads_rebalance() {
     unsafe { house_sched_lock_release() };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_thread_current() -> *mut HouseThread {
     let core = unsafe { cpu_id() } as usize;
     let c = if core < HOUSE_MAX_SMP { core } else { 0 };
     unsafe { house_current_thr[c] }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_lock_acquire() {
     unsafe { core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags)) };
     unsafe {
@@ -425,7 +425,7 @@ pub unsafe extern "C" fn house_sched_lock_acquire() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_lock_release() {
     let core = unsafe { cpu_id() } as usize;
     let deferred = if core < HOUSE_MAX_SMP {
@@ -449,7 +449,7 @@ pub unsafe extern "C" fn house_sched_lock_release() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_wake(thr: *mut HouseThread) {
     if thr.is_null() {
         return;
@@ -463,7 +463,7 @@ pub unsafe extern "C" fn house_sched_wake(thr: *mut HouseThread) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_ipi_handler() {
     let core = unsafe { cpu_id() } as usize;
     if core < HOUSE_MAX_SMP {
@@ -472,7 +472,7 @@ pub unsafe extern "C" fn house_sched_ipi_handler() {
     unsafe { core::arch::asm!("dsb sy; sev; isb", options(nostack, preserves_flags)) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_kick(core: i32) {
     if core < 0 {
         return;
@@ -492,10 +492,10 @@ pub unsafe extern "C" fn house_sched_kick(core: i32) {
     unsafe { core::arch::asm!("dsb sy; sev; isb", options(nostack, preserves_flags)) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_maybe_preempt_from_isr() {}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_block() {
     let core = unsafe { cpu_id() };
     let old = unsafe { house_current_thr[core as usize] };
@@ -524,7 +524,7 @@ pub unsafe extern "C" fn house_sched_block() {
     unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_yield() {
     let core = unsafe { cpu_id() } as i32;
     unsafe { core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags)) };
@@ -620,9 +620,9 @@ pub unsafe extern "C" fn house_sched_yield() {
     unsafe { house_thread_switch(old, next) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_tls_alloc() -> *mut u8 {
-    extern "C" {
+    unsafe extern "C" {
         fn buddy_alloc_page() -> *mut u8;
     }
     let p = unsafe { buddy_alloc_page() as *mut u8 };
@@ -639,7 +639,7 @@ pub unsafe extern "C" fn house_tls_alloc() -> *mut u8 {
 }
 
 // -- pthread stubs kept minimal --
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_create(
     thr: *mut u64,
     _a: *const u8,
@@ -734,7 +734,7 @@ pub unsafe extern "C" fn pthread_create(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_thread_trampoline() {
     let core = cpu_id() as usize;
     let thr = if core < HOUSE_MAX_SMP {
@@ -758,7 +758,7 @@ pub unsafe extern "C" fn house_thread_trampoline() {
     unsafe { pthread_exit(ret) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_join(t: u64, r: *mut *mut u8) -> i32 {
     let mut target: *mut HouseThread = core::ptr::null_mut();
     for i in 0..HOUSE_MAX_THREADS {
@@ -828,7 +828,7 @@ pub unsafe extern "C" fn pthread_join(t: u64, r: *mut *mut u8) -> i32 {
     unsafe { house_sched_lock_release() };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_detach(t: u64) -> i32 {
     unsafe { house_sched_lock_acquire() };
     for i in 0..HOUSE_MAX_THREADS {
@@ -855,7 +855,7 @@ pub unsafe extern "C" fn pthread_detach(t: u64) -> i32 {
     unsafe { house_sched_lock_release() };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
     let core = cpu_id() as usize;
     let cur = house_current_thr[core];
@@ -863,7 +863,7 @@ pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
         unsafe { (*cur).retval = r };
         unsafe { (*cur).exited = 1 };
         unsafe { (*cur).state = 4 }; // EXITED
-                                     // SAFETY: scheduler mutations below need sched_lock like C pthread_exit.
+        // SAFETY: scheduler mutations below need sched_lock like C pthread_exit.
         unsafe { house_sched_lock_acquire() };
         // handle joiner
         let joiner = unsafe { (*cur).joiner };
@@ -926,7 +926,7 @@ pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
         unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_self() -> u64 {
     let cur = unsafe { house_thread_current() };
     if cur.is_null() {
@@ -935,11 +935,11 @@ pub unsafe extern "C" fn pthread_self() -> u64 {
         unsafe { (*cur).tid as u64 }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_kill(_t: u64, _s: i32) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setname_np(_t: u64, _n: *const u8) -> i32 {
     0
 }
@@ -956,7 +956,7 @@ struct HouseCond {
     wait_tail: *mut HouseThread,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_init(m: *mut u8, _a: *const u8) -> i32 {
     // SAFETY: m points to HouseMutex per caller
     if m.is_null() {
@@ -971,11 +971,11 @@ pub unsafe extern "C" fn pthread_mutex_init(m: *mut u8, _a: *const u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_destroy(_m: *mut u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_lock(m: *mut u8) -> i32 {
     // SAFETY: spin_lock with dmb sy, queue wait_next + SGI0 kick mirrors tinylibc/threads.c
     if m.is_null() {
@@ -1018,7 +1018,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(m: *mut u8) -> i32 {
         }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut u8) -> i32 {
     if m.is_null() {
         return 22;
@@ -1042,7 +1042,7 @@ pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut u8) -> i32 {
         16
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut u8) -> i32 {
     if m.is_null() {
         return 22;
@@ -1084,7 +1084,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_init(c: *mut u8, _a: *const u8) -> i32 {
     if c.is_null() {
         return 22;
@@ -1096,11 +1096,11 @@ pub unsafe extern "C" fn pthread_cond_init(c: *mut u8, _a: *const u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_destroy(_c: *mut u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_signal(c: *mut u8) -> i32 {
     if c.is_null() {
         return 22;
@@ -1137,7 +1137,7 @@ pub unsafe extern "C" fn pthread_cond_signal(c: *mut u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_broadcast(c: *mut u8) -> i32 {
     if c.is_null() {
         return 22;
@@ -1172,7 +1172,7 @@ pub unsafe extern "C" fn pthread_cond_broadcast(c: *mut u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> i32 {
     // SAFETY: mirrors tinylibc/threads.c pthread_cond_wait with mutex handoff and queue
     if c.is_null() || m.is_null() {
@@ -1279,7 +1279,7 @@ pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> i32 {
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *const u8) -> i32 {
     if t.is_null() {
         return unsafe { pthread_cond_wait(c, m) };
@@ -1296,7 +1296,7 @@ pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *cons
     if abs_adj <= now {
         return 110;
     } // ETIMEDOUT
-      // enqueue with timeout and block, checking wake
+    // enqueue with timeout and block, checking wake
     let cond = c as *mut HouseCond;
     let mu = m as *mut HouseMutex;
     unsafe {
@@ -1430,41 +1430,37 @@ pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *cons
         (*mu).owner = house_thread_current();
         let timed_out = house_uptime_ns() >= abs_adj;
         house_sched_lock_release();
-        if timed_out {
-            110
-        } else {
-            0
-        }
+        if timed_out { 110 } else { 0 }
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_init(_a: *mut u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_destroy(_a: *mut u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_setclock(_a: *mut u8, _c: i32) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_init(_a: *mut u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_destroy(_a: *mut u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getstacksize(_a: *const u8, _s: *mut usize) -> i32 {
     if !_s.is_null() {
         unsafe { *_s = 512 * 1024 }
     };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_setaffinity_np(
     _a: *mut u8,
     _sz: usize,
@@ -1472,7 +1468,7 @@ pub unsafe extern "C" fn pthread_attr_setaffinity_np(
 ) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getaffinity_np(_a: *mut u8, _sz: usize, _m: *mut u8) -> i32 {
     // SAFETY: reports the live online mask, not (1<<SMP_N)-1.
     if !_m.is_null() && _sz >= 8 {
@@ -1484,11 +1480,11 @@ pub unsafe extern "C" fn pthread_attr_getaffinity_np(_a: *mut u8, _sz: usize, _m
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setaffinity_np(_t: u64, _sz: usize, _m: *const u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_getaffinity_np(_t: u64, _sz: usize, _m: *mut u8) -> i32 {
     // SAFETY: live online mask like sched_getaffinity.
     if !_m.is_null() && _sz >= 8 {
@@ -1506,7 +1502,7 @@ pub unsafe extern "C" fn pthread_getaffinity_np(_t: u64, _sz: usize, _m: *mut u8
 /// # Safety
 /// Call after the mask bit is cleared, with the target core OFF so its
 /// queue is quiescent; takes `sched_lock`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_threads_on_core_down(core: u32) {
     if (core as usize) >= HOUSE_MAX_SMP || core == 0 {
         return;
@@ -1538,12 +1534,12 @@ pub unsafe extern "C" fn house_threads_on_core_down(core: u32) {
         house_sched_kick(dst);
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_yield() -> i32 {
     unsafe { house_sched_yield() };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_getaffinity(_p: i32, _s: usize, _m: *mut u8) -> i32 {
     if !_m.is_null() && _s >= 8 {
         let m = unsafe { live_mask() } as u64;
@@ -1554,7 +1550,7 @@ pub unsafe extern "C" fn sched_getaffinity(_p: i32, _s: usize, _m: *mut u8) -> i
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_setaffinity(_p: i32, _s: usize, _m: *const u8) -> i32 {
     if !_m.is_null() {
         let cur = unsafe { house_thread_current() };
@@ -1564,11 +1560,11 @@ pub unsafe extern "C" fn sched_setaffinity(_p: i32, _s: usize, _m: *const u8) ->
     }
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_sigmask(_h: i32, _s: *const u8, _o: *mut u8) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanosleep(rq: *const u8, rm: *mut u8) -> i32 {
     if rq.is_null() {
         return 0;
@@ -1642,7 +1638,7 @@ struct PollFd {
     events: i16,
     revents: i16,
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32 {
     if fds.is_null() {
         return 0;
@@ -1728,7 +1724,7 @@ pub unsafe extern "C" fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32 {
     }
     ready2
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn select(
     nfds: i32,
     _r: *mut u8,
@@ -1756,7 +1752,7 @@ pub unsafe extern "C" fn select(
     };
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pause() -> i32 {
     let core = unsafe { cpu_id() } as usize;
     unsafe { house_sched_lock_acquire() };
@@ -1780,13 +1776,13 @@ pub unsafe extern "C" fn pause() -> i32 {
     }
     -1
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_lock(_l: *mut u32) {}
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_unlock(_l: *mut u32) {}
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_trylock(_l: *mut u32) -> i32 {
     0
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_init(_l: *mut u32) {}

@@ -89,7 +89,11 @@ encodeImage files
 safeIndex :: [Word8] -> Int -> Maybe Word8
 safeIndex xs i
   | i < 0 || i >= length xs = Nothing
-  | otherwise = Just (xs !! i)
+  | otherwise = Just (go xs i)
+  where
+    go (y : _) 0 = y
+    go (_ : ys) n = go ys (n - 1)
+    go [] _ = 0 -- unreachable after length guard
 
 getU32 :: Int -> [Word8] -> Maybe Int
 getU32 off bs

@@ -33,7 +33,7 @@ unsafe extern "C" {
 
 static mut STATIC_ERRNO: i32 = 0;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __errno_location() -> *mut i32 {
     unsafe {
         let thr_mode = ptr::read_volatile(&raw const house_thr_mode);

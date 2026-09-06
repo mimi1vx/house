@@ -12,11 +12,11 @@ const HOUSE_RAM_BASE: u64 = 0x40000000;
 /// TCR/L1 capacity bound matching `detect.rs`/`mmu.rs` (256 1G blocks).
 const PROBE_MAX: u64 = 256 << 30;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_in_probe: i32 = 0;
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_probe_recovery: u64 = 0;
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_probe_faulted: i32 = 0;
 
 #[inline(never)]
@@ -51,7 +51,7 @@ unsafe fn probe_addr(addr: u64) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_ram_probe() -> u64 {
     // SAFETY: called early, single core, fault handler watches house_in_probe.
     unsafe {

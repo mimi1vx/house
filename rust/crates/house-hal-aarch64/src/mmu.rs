@@ -14,14 +14,14 @@ const ATTR_DEVICE: u64 = 1;
 struct Aligned512([u64; 512]);
 
 static mut TTBR1_L0: Aligned512 = Aligned512([0; 512]);
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut ttbr0_l0: [u64; 512] = [0; 512];
 
 static mut L1_LOW: Aligned512 = Aligned512([0; 512]);
 static mut L1_RTS: Aligned512 = Aligned512([0; 512]);
 static mut L2_RTS: [[u64; 512]; 8] = [[0; 512]; 8];
 
-extern "C" {
+unsafe extern "C" {
     static house_ram_bytes: u64;
     static house_smp_n: i32;
 }
@@ -117,7 +117,7 @@ unsafe fn get_ram_bytes() -> u64 {
 }
 
 /// void house_mmu_early(void)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_early() {
     unsafe {
         let mut span = get_ram_bytes();
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn house_mmu_early() {
 }
 
 /// void house_mmu_enable_secondary(void)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_enable_secondary() {
     unsafe {
         let mair: u64 = 0xFF | (0x04u64 << 8);
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn house_mmu_enable_secondary() {
 }
 
 /// void house_mmu_set_ttbr0(void *pdir, uint64_t asid) — TTBR0 update with TLBI ordering.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_set_ttbr0(pdir: *mut u8, asid: u64) {
     // SAFETY: pdir is page-aligned, asid 8-bit (0 reserved), EL1 only. Ordering per mmu.c.
     let v = ((pdir as u64) & !0xFFFu64) | ((asid & 0xFF) << 48);
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn house_mmu_set_ttbr0(pdir: *mut u8, asid: u64) {
 }
 
 /// void house_mmu_clone_kernel_l1(void *new_l1)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_clone_kernel_l1(new_l1: *mut u64) {
     if new_l1.is_null() {
         return;
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn house_mmu_clone_kernel_l1(new_l1: *mut u64) {
 }
 
 /// void house_mmu_clone_kernel_l2(void *new_l2)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_clone_kernel_l2(new_l2: *mut u64) {
     if new_l2.is_null() {
         return;
@@ -298,7 +298,7 @@ unsafe fn trim_ram_blocks() {
 }
 
 /// void house_mmu_update_alias(void)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_update_alias() {
     unsafe {
         extend_ram_blocks();
@@ -309,11 +309,11 @@ pub unsafe extern "C" fn house_mmu_update_alias() {
 }
 
 /// void house_mmu_map_kernel(uint64_t pa, uint64_t va, uint64_t size, uint64_t attr) — stub.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_map_kernel(_pa: u64, _va: u64, _size: u64, _attr: u64) {}
 
 /// void house_get_ttbrs(uint64_t *ttbr0, uint64_t *ttbr1, uint64_t *tcr)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_get_ttbrs(ttbr0: *mut u64, ttbr1: *mut u64, tcr: *mut u64) {
     let mut a: u64;
     let mut b: u64;

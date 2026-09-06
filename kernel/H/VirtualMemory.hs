@@ -312,16 +312,16 @@ allocPageMap =
 
 freePageMap _ = return () -- nop; pdirs are freed explicitly via freePDir
 
-freePDir :: PDir -> H ()
+freePDir :: PDir -> H Bool
 freePDir l0 =
   do
     pdir' <- currentPDir
     if l0 == pdir'
-      then error "attempt to free current PDir"
+      then return False
       else do
         d0 <- peekElemOff l0 (l0Index minVAddr)
         case tableFromDesc d0 of
-          Nothing -> P.freePage l0
+          Nothing -> P.freePage l0 >> return True
           Just l1 -> do
             -- free all L2s reachable via L1 (window now up to 4GB = L1 0..3, but iterate all 512 to be safe)
             forM_ [0 .. pageEntries - 1] $ \i1 -> do
@@ -337,6 +337,7 @@ freePDir l0 =
                 _ -> return ()
             P.freePage l1
             P.freePage l0
+            return True
 
 foreign import ccall unsafe "init_page_dir" initPDirIO :: PDir -> IO ()
 

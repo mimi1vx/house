@@ -442,12 +442,12 @@ house_main = do
         Right () -> withCString ("registered " ++ name ++ "\n") c_uart_puts
     handleIpcPing name = do
       r <- runH $ do
-        mep <- NS.nsLookup name
+        mep <- NS.nsLookupChecked name Nothing
         case mep of
-          Nothing -> return (Left (show name ++ " not found"))
-          Just ep -> do
+          Left _ -> return (Left (show name ++ " not found"))
+          Right ep -> do
             let msg = Message 0 [42] Nothing
-            res <- IPC.call ep msg
+            res <- IPC.callTimeout 5000000 ep msg
             case res of
               Left e -> return (Left (show e))
               Right replyMsg -> return (Right replyMsg)
@@ -460,15 +460,15 @@ house_main = do
         case mg of
           Left e -> return (Left (show e))
           Right g -> do
-            mep <- NS.nsLookup "pl011"
+            mep <- NS.nsLookupChecked "pl011" Nothing
             case mep of
-              Nothing -> do
+              Left _ -> do
                 -- no server yet, just free and report ok (grant alloc succeeded)
                 G.grantFree g
                 return (Right "ok (no server, grant alloc ok)")
-              Just ep -> do
+              Right ep -> do
                 let msg = Message 1 [] (Just g)
-                res <- IPC.call ep msg
+                res <- IPC.callTimeout 5000000 ep msg
                 case res of
                   Left e -> do G.grantFree g; return (Left (show e))
                   Right replyMsg -> do

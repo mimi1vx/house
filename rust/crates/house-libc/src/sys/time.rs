@@ -1,5 +1,5 @@
 #![allow(clippy::all)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_uptime_ns() -> u64 {
     let c: u64;
     unsafe { core::arch::asm!("mrs {0}, cntpct_el0", out(reg) c, options(nomem, nostack)) };

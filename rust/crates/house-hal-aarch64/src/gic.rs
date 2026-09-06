@@ -40,7 +40,7 @@ unsafe fn gic_enable_sre() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_init() {
     unsafe {
         gic_enable_sre();
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn house_gic_init() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_init_secondary(core: u32) {
     unsafe {
         let waker = gicr_base(core) + GICR_WAKER_OFF;
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn house_gic_init_secondary(core: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_enable_int(intid: u32) {
     unsafe {
         if intid < 32 {
@@ -139,7 +139,7 @@ pub unsafe extern "C" fn house_gic_enable_int(intid: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_disable_int(intid: u32) {
     unsafe {
         if intid < 32 {
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn house_gic_disable_int(intid: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_send_sgi_to_core(sgi_id: u32, core: u32) {
     let aff3 = (core >> 24) & 0xff;
     let aff2 = (core >> 16) & 0xff;
@@ -174,7 +174,7 @@ pub unsafe extern "C" fn house_gic_send_sgi_to_core(sgi_id: u32, core: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_send_sgi(sgi_id: u32, aff0_mask: u32) {
     if aff0_mask == 0 {
         return;
@@ -191,12 +191,12 @@ pub unsafe extern "C" fn house_gic_send_sgi(sgi_id: u32, aff0_mask: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_enable_sgi(id: u32) {
     unsafe { house_gic_enable_int(id) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_eoi(iar: u32) {
     unsafe {
         core::arch::asm!("msr ICC_EOIR1_EL1, {0}", in(reg) iar as u64, options(nostack, preserves_flags));
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn house_gic_eoi(iar: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_enable() {
     unsafe {
         core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn house_irq_enable() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_disable() {
     unsafe {
         core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags));

@@ -17,21 +17,21 @@ const STACK_RESERVE: u64 = 0x200000;
 /// HW table bound (see module docs): 32-entry OFF/EPOCH/mask/pending tables.
 const HOUSE_HW_SMP_MAX: i32 = 32;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_ram_bytes: u64 = 0;
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_boot_stack_top: u64 = 0;
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_smp: i32 = 0;
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut house_ram_source: *const u8 = b"unknown\0".as_ptr();
 
-extern "C" {
+unsafe extern "C" {
     static __boot_dtb: u64;
     static mut house_smp_n: i32;
 }
 
-extern "C" {
+unsafe extern "C" {
     fn fdt_valid(dtb: *const u8) -> i32;
     fn fdt_get_ram_bytes(dtb: *const u8) -> u64;
     fn fdt_get_cpu_count(dtb: *const u8) -> i32;
@@ -56,7 +56,7 @@ unsafe fn puthex(v: u64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_detect_early() {
     // SAFETY: called early with BSS clear, single core, DAIF masked.
     unsafe {
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn house_detect_early() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_detect_psci() -> i32 {
     // SAFETY: PSCI HVC may trap, but psci_affinity_info handles fallback.
     unsafe {
@@ -160,15 +160,11 @@ pub unsafe extern "C" fn house_smp_detect_psci() -> i32 {
                 count += 1;
             }
         }
-        if count < 1 {
-            0
-        } else {
-            count
-        }
+        if count < 1 { 0 } else { count }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_detect_gicr() -> i32 {
     // SAFETY: GICR_TYPER at 0x080A0000+i*0x20000+0x08 MMIO, valid for virt.
     unsafe {
@@ -193,15 +189,11 @@ pub unsafe extern "C" fn house_smp_detect_gicr() -> i32 {
                 break;
             }
         }
-        if count < 1 {
-            0
-        } else {
-            count
-        }
+        if count < 1 { 0 } else { count }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_detect_late() {
     // SAFETY: called after all cores possible, with heap.
     unsafe {
