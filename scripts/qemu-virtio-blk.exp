@@ -131,6 +131,75 @@ expect {
     timeout { puts "\nFAIL: blk read after re-init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 sleep 1
+# HFS1 persist round-trip: sync ramfs, drop file, mount restores it
+send "write /persist hello-persist\r"
+expect { -re ">" { puts "\nPASS: write /persist hello-persist" } timeout { puts "\nFAIL: write /persist timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+send "blk sync $blkSlot\r"
+expect {
+    -re "sync ok" { puts "\nPASS: blk sync ok" }
+    -re "bad image|blk I/O error|Blk" { puts "\nFAIL: blk sync error"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { puts "\nFAIL: blk sync timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "rm /persist\r"
+expect { -re ">" { puts "\nPASS: rm /persist" } timeout { puts "\nFAIL: rm /persist timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+send "cat /persist\r"
+expect {
+    -re "ENOENT|No such" { puts "\nPASS: cat /persist after rm -> ENOENT" }
+    timeout { puts "\nFAIL: cat /persist ENOENT timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect { -re ">" {} timeout { puts "\nFAIL: prompt after ENOENT timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+send "blk mount $blkSlot\r"
+expect {
+    -re "mount ok" { puts "\nPASS: blk mount ok" }
+    -re "bad image|blk I/O error|Blk" { puts "\nFAIL: blk mount error"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { puts "\nFAIL: blk mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "cat /persist\r"
+expect {
+    -re "hello-persist" { puts "\nPASS: cat /persist after mount -> hello-persist" }
+    timeout { puts "\nFAIL: cat /persist after mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect { -re ">" {} timeout { puts "\nFAIL: prompt after mount-cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+# Hostile image: clobber superblock, mount must fail cleanly, ramfs intact
+send "blk write $blkSlot 0 not-hfs1-garbage\r"
+expect {
+    -re "ok" { puts "\nPASS: clobber superblock" }
+    timeout { puts "\nFAIL: clobber timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk mount $blkSlot\r"
+expect {
+    -re "bad image" { puts "\nPASS: blk mount rejects hostile image" }
+    timeout { puts "\nFAIL: hostile mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect { -re ">" {} timeout { puts "\nFAIL: prompt after hostile mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+send "cat /persist\r"
+expect {
+    -re "hello-persist" { puts "\nPASS: ramfs intact after rejected mount (quarantine)" }
+    timeout { puts "\nFAIL: quarantine cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect { -re ">" {} timeout { puts "\nFAIL: prompt after quarantine timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+# Hostile version: valid magic but non-allowlisted version must be rejected
+send "blk write $blkSlot 0 HFS1Xbadver\r"
+expect {
+    -re "ok" { puts "\nPASS: clobber version" }
+    timeout { puts "\nFAIL: clobber version timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
+send "blk mount $blkSlot\r"
+expect {
+    -re "bad image: bad version" { puts "\nPASS: blk mount rejects bad version" }
+    timeout { puts "\nFAIL: bad-version mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect { -re ">" {} timeout { puts "\nFAIL: prompt after bad-version timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+send "blk sync $blkSlot\r"
+expect {
+    -re "sync ok" { puts "\nPASS: blk re-sync ok" }
+    timeout { puts "\nFAIL: blk re-sync timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+sleep 1
 # burst 5 scans without deadlock
 for {set i 0} {$i < 5} {incr i} {
     send "virtio scan\r"

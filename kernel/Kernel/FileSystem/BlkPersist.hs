@@ -11,7 +11,7 @@ module Kernel.FileSystem.BlkPersist
   )
 where
 
-import Data.Bits (shiftL, shiftR)
+import Data.Bits (complement, shiftL, shiftR, (.&.))
 import Data.Char (chr, ord)
 import Data.Word (Word32, Word8)
 import H.FileSystem qualified as FS
@@ -42,8 +42,16 @@ maxPathLen = 1024
 magic :: [Word8]
 magic = [0x48, 0x46, 0x53, 0x31]
 
-version :: Word8
-version = 0x01
+-- | Version allowlist: v1 legacy (13-byte header, implicit caps=0),
+-- v2 current (17-byte header, explicit caps word). Writes use v2.
+versionLegacy, versionCurrent :: Word8
+versionLegacy = 0x01
+versionCurrent = 0x02
+
+-- | Caps allowlist mask: no feature bits defined yet, so any nonzero
+-- caps word is hostile/foreign and rejected before any persist read.
+allowedCaps :: Int
+allowedCaps = 0x00
 
 word32LE :: Word32 -> [Word8]
 word32LE w =
@@ -60,7 +68,7 @@ safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x : _) = Just x
 
--- | Pure encode. Total; caps enforced before allocation.
+-- | Pure encode. Total; caps enforced before allocation. Emits v2.
 encodeImage :: [(FilePath, [Word8])] -> Either String [Word8]
 encodeImage files
   | length files > maxFiles = Left "too many files"
@@ -68,10 +76,10 @@ encodeImage files
   | any (\(_, b) -> length b > maxImageBytes) files = Left "file too large"
   | otherwise =
       let body = concatMap encodeOne files
-          total = 4 + 1 + 4 + 4 + length body
+          total = 4 + 1 + 4 + 4 + 4 + length body
        in if total > maxImageBytes
             then Left "image too large"
-            else Right (magic ++ [version] ++ word32LE (fromIntegral total) ++ word32LE (fromIntegral (length files)) ++ body)
+            else Right (magic ++ [versionCurrent] ++ word32LE (fromIntegral allowedCaps) ++ word32LE (fromIntegral total) ++ word32LE (fromIntegral (length files)) ++ body)
   where
     badPath (p, _) = null p || length p > maxPathLen || safeHead p /= Just '/'
     encodeOne (p, bs) =
@@ -98,26 +106,48 @@ getU16 off bs
       (Just b0, Just b1) -> Just (fromIntegral b0 + (fromIntegral b1 `shiftL` 8))
       _ -> Nothing
 
--- | Pure decode. Total; corrupt magic yields Left, never a crash.
-decodeImage :: [Word8] -> Either String [(FilePath, [Word8])]
-decodeImage bytes
+-- | Pure header decode shared by decodeImage and persistRestore.
+-- Returns (caps, total, count, header length). All offset sums run in
+-- Integer so hostile lengths cannot wrap into range.
+decodeHeader :: [Word8] -> Either String (Int, Int, Int, Int)
+decodeHeader bytes
   | length bytes < 13 = Left "truncated header"
   | take 4 bytes /= magic = Left "bad magic"
-  | safeIndex bytes 4 /= Just version = Left "bad version"
-  | otherwise = case (getU32 5 bytes, getU32 9 bytes) of
-      (Just total, Just nFiles)
-        | total < 13 || total > maxImageBytes -> Left "bad total"
-        | nFiles < 0 || nFiles > maxFiles -> Left "bad count"
-        | length bytes < total -> Left "truncated body"
-        | otherwise -> parseFiles (take total bytes) 13 nFiles []
-      _ -> Left "truncated header"
+  | otherwise = case safeIndex bytes 4 of
+      Just v
+        | v == versionLegacy -> case (getU32 5 bytes, getU32 9 bytes) of
+            (Just total, Just nFiles) -> checkHeader 0 total nFiles 13
+            _ -> Left "truncated header"
+        | v == versionCurrent -> headerV2
+        | otherwise -> Left "bad version"
+      _ -> Left "bad version"
+  where
+    headerV2
+      | length bytes < 17 = Left "truncated header"
+      | otherwise = case (getU32 5 bytes, getU32 9 bytes, getU32 13 bytes) of
+          (Just caps, Just total, Just nFiles)
+            | caps .&. complement allowedCaps /= 0 -> Left "bad caps"
+            | otherwise -> checkHeader caps total nFiles 17
+          _ -> Left "truncated header"
+    checkHeader caps total nFiles hdrLen
+      | toInteger total < toInteger hdrLen || toInteger total > toInteger maxImageBytes = Left "bad total"
+      | nFiles < 0 || nFiles > maxFiles = Left "bad count"
+      | otherwise = Right (caps, total, nFiles, hdrLen)
+
+-- | Pure decode. Total; corrupt magic yields Left, never a crash.
+decodeImage :: [Word8] -> Either String [(FilePath, [Word8])]
+decodeImage bytes = case decodeHeader bytes of
+  Left s -> Left s
+  Right (_, total, nFiles, hdrLen)
+    | toInteger (length bytes) < toInteger total -> Left "truncated body"
+    | otherwise -> parseFiles (take total bytes) hdrLen nFiles []
   where
     parseFiles _ _ 0 acc = Right (reverse acc)
     parseFiles img off n acc = case getU16 off img of
       Nothing -> Left "truncated entry"
       Just plen
         | plen <= 0 || plen > maxPathLen -> Left "bad path len"
-        | off + 2 + plen + 4 > length img -> Left "truncated entry"
+        | toInteger off + 2 + toInteger plen + 4 > toInteger (length img) -> Left "truncated entry"
         | otherwise ->
             let pbs = take plen (drop (off + 2) img)
                 path = map (chr . fromIntegral) pbs
@@ -127,7 +157,7 @@ decodeImage bytes
                     Nothing -> Left "truncated entry"
                     Just flen
                       | flen < 0 || flen > maxImageBytes -> Left "bad file len"
-                      | off + 2 + plen + 4 + flen > length img -> Left "truncated body"
+                      | toInteger off + 2 + toInteger plen + 4 + toInteger flen > toInteger (length img) -> Left "truncated body"
                       | otherwise ->
                           let bs = take flen (drop (off + 2 + plen + 4) img)
                            in parseFiles img (off + 2 + plen + 4 + flen) (n - 1) ((path, bs) : acc)
@@ -211,25 +241,32 @@ collectAll = go ["/"] []
                     Right (fs, ds) -> return (Right ((full, bs) : fs, ds))
 
 -- | Restore blk slot into ramfs (clears current FS first).
+-- Header (magic + version allowlist + caps + total + count) is validated
+-- from block 0 and total is checked against device capacity before any
+-- further block is read, so a hostile declared count/total cannot drive
+-- unbounded reads. Ramfs is only cleared after the full image decodes.
 persistRestore :: Int -> H (Either PersistError ())
 persistRestore slot = do
   r0 <- Blk.blkReadBlockBytes slot 0
   case r0 of
     Left e -> return (Left (PersistBlk e))
-    Right b0
-      | length b0 < 13 -> return (Left (PersistFormat "truncated header"))
-      | take 4 b0 /= magic -> return (Left (PersistFormat "bad magic"))
-      | otherwise -> case getU32 5 b0 of
-          Nothing -> return (Left (PersistFormat "truncated header"))
-          Just t
-            | t < 13 || t > maxImageBytes -> return (Left (PersistFormat "bad total"))
-            | otherwise -> do
-                let need = (t + 4095) `div` 4096
+    Right b0 -> case decodeHeader b0 of
+      Left s -> return (Left (PersistFormat s))
+      Right (_, total, _, _) -> do
+        eCap <- Blk.blkGetCapacity slot
+        case eCap of
+          Left e -> return (Left (PersistBlk e))
+          Right capSectors -> do
+            let blkBlocks = fromIntegral (capSectors `div` 8) :: Int
+                need = (total + 4095) `div` 4096
+            if need <= 0 || need > blkBlocks
+              then return (Left (PersistFormat "capacity"))
+              else do
                 eRest <- readBlocks slot 1 (need - 1)
                 case eRest of
                   Left e -> return (Left (PersistBlk e))
                   Right rest ->
-                    let img = take t (b0 ++ concat rest)
+                    let img = take total (b0 ++ concat rest)
                      in case decodeImage img of
                           Left s -> return (Left (PersistFormat s))
                           Right files -> restoreFiles files
