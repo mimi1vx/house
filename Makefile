@@ -118,8 +118,8 @@ rust-clean: volumes
 # fourmolu+hlint+cabal back into _lint-inner and bake hlint from Hackage.
 lint: volumes
 	$(RUN_IN_CONTAINER) make _lint-inner
-	fourmolu -m check kernel/test/Main.hs
-	hlint kernel/test/Main.hs
+	fourmolu -m check kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs
+	hlint kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs
 # No `cabal check` here: it grades Hackage-upload suitability, which this
 # firmware test suite intentionally fails (parent-dir hs-source-dirs,
 # `Con` module path reserved on Windows). Build/test coverage lives in
@@ -259,13 +259,17 @@ house-vm-check: vm-check
 # Scaling legs (vm-check 512M/2+4G/4+6G/4+8G/4+16G/4 single-build, smp-check-8) stay out of default `check`.
 run: house-run
 
-# --- Track H: Haskell hygiene gates (host tools, pure logic only) ---
-# fourmolu/hlint are scoped to kernel/test/: legacy kernel/ sources predate
-# the formatter config (mass reformat out of scope). cabal runs the
-# QuickCheck + golden suite with FFI stubbed (never executed).
+# --- Track H: Haskell hygiene gates (host tools, full tree) ---
+# fourmolu/hlint cover kernel/ plus the platform entry points (Spike,
+# IrqCheck); the kernel closure itself is built with -Wall -Werror via
+# house-build. cabal runs the QuickCheck + golden suite with FFI stubbed
+# (never executed). Container hlint cannot parse GHC2024 (see lint above),
+# so the Haskell gates stay on the host until Hackage hlint supports
+# ghc-lib-parser 9.14.
 haskell-check:
-	fourmolu -m check kernel/test/Main.hs
-	hlint kernel/test/Main.hs
+	fourmolu -m check kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs
+	hlint kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs
+	cd kernel/test && cabal build all --enable-tests
 	cd kernel/test && cabal test all
 
 check:
