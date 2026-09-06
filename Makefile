@@ -2,6 +2,37 @@
 
 IMAGE := house-port:latest
 
+# Named-volume container runner (house-ng pattern, plans/house-ng-adoption.md step 5).
+# Sources cross on the bind mount; write-heavy caches live on volumes so only
+# *.elf/*.bin cross back. house-ng mounts target at /work/target because its
+# Cargo workspace is the repo root; ours is rust/, so house-target mounts at
+# /work/rust/target (RUST_*_A paths in platform/aarch64/Makefile).
+# Never mount over /root/.cargo: it would shadow image cargo binaries —
+# cargo home lives at /cargo-home via CARGO_HOME instead.
+RUN_IN_CONTAINER := container run --platform linux/arm64 --rm \
+  -v "$(CURDIR)":/work \
+  -v house-target:/work/rust/target \
+  -v house-cabal:/root/.cabal \
+  -v house-cargo:/cargo-home \
+  -e CARGO_HOME=/cargo-home \
+  -w /work $(IMAGE)
+
+# Miri gets its own sizing: the sysroot build thrashes under the default
+# container memory. Cache lands on the cargo volume so only the first run pays.
+MIRI_IN_CONTAINER := container run --platform linux/arm64 --rm -c 4 -m 4G \
+  -v "$(CURDIR)":/work \
+  -v house-target:/work/rust/target \
+  -v house-cabal:/root/.cabal \
+  -v house-cargo:/cargo-home \
+  -e CARGO_HOME=/cargo-home \
+  -e XDG_CACHE_HOME=/cargo-home/cache \
+  -w /work $(IMAGE)
+
+volumes:
+	-container volume create house-target >/dev/null 2>&1 || true
+	-container volume create house-cabal >/dev/null 2>&1 || true
+	-container volume create house-cargo >/dev/null 2>&1 || true
+
 container-image:
 	container builder start -c 4 -m 4G || true
 	# Single sanctioned CONTAINER_DEFAULT_PLATFORM: `container build` line only.
@@ -12,9 +43,11 @@ container-image:
 	  jq -r '.[0].variants[].config.architecture' | sort -u); \
 	[ "$$archs" = "arm64" ] || { echo "FAIL: variants: $$archs" >&2; exit 1; }
 
-container-shell:
+container-shell: volumes
 	container run --platform linux/arm64 --rm -it \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) bash
+	  -v "$(CURDIR)":/work -v house-target:/work/rust/target \
+	  -v house-cabal:/root/.cabal -v house-cargo:/cargo-home \
+	  -e CARGO_HOME=/cargo-home -w /work $(IMAGE) bash
 
 # --- aarch64 freestanding spike ---
 # Guest RAM/SMP are auto-detected at runtime (DTB via x0 → probe → fallback).
@@ -26,9 +59,8 @@ SPIKE_DIR := platform/aarch64
 SPIKE_MEM ?= 4G
 SMP_N ?= 2
 
-spike-build:
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+spike-build: volumes
+	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR)
 
 spike-run:
@@ -36,8 +68,7 @@ spike-run:
 	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/spike.bin
 
 spike-check:
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) spike-build
 	expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.bin \
@@ -45,9 +76,8 @@ spike-check:
 
 # --- aarch64 irq-check kernel ---
 # Only entry point differs (IrqCheck vs Spike); RAM/SMP auto-detected.
-irq-build:
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+irq-build: volumes
+	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) irq
 
 irq-run:
@@ -56,8 +86,7 @@ irq-run:
 
 # irq-check runs both hvf and tcg and requires vm-ok (which implies irq-ok).
 irq-check:
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) irq-build
 	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
@@ -66,31 +95,53 @@ irq-check:
 	  'vm-ok' 120 tcg $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 house kernel ---
-house-build:
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+house-build: volumes
+	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) house
 
-rust-check:
-	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \
+rust-check: volumes
+	$(RUN_IN_CONTAINER) \
 	  cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings
-	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	$(RUN_IN_CONTAINER) \
 	  bash -c 'cd rust && cargo fmt --check'
 
-rust-clean:
-	container run --platform linux/arm64 --rm -v "$(CURDIR)":/work -w /work $(IMAGE) \
+rust-clean: volumes
+	$(RUN_IN_CONTAINER) \
 	  cargo clean --manifest-path rust/Cargo.toml
+
+# Hygiene gates (house-ng pattern, split for the hlint/GHC-9.14 gap): Rust
+# gates run in the container via _lint-inner; Haskell gates run on the host
+# (same convention as haskell-check below) because container hlint 3.6.1
+# predates GHC2024 and no Hackage hlint builds under GHC 9.14.1
+# (hlint 3.10 needs ghc-lib-parser <9.13 which excludes base-4.22).
+# Undo condition: Hackage hlint supporting ghc-lib-parser 9.14 — then move
+# fourmolu+hlint+cabal back into _lint-inner and bake hlint from Hackage.
+lint: volumes
+	$(RUN_IN_CONTAINER) make _lint-inner
+	fourmolu -m check kernel/test/Main.hs
+	hlint kernel/test/Main.hs
+# No `cabal check` here: it grades Hackage-upload suitability, which this
+# firmware test suite intentionally fails (parent-dir hs-source-dirs,
+# `Con` module path reserved on Windows). Build/test coverage lives in
+# haskell-check (step 8), not in the fast lint gate.
+
+_lint-inner:
+	cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings
+	bash -c 'cd rust && cargo fmt --check'
+	cargo deny --manifest-path rust/Cargo.toml check
+
+# Miri target is a stub until step 9 adds #[cfg(miri)] isolation for asm!/MMIO.
+miri: volumes
+	$(MIRI_IN_CONTAINER) cargo miri test --manifest-path rust/Cargo.toml -p house-hal -p house-hal-aarch64 -p house-libc -p house-boot
 
 house-run:
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
 	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.bin
 
 house-check:
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) clean
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	$(RUN_IN_CONTAINER) \
 	  make -C kernel clean
 	$(MAKE) house-build
 	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
@@ -113,11 +164,9 @@ house-posix-check:
 # SMP check (phase 9): N cores online + Haskell parallel (parametrised by SMP_N, default 2)
 # Use SMP_N=4 make smp-check for the >2 gate (4G working RAM, tested to 8, HW bound 32).
 smp-check:
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) clean
-	container run --platform linux/arm64 --rm \
-	  -v "$(CURDIR)":/work -w /work $(IMAGE) \
+	$(RUN_IN_CONTAINER) \
 	  make -C kernel clean
 	$(MAKE) house-build
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
@@ -229,6 +278,6 @@ check:
 	$(MAKE) haskell-check
 	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust) =="
 
-.PHONY: container-image container-shell spike-build spike-run spike-check \
+.PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
         house-build house-run house-check house-shell-check house-posix-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check

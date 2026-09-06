@@ -5,7 +5,7 @@ LIBDIR := $(shell ghc --print-libdir)
 HSINC  := $(shell dirname "$(shell find "$(LIBDIR)" -name HsFFI.h | head -1)")
 
 CC      := gcc
-LD      := ld
+LD      := ld.lld
 OBJCOPY := objcopy
 DEFS_C  ?=
 DEFS_S  ?=
@@ -102,6 +102,7 @@ build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
 	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	    /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
+	@size $@
 
 build/aarch64.ld: aarch64.ld | build
 	$(CC) -E -P -x c -o $@ $<
@@ -145,6 +146,7 @@ build/spike.elf: $(OBJS) build/aarch64.ld
 	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) \
 	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(BASE_A) $(RTS_A) $(FFI_A) /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
+	@size $@
 
 build/irq.elf: $(OBJS_IRQ) build/aarch64.ld
 	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
@@ -153,6 +155,7 @@ build/irq.elf: $(OBJS_IRQ) build/aarch64.ld
 	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	    /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
+	@size $@
 
 clean:
 	rm -rf build

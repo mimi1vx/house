@@ -5,6 +5,7 @@ PHDRS
   text   PT_LOAD FLAGS(5); /* R+X */
   rodata PT_LOAD FLAGS(4); /* R   */
   data   PT_LOAD FLAGS(6); /* R+W */
+  tls    PT_TLS  FLAGS(4); /* R   */
 }
 
 SECTIONS
@@ -52,6 +53,29 @@ SECTIONS
     *(.data .data.* .sdata .sdata.*)
     *(.got .got.* .got.plt)
   } :data
+
+  /* Static TLS template for the threaded RTS (`__thread` locals, e.g. the
+     task pointer in Task.thr_o): without an explicit template + PT_TLS,
+     ld.lld rejects the link ("STT_TLS symbol but no SHF_TLS section")
+     where GNU ld silently orphans .tbss into the data LOAD. Dual-assigned
+     :tls :data so the init template stays inside the flat .bin LOAD image;
+     placed before the ASSERT so template bytes count toward the gate. */
+  .tls : {
+    *(.tdata .tdata.* .gnu.linkonce.td.*)
+    *(.tbss .tbss.* .gnu.linkonce.tb.*)
+    *(.tcommon)
+  } :tls :data
+  _tls_base = ADDR(.tls);
+  _tls_end = ADDR(.tls) + SIZEOF(.tls);
+
+  /* Image-size gate: the loaded file-image (text+rodata+data — what lands
+     in the flat .bin) must stay under 16 MiB. Measured 2026-09-06:
+     spike ~7.7 MiB, house ~13.3 MiB (full threaded RTS + kernel closure),
+     so the transcribed house-ng 8 MiB bound does not fit house; 16 MiB
+     leaves ~20% headroom for floated-GHC/nightly codegen drift. .bss plus
+     the 2 MiB early-stacks reservation below are NOLOAD and excluded —
+     track them via the `size` report after link instead. */
+  ASSERT(. <= 0x41080000, "house image exceeds 16 MiB")
 
   .bss (NOLOAD) : {
     . = ALIGN(16);
