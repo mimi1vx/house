@@ -1,27 +1,29 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds -Wno-unused-imports #-}
 
--- | Virtio-blk server — Endpoint + Grant, 4K blocks (wire 512 sectors), IRQ->Endpoint.
--- Lock order: blkSem distinct from virtioSem/drvSem/nsSem/epSem; never hold blkSem across nsRegister.
-module Kernel.Driver.Virtio.Blk.Server
-  ( BlkDevice (..),
-    blkServerInit,
-    blkServerTeardown,
-    blkReadBlocks,
-    blkWriteBlocks,
-    blkGetCapacity,
-    blkReadBlockBytes,
-    blkWriteBlockBytes,
-  )
+{- | Virtio-blk server — Endpoint + Grant, 4K blocks (wire 512 sectors), IRQ->Endpoint.
+Lock order: blkSem distinct from virtioSem/drvSem/nsSem/epSem; never hold blkSem across nsRegister.
+-}
+module Kernel.Driver.Virtio.Blk.Server (
+  BlkDevice (..),
+  blkServerInit,
+  blkServerTeardown,
+  blkReadBlocks,
+  blkWriteBlocks,
+  blkGetCapacity,
+  blkReadBlockBytes,
+  blkWriteBlockBytes,
+)
 where
 
+import Control.Monad (when)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Word
-  ( Word32,
-    Word64,
-    Word8,
-  )
+import Data.Word (
+  Word32,
+  Word64,
+  Word8,
+ )
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
@@ -47,16 +49,16 @@ busyDelayUs us = liftIO $ do
   let target = t0 + fromIntegral us * 1000
   let loop = do
         t <- c_uptime_ns
-        if t < target then loop else return ()
+        when (t < target) loop
   loop
 
 -- | Blk device record (mirrors VirtioDevice but block-specific).
-data BlkDevice = BlkDevice
-  { blkSlot :: Int,
-    blkCapacity :: Word64,
-    blkIntId :: IntId,
-    blkEndpoint :: Endpoint,
-    blkQueueSize :: Word32
+data BlkDevice = BlkDevice {
+  blkSlot :: Int
+  , blkCapacity :: Word64
+  , blkIntId :: IntId
+  , blkEndpoint :: Endpoint
+  , blkQueueSize :: Word32
   }
   deriving (Eq, Show)
 
@@ -79,8 +81,9 @@ foreign import ccall unsafe "virtio_blk_reset_slot" c_reset_slot :: Int -> IO ()
 slotValid :: Int -> Bool
 slotValid n = n >= 0 && n < 8
 
--- | Shell write bound: one 4K block per call; over-length input is truncated
--- (graceful, + dmesg) so a hostile/long line cannot starve the server.
+{- | Shell write bound: one 4K block per call; over-length input is truncated
+(graceful, + dmesg) so a hostile/long line cannot starve the server.
+-}
 maxBlkWriteBytes :: Int
 maxBlkWriteBytes = 4096
 
@@ -220,10 +223,8 @@ blkWriteBlocks slot lba txt = do
         Right cap -> case validateLba lba 1 cap of
           Left e -> return (Left e)
           Right () -> do
-            _ <-
-              if length txt > maxBlkWriteBytes
-                then Dmesg.dmesgLog ("blk write truncated slot " ++ show slot ++ " len=" ++ show (length txt))
-                else return ()
+            when (length txt > maxBlkWriteBytes) $
+              Dmesg.dmesgLog ("blk write truncated slot " ++ show slot ++ " len=" ++ show (length txt))
             mg <- G.grantAlloc
             case mg of
               Left _ -> return (Left BlkNoSpace)

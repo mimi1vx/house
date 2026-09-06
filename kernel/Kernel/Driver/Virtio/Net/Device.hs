@@ -1,15 +1,16 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
--- | Low-level per-slot helpers over C FFI for virtio-net.
--- Validates slot 0..7 and maps C errors to NetError.
-module Kernel.Driver.Virtio.Net.Device
-  ( netProbeMac,
-    netSubmitRx,
-    netSubmitTx,
-    netPollUsed,
-    netInvalidate,
-    netSaveQueues,
-  )
+{- | Low-level per-slot helpers over C FFI for virtio-net.
+Validates slot 0..7 and maps C errors to NetError.
+-}
+module Kernel.Driver.Virtio.Net.Device (
+  netProbeMac,
+  netSubmitRx,
+  netSubmitTx,
+  netPollUsed,
+  netInvalidate,
+  netSaveQueues,
+)
 where
 
 import Data.Word (Word32, Word64, Word8)

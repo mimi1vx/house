@@ -1,20 +1,19 @@
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
-{-| Virtual Memory (section 3.2 in the paper) — aarch64 4KB granule.
- -}
-module H.VirtualMemory
-  ( VAddr,
-    minVAddr,
-    maxVAddr,
-    PageMap,
-    allocPageMap,
-    freePageMap,
-    PageInfo (..),
-    setPage,
-    getPage,
-    toPageMap,
-    fromPageMap, -- not for public use
-  )
+-- | Virtual Memory (section 3.2 in the paper) — aarch64 4KB granule.
+module H.VirtualMemory (
+  VAddr,
+  minVAddr,
+  maxVAddr,
+  PageMap,
+  allocPageMap,
+  freePageMap,
+  PageInfo (..),
+  setPage,
+  getPage,
+  toPageMap,
+  fromPageMap, -- not for public use
+)
 where
 
 -- import Kernel.Debug(putStrLn)
@@ -47,29 +46,30 @@ maxVAddr = 0x1000000000 -- 64GB demand window (0x01000000–0x1000000000), match
 
 -- abstract type PageMap  -- Show,Eq,Ord(!)
 
-{-| New page maps, represented by the abstract type @PageMap@, are
+{- | New page maps, represented by the abstract type @PageMap@, are
 obtained using @llocPageMap@. The number of available page maps may be limited;
-@allocPageMap@ returns  returns @Nothing@ if no more maps are available. -}
+@allocPageMap@ returns  returns @Nothing@ if no more maps are available.
+-}
 allocPageMap :: H (Maybe PageMap)
 
 {-# DEPRECATED freePageMap "freePageMap does nothing" #-}
 freePageMap :: PageMap -> H ()
 
-{-|
+{- |
 Page map entries are indexed by valid, aligned, virtual addresses.  The
 entry for an unmapped page contains {\tt Nothing}; the entry for a
 mapped page contains a value, @Just p@, where @p@ is
 of type @PageInfo@.
 -}
 data PageInfo
-  = PageInfo
-  { physPage :: PhysPage,
-    -- | indicates whether the user process has write access to the page
-    writable :: Bool,
-    -- | indicates that the page has been written
-    dirty :: Bool,
-    -- | indicates that it has been read or written
-    accessed :: Bool
+  = PageInfo {
+  physPage :: PhysPage
+  , writable :: Bool
+  -- ^ indicates whether the user process has write access to the page
+  , dirty :: Bool
+  -- ^ indicates that the page has been written
+  , accessed :: Bool
+  -- ^ indicates that it has been read or written
   }
   deriving (Eq, Show)
 
@@ -126,11 +126,11 @@ descToPageInfo d
   | not (testBit' bValid d) = Nothing
   | otherwise =
       Just
-        ( PageInfo
-            { physPage = toPhysPage (ptrFromWord64 (d .&. mAddress)),
-              writable = ((d `shiftR` 6) .&. 0x3) == 0x1,
-              dirty = testBit' bSwDirty d,
-              accessed = testBit' bSwAccessed d
+        ( PageInfo {
+            physPage = toPhysPage (ptrFromWord64 (d .&. mAddress))
+            , writable = ((d `shiftR` 6) .&. 0x3) == 0x1
+            , dirty = testBit' bSwDirty d
+            , accessed = testBit' bSwAccessed d
             }
         )
 
@@ -145,9 +145,8 @@ pageInfoToDesc pinfo =
           .|. attrNormal
       apBits = if writable pinfo then apRW else apRO
       sw =
-        condBit (dirty pinfo) bSwDirty
-          $ condBit (accessed pinfo) bSwAccessed
-          $ 0
+        condBit (dirty pinfo) bSwDirty $
+          condBit (accessed pinfo) bSwAccessed 0
    in base .|. apBits .|. sw
 
 -- Table helpers
@@ -184,9 +183,7 @@ invalidate :: PDir -> VAddr -> H ()
 invalidate pdir vaddr =
   do
     pdir0 <- currentPDir
-    if pdir == pdir0
-      then invalidatePage vaddr
-      else return ()
+    when (pdir == pdir0) $ invalidatePage vaddr
 
 getPage (PageMap l0) vaddr | validVAddr vaddr =
   do

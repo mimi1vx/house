@@ -1,11 +1,11 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 -- | GIC SPI helpers (thin wrappers over 'H.Interrupts').
-module Kernel.Driver.GIC
-  ( enableSpi,
-    disableSpi,
-    spiIntId,
-  )
+module Kernel.Driver.GIC (
+  enableSpi,
+  disableSpi,
+  spiIntId,
+)
 where
 
 import Data.Word (Word32)

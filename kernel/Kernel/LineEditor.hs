@@ -1,8 +1,8 @@
-module Kernel.LineEditor
-  ( LineEditor,
-    newEditor,
-    getLine,
-  )
+module Kernel.LineEditor (
+  LineEditor,
+  newEditor,
+  getLine,
+)
 where
 
 import Control.Monad (unless)
@@ -14,16 +14,17 @@ import H.Monad (H)
 import Kernel.Console
 import Kernel.Driver.Keyboard (KMod (..), KModSide (..), Key (..), KeyPress (..))
 import Kernel.Types.Console (VideoAttributes)
+
 {---
  Loosely based on SimpleLineEditor by Malcom Wallace
  http://www.haskell.org/pipermail/glasgow-haskell-users/2003-June/005370.html
 ---}
 import Prelude hiding (getLine, putChar)
 
-data LineEditorData = LineEditorData
-  { editorChan :: Chan KeyPress,
-    editorConsole :: Console,
-    editorHistory :: MVar [String]
+data LineEditorData = LineEditorData {
+  editorChan :: Chan KeyPress
+  , editorConsole :: Console
+  , editorHistory :: MVar [String]
   }
 
 data LineEditor = LineEditor (MVar LineEditorData)
@@ -51,10 +52,10 @@ newEditor chan console =
     vHistory <- newMVar []
     vEditor <-
       newMVar $
-        LineEditorData
-          { editorChan = chan,
-            editorConsole = console,
-            editorHistory = vHistory
+        LineEditorData {
+          editorChan = chan
+          , editorConsole = console
+          , editorHistory = vHistory
           }
     return $ LineEditor vEditor
 
@@ -202,7 +203,7 @@ translateKey :: KeyPress -> LineCmd
 translateKey (KeyPress modSet key) =
   case key of
     Key c ->
-      if (Ctrl LSide) `member` modSet || (Ctrl RSide) `member` modSet
+      if Ctrl LSide `member` modSet || Ctrl RSide `member` modSet
         then case c of
           'a' -> Move Begin
           'e' -> Move End
@@ -228,8 +229,9 @@ translateKey (KeyPress modSet key) =
     TabKey -> Complete
     _ -> NoOp
 
--- | Read-only path completion: extend the word before the cursor to the
--- longest common prefix of fsLs candidates; single dir match gains "/".
+{- | Read-only path completion: extend the word before the cursor to the
+longest common prefix of fsLs candidates; single dir match gains "/".
+-}
 completeWord :: String -> H String
 completeWord before = do
   let word = reverse (takeWhile (/= ' ') (reverse before))
@@ -255,6 +257,6 @@ completeWord before = do
   where
     splitWord w = case elemIndices '/' w of
       [] -> ("/", w)
-      idxs -> let i = last idxs in (take (i + 1) w, drop (i + 1) w)
+      idxs -> let i = last idxs in splitAt (i + 1) w
     joinDir d n = if not (null d) && last d == '/' then d ++ n else d ++ "/" ++ n
     commonPrefix a b = map fst (takeWhile (uncurry (==)) (zip a b))

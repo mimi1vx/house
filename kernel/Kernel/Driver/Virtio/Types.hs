@@ -1,21 +1,20 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-
--- | Virtio-MMIO transport types (device-agnostic).
--- Strictness: status/feature masks are strict Word32/Word64.
--- Exceptions: total decoders return Either, no partial head/fromJust/!!.
--- Bounds: slot 0..7, queue size capped at 64.
-module Kernel.Driver.Virtio.Types
-  ( VirtioFeature (..),
-    VirtioStatus (..),
-    VirtioError (..),
-    virtioFeatureMask,
-    virtioErrorToString,
-    statusBit,
-    statusWordToList,
-    statusListToWord,
-    viewStatus,
-    cErrToVirtioError,
-  )
+{- | Virtio-MMIO transport types (device-agnostic).
+Strictness: status/feature masks are strict Word32/Word64.
+Exceptions: total decoders return Either, no partial head/fromJust/!!.
+Bounds: slot 0..7, queue size capped at 64.
+-}
+module Kernel.Driver.Virtio.Types (
+  VirtioFeature (..),
+  VirtioStatus (..),
+  VirtioError (..),
+  virtioFeatureMask,
+  virtioErrorToString,
+  statusBit,
+  statusWordToList,
+  statusListToWord,
+  viewStatus,
+  cErrToVirtioError,
+)
 where
 
 import Data.Bits (complement, shiftL, (.&.), (.|.))
@@ -54,7 +53,7 @@ data VirtioError
 
 -- | Mask for a set of features.
 virtioFeatureMask :: [VirtioFeature] -> Word64
-virtioFeatureMask fs = foldr (.|.) 0 (map bitFor fs)
+virtioFeatureMask = foldr ((.|.) . bitFor) 0
   where
     bitFor VirtioFVersion1 = (1 :: Word64) `shiftL` 32
     bitFor VirtioFRingEventIdx = (1 :: Word64) `shiftL` 29

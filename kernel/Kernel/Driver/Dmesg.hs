@@ -1,11 +1,12 @@
--- | Bounded Haskell dmesg ring (64 entries * 120 chars), coherency via WB.
--- Non-blocking: 'dmesgLog' never holds MVar across block.
-module Kernel.Driver.Dmesg
-  ( dmesgInit,
-    dmesgLog,
-    dmesgRead,
-    dmesgClear,
-  )
+{- | Bounded Haskell dmesg ring (64 entries * 120 chars), coherency via WB.
+Non-blocking: 'dmesgLog' never holds MVar across block.
+-}
+module Kernel.Driver.Dmesg (
+  dmesgInit,
+  dmesgLog,
+  dmesgRead,
+  dmesgClear,
+)
 where
 
 import Data.Word (Word64)
@@ -15,9 +16,9 @@ import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 
 -- | Single entry with uptime seconds.
-data DmesgEntry = DmesgEntry
-  { dmUptime :: Word64,
-    dmMsg :: String
+data DmesgEntry = DmesgEntry {
+  dmUptime :: Word64
+  , dmMsg :: String
   }
   deriving (Eq, Show)
 

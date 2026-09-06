@@ -2,39 +2,40 @@
 Command-Line Parsing Combinators
 ================================
 -}
-module Util.CmdLineParser
-  ( -- Parser type:
-    P,
-    -- Parser constructors:
-    token,
-    cmd,
-    (!),
-    (<@),
-    (#@),
-    chk,
-    nil,
-    oneof,
-    many,
-    arg,
-    kw,
-    opt,
-    flag,
-    readP,
-    named,
-    path,
-    number,
-    (-:),
-    -- Parser destructors:
-    -- run,
-    usage,
-    parseAll,
-  )
+module Util.CmdLineParser (
+  -- Parser type:
+  P,
+  -- Parser constructors:
+  token,
+  cmd,
+  (!),
+  (<@),
+  (#@),
+  chk,
+  nil,
+  oneof,
+  many,
+  arg,
+  kw,
+  opt,
+  flag,
+  readP,
+  named,
+  path,
+  number,
+  (-:),
+  -- Parser destructors:
+  -- run,
+  usage,
+  parseAll,
+)
 where
 
 import Control.Monad (MonadPlus (..), ap)
 import Data.Maybe (isJust)
 import Text.PrettyPrint
 import Util.Grammar
+
 -- import System(getArgs)
 import Util.PM
 
@@ -102,7 +103,7 @@ kw s = token check s
     check a = if a == s then Just () else Nothing
 
 readP :: (Read res) => String -> P res
-readP desc = token test desc
+readP = token test
   where
     test s = case reads s of
       (x, "") : _ -> Just x
@@ -130,13 +131,12 @@ usage prefix = render' . usageDoc prefix
 
 usageDoc :: String -> P res -> Doc
 usageDoc prefix (P g _) =
-  ( text "Usage:"
-      $$ nest
-        2
-        ( nest 2 (text prefix <+> main)
-            $$ if null aux then empty else text "where" $$ vcat aux
-        )
-  )
+  text "Usage:"
+    $$ nest
+      2
+      ( nest 2 (text prefix <+> main)
+          $$ if null aux then empty else text "where" $$ vcat aux
+      )
   where
     (main, aux) = ppGrammar g
 

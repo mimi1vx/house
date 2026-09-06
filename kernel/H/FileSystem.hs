@@ -1,21 +1,24 @@
--- | Volatile RamFS over 'H.Pages' 512x4K pool.
--- Backed purely by 'H.Pages' ('P.Page Word8'); 2 MiB cap, no host I/O.
--- Single global root protected by one 'QSem' (matches 'H.Pages.pageSem' pattern).
-module H.FileSystem
-  ( FsError (..),
-    FsStat (..),
-    fsInit,
-    fsCreate,
-    fsMkdir,
-    fsWrite,
-    fsRead,
-    fsLs,
-    fsRm,
-    fsStat,
-    fsReadBytes,
-    splitPath,
-    freePageCount,
-  )
+{-# LANGUAGE LambdaCase #-}
+
+{- | Volatile RamFS over 'H.Pages' 512x4K pool.
+Backed purely by 'H.Pages' ('P.Page Word8'); 2 MiB cap, no host I/O.
+Single global root protected by one 'QSem' (matches 'H.Pages.pageSem' pattern).
+-}
+module H.FileSystem (
+  FsError (..),
+  FsStat (..),
+  fsInit,
+  fsCreate,
+  fsMkdir,
+  fsWrite,
+  fsRead,
+  fsLs,
+  fsRm,
+  fsStat,
+  fsReadBytes,
+  splitPath,
+  freePageCount,
+)
 where
 
 import Control.Monad (forM_)
@@ -41,15 +44,16 @@ data FsError
   deriving (Eq, Show)
 
 -- | Stat result for 'fsStat'.
-data FsStat = FsStat
-  { fsIsDir :: Bool,
-    fsSize :: Int,
-    fsBlocks :: Int
+data FsStat = FsStat {
+  fsIsDir :: Bool
+  , fsSize :: Int
+  , fsBlocks :: Int
   }
   deriving (Eq, Show)
 
--- | In-memory node. 'File' pages are 'P.validPage' and
--- length equals ceil(fileSize/4096).
+{- | In-memory node. 'File' pages are 'P.validPage' and
+length equals ceil(fileSize/4096).
+-}
 data Node
   = File [P.Page Word8] Int Word64
   | Dir (Map String Node)
@@ -69,8 +73,9 @@ freePageCount = P.freePageCount
 
 -- Helpers --------------------------------------------------------------------
 
--- | Split and normalize a POSIX path. Drops leading '/', collapses '//',
--- resolves '.' and '..' without escaping root, rejects overlong names.
+{- | Split and normalize a POSIX path. Drops leading '/', collapses '//',
+resolves '.' and '..' without escaping root, rejects overlong names.
+-}
 splitPath :: String -> Either FsError [String]
 splitPath s
   | null s = Left (EINVAL "empty path")
@@ -96,7 +101,7 @@ resolve [] n = Just n
 resolve (c : cs) (Dir kids) = case Map.lookup c kids of
   Nothing -> Nothing
   Just child -> resolve cs child
-resolve _ (File _ _ _) = Nothing
+resolve _ (File {}) = Nothing
 
 updateAt :: [String] -> (Node -> Either FsError Node) -> Node -> Either FsError Node
 updateAt [] f n = f n
@@ -105,7 +110,7 @@ updateAt (c : cs) f (Dir kids) = case Map.lookup c kids of
   Just child -> case updateAt cs f child of
     Left e -> Left e
     Right child' -> Right (Dir (Map.insert c child' kids))
-updateAt _ _ (File _ _ _) = Left ENOTDIR
+updateAt _ _ (File {}) = Left ENOTDIR
 
 freeNodePages :: Node -> H ()
 freeNodePages (File ps _ _) = mapM_ P.freePage ps
@@ -164,13 +169,13 @@ fsCreate path = case splitPath path of
           name = last cs
       case resolve parentComps root of
         Nothing -> return (Left ENOENT)
-        Just (File _ _ _) -> return (Left ENOTDIR)
+        Just (File {}) -> return (Left ENOTDIR)
         Just (Dir kids) ->
           if Map.member name kids
             then return (Left EEXIST)
             else case updateAt
               parentComps
-              ( \p -> case p of
+              ( \case
                   Dir ks -> Right (Dir (Map.insert name (File [] 0 0) ks))
                   _ -> Left ENOTDIR
               )
@@ -189,13 +194,13 @@ fsMkdir path = case splitPath path of
           name = last cs
       case resolve parentComps root of
         Nothing -> return (Left ENOENT)
-        Just (File _ _ _) -> return (Left ENOTDIR)
+        Just (File {}) -> return (Left ENOTDIR)
         Just (Dir kids) ->
           if Map.member name kids
             then return (Left EEXIST)
             else case updateAt
               parentComps
-              ( \p -> case p of
+              ( \case
                   Dir ks -> Right (Dir (Map.insert name (Dir Map.empty) ks))
                   _ -> Left ENOTDIR
               )
@@ -203,8 +208,9 @@ fsMkdir path = case splitPath path of
               Left e -> return (Left e)
               Right nrt -> do writeRef fsRoot nrt; return (Right ())
 
--- | Truncate+overwrite. Creates file if missing. Returns 'ENOSPC' without
--- mutating FS if pool exhausted; frees excess pages on shrink.
+{- | Truncate+overwrite. Creates file if missing. Returns 'ENOSPC' without
+mutating FS if pool exhausted; frees excess pages on shrink.
+-}
 fsWrite :: FilePath -> String -> H (Either FsError ())
 fsWrite path content = case splitPath path of
   Left e -> return (Left e)
@@ -224,13 +230,13 @@ fsWrite path content = case splitPath path of
                 name = last cs
             case resolve parentComps root of
               Nothing -> return (Left ENOENT)
-              Just (File _ _ _) -> return (Left ENOTDIR)
+              Just (File {}) -> return (Left ENOTDIR)
               Just (Dir kids) -> case Map.lookup name kids of
                 Just (Dir _) -> return (Left EISDIR)
                 Just (File oldPages _ _) ->
                   case updateAt
                     parentComps
-                    ( \p -> case p of
+                    ( \case
                         Dir ks -> Right (Dir (Map.insert name (File newPages n 0) ks))
                         _ -> Left ENOTDIR
                     )
@@ -240,7 +246,7 @@ fsWrite path content = case splitPath path of
                 Nothing ->
                   case updateAt
                     parentComps
-                    ( \p -> case p of
+                    ( \case
                         Dir ks -> Right (Dir (Map.insert name (File newPages n 0) ks))
                         _ -> Left ENOTDIR
                     )
@@ -293,7 +299,7 @@ fsReadBytes path = case splitPath path of
         return (Right bs)
 
 readRawBytesFromPages :: [P.Page Word8] -> Int -> H [Word8]
-readRawBytesFromPages pages sz = collect pages sz
+readRawBytesFromPages = collect
   where
     collect [] _ = return []
     collect _ 0 = return []
@@ -310,7 +316,7 @@ fsLs path = case splitPath path of
     root <- readRef fsRoot
     case resolve cs root of
       Nothing -> return (Left ENOENT)
-      Just (File _ _ _) -> return (Left ENOTDIR)
+      Just (File {}) -> return (Left ENOTDIR)
       Just (Dir kids) -> return (Right (Map.keys kids))
 
 fsRm :: FilePath -> H (Either FsError ())
@@ -325,7 +331,7 @@ fsRm path = case splitPath path of
             name = last cs
         case resolve parentComps root of
           Nothing -> return (Left ENOENT :: Either FsError (Either FsError Node))
-          Just (File _ _ _) -> return (Left ENOTDIR)
+          Just (File {}) -> return (Left ENOTDIR)
           Just (Dir kids) -> case Map.lookup name kids of
             Nothing -> return (Left ENOENT)
             Just (Dir dkids) ->
@@ -333,17 +339,17 @@ fsRm path = case splitPath path of
                 then return (Left (EINVAL "directory not empty"))
                 else case updateAt
                   parentComps
-                  ( \p -> case p of
+                  ( \case
                       Dir ks -> Right (Dir (Map.delete name ks))
                       _ -> Left ENOTDIR
                   )
                   root of
                   Left e -> return (Left e)
                   Right nrt -> do writeRef fsRoot nrt; return (Right (Right (Dir dkids)))
-            Just f@(File _ _ _) ->
+            Just f@(File {}) ->
               case updateAt
                 parentComps
-                ( \p -> case p of
+                ( \case
                     Dir ks -> Right (Dir (Map.delete name ks))
                     _ -> Left ENOTDIR
                 )

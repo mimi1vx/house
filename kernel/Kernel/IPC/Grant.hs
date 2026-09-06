@@ -1,11 +1,12 @@
--- | Page-grant ownership transfer over H.Pages pool (4K per grant).
--- Copy header + grant-move bulk; ENOSPC on exhaustion.
-module Kernel.IPC.Grant
-  ( grantAlloc,
-    grantFree,
-    grantSend,
-    grantRecv,
-  )
+{- | Page-grant ownership transfer over H.Pages pool (4K per grant).
+Copy header + grant-move bulk; ENOSPC on exhaustion.
+-}
+module Kernel.IPC.Grant (
+  grantAlloc,
+  grantFree,
+  grantSend,
+  grantRecv,
+)
 where
 
 import H.Monad (H)

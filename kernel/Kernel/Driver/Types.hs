@@ -1,11 +1,11 @@
 -- | Driver framework types.
-module Kernel.Driver.Types
-  ( DriverKind (..),
-    DriverInfo (..),
-    DriverError (..),
-    driverErrorToIpcError,
-    showDriverInfo,
-  )
+module Kernel.Driver.Types (
+  DriverKind (..),
+  DriverInfo (..),
+  DriverError (..),
+  driverErrorToIpcError,
+  showDriverInfo,
+)
 where
 
 import H.Interrupts (IntId)
@@ -20,16 +20,17 @@ data DriverKind
   | Unknown
   deriving (Eq, Show)
 
--- | Metadata kept per registered driver. Invariants: @diName@ non-empty,
--- no '/', @<=255@ chars; @diEndpoint@ is a valid 'Endpoint' minted via
--- 'Kernel.IPC.Endpoint.newEndpoint'; @diIntId@ is @Just (spi n)@ iff
--- @diKind == VirtioMMIO@.
-data DriverInfo = DriverInfo
-  { diName :: String,
-    diEndpoint :: Endpoint,
-    diKind :: DriverKind,
-    diIntId :: Maybe IntId,
-    diSlot :: Maybe Int
+{- | Metadata kept per registered driver. Invariants: @diName@ non-empty,
+no '/', @<=255@ chars; @diEndpoint@ is a valid 'Endpoint' minted via
+'Kernel.IPC.Endpoint.newEndpoint'; @diIntId@ is @Just (spi n)@ iff
+@diKind == VirtioMMIO@.
+-}
+data DriverInfo = DriverInfo {
+  diName :: String
+  , diEndpoint :: Endpoint
+  , diKind :: DriverKind
+  , diIntId :: Maybe IntId
+  , diSlot :: Maybe Int
   }
   deriving (Eq, Show)
 

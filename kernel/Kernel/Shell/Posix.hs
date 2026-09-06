@@ -1,9 +1,9 @@
 -- | POSIX-ish shell commands: uname, uptime, shutdown.
-module Kernel.Shell.Posix
-  ( handleUname,
-    handleUptime,
-    handleShutdown,
-  )
+module Kernel.Shell.Posix (
+  handleUname,
+  handleUptime,
+  handleShutdown,
+)
 where
 
 import Data.List (isPrefixOf, nub)
@@ -24,7 +24,6 @@ handleShutdown args = case args of
   _ -> withCString "usage: shutdown [-h|-r]\n" c_uart_puts
 
 handleUname :: [String] -> IO ()
-
 handleUname args = do
   let sysname = "House"
       nodename = "house"
@@ -50,22 +49,22 @@ handleUname args = do
         _ -> ""
       unameHelp =
         unlines
-          [ "Usage: uname [OPTION]...",
-            "Print certain system information.  With no OPTION, same as -s.",
-            "",
-            "  -a, --all                print all information, in the following order,",
-            "                             except omit -p and -i if unknown:",
-            "                             -s -n -r -v -m -p -i -o",
-            "  -s, --kernel-name        print the kernel name",
-            "  -n, --nodename           print the network node hostname",
-            "  -r, --kernel-release     print the kernel release",
-            "  -v, --kernel-version     print the kernel version",
-            "  -m, --machine            print the machine hardware name",
-            "  -p, --processor          print the processor type",
-            "  -i, --hardware-platform  print the hardware platform",
-            "  -o, --operating-system   print the operating system",
-            "      --help               display this help and exit",
-            "      --version            output version information and exit"
+          [ "Usage: uname [OPTION]..."
+          , "Print certain system information.  With no OPTION, same as -s."
+          , ""
+          , "  -a, --all                print all information, in the following order,"
+          , "                             except omit -p and -i if unknown:"
+          , "                             -s -n -r -v -m -p -i -o"
+          , "  -s, --kernel-name        print the kernel name"
+          , "  -n, --nodename           print the network node hostname"
+          , "  -r, --kernel-release     print the kernel release"
+          , "  -v, --kernel-version     print the kernel version"
+          , "  -m, --machine            print the machine hardware name"
+          , "  -p, --processor          print the processor type"
+          , "  -i, --hardware-platform  print the hardware platform"
+          , "  -o, --operating-system   print the operating system"
+          , "      --help               display this help and exit"
+          , "      --version            output version information and exit"
           ]
       unameVersionStr = sysname ++ " " ++ release ++ " (" ++ version ++ ") " ++ machine ++ "\n"
       parse [] sel = Right sel

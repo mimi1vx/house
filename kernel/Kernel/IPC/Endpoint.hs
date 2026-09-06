@@ -1,22 +1,23 @@
--- | L4 sync rendezvous Endpoint — bounded queue 32, QSem+MVar.
--- Send blocks until paired recv/reply; trySend is non-blocking fire-and-forget.
--- Capability slice (Track S, log-only): 'newEndpoint' mints an owner 'CapToken';
--- 'checkCap'/'nsLookupChecked' log mismatches to dmesg but still allow, so no
--- gate bricks until a deny-by-default landing proves green on both accels.
-module Kernel.IPC.Endpoint
-  ( newEndpoint,
-    freeEndpoint,
-    send,
-    recv,
-    reply,
-    call,
-    callTimeout,
-    trySend,
-    endpointId,
-    CapToken (..),
-    endpointToken,
-    checkCap,
-  )
+{- | L4 sync rendezvous Endpoint — bounded queue 32, QSem+MVar.
+Send blocks until paired recv/reply; trySend is non-blocking fire-and-forget.
+Capability slice (Track S, log-only): 'newEndpoint' mints an owner 'CapToken';
+'checkCap'/'nsLookupChecked' log mismatches to dmesg but still allow, so no
+gate bricks until a deny-by-default landing proves green on both accels.
+-}
+module Kernel.IPC.Endpoint (
+  newEndpoint,
+  freeEndpoint,
+  send,
+  recv,
+  reply,
+  call,
+  callTimeout,
+  trySend,
+  endpointId,
+  CapToken (..),
+  endpointToken,
+  checkCap,
+)
 where
 
 import Control.Concurrent (MVar, tryPutMVar)
@@ -32,13 +33,13 @@ import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import qualified H.Pages as P
 import H.Unsafe (unsafePerformH)
 import qualified Kernel.Driver.Dmesg as Dmesg
-import Kernel.IPC.Types
-  ( Endpoint (..),
-    EndpointId (..),
-    Grant (..),
-    IpcError (..),
-    Message (..),
-  )
+import Kernel.IPC.Types (
+  Endpoint (..),
+  EndpointId (..),
+  Grant (..),
+  IpcError (..),
+  Message (..),
+ )
 import qualified System.Timeout as T
 
 -- | Maximum rendezvous queued per endpoint (HIGH OOM bound).
@@ -46,14 +47,14 @@ maxQueueDepth :: Int
 maxQueueDepth = 32
 
 -- | Internal rendezvous: message + reply slot.
-data Rendezvous = Rendezvous
-  { rvMsg :: Message,
-    rvReplyVar :: MVar (Either IpcError Message)
+data Rendezvous = Rendezvous {
+  rvMsg :: Message
+  , rvReplyVar :: MVar (Either IpcError Message)
   }
 
 -- | Per-endpoint state: FIFO queue of pending rendezvous.
-data EndpointState = EndpointState
-  { esQueue :: [Rendezvous]
+data EndpointState = EndpointState {
+  esQueue :: [Rendezvous]
   }
 
 -- Global table ---------------------------------------------------------------
@@ -135,9 +136,10 @@ endpointToken (Endpoint eid) = withQSem endpointSem $ do
   m <- readRef endpointOwner
   return (Map.lookup eid m)
 
--- | Capability check, log-only: anonymous (Nothing) stays silent for compat;
--- a wrong token or freed id logs to dmesg but still allows. Deny-by-default
--- lands once ipc ping/grant stay green on both accels with this on.
+{- | Capability check, log-only: anonymous (Nothing) stays silent for compat;
+a wrong token or freed id logs to dmesg but still allows. Deny-by-default
+lands once ipc ping/grant stay green on both accels with this on.
+-}
 checkCap :: Endpoint -> Maybe CapToken -> H Bool
 checkCap ep@(Endpoint eid) mtok = case mtok of
   Nothing -> return True
@@ -180,8 +182,9 @@ dequeueReply var ep = withQSem endpointSem $ do
       qs <- readRef st
       writeRef st (qs {esQueue = filter ((/= var) . rvReplyVar) (esQueue qs)})
 
--- | Non-blocking trySend: fire-and-forget enqueue, no reply wait.
--- Returns Left QueueFull/NoSuchEndpoint immediately, Right () on enqueued.
+{- | Non-blocking trySend: fire-and-forget enqueue, no reply wait.
+Returns Left QueueFull/NoSuchEndpoint immediately, Right () on enqueued.
+-}
 trySend :: Endpoint -> Message -> H (Either IpcError ())
 trySend ep msg = do
   replyVar <- liftIO C.newEmptyMVar
@@ -201,8 +204,9 @@ trySend ep msg = do
     Left NoSuchEndpoint -> do logCap ("trySend to freed ep=" ++ show (epId ep)); return r
     _ -> return r
 
--- | Blocking recv: dequeue next rendezvous, returning message + reply handle.
--- Blocks (polls) until a sender arrives.
+{- | Blocking recv: dequeue next rendezvous, returning message + reply handle.
+Blocks (polls) until a sender arrives.
+-}
 recv :: Endpoint -> H (Message, MVar (Either IpcError Message))
 recv ep = loop
   where
@@ -238,8 +242,9 @@ reply var res = do
 call :: Endpoint -> Message -> H (Either IpcError Message)
 call = send
 
--- | Bounded call: 'send' with a reply timeout (µs). Times out to WouldBlock +
--- dmesg instead of blocking forever on a wedged server (CWE-400).
+{- | Bounded call: 'send' with a reply timeout (µs). Times out to WouldBlock +
+dmesg instead of blocking forever on a wedged server (CWE-400).
+-}
 callTimeout :: Int -> Endpoint -> Message -> H (Either IpcError Message)
 callTimeout us ep msg = do
   r <- liftIO $ T.timeout us (runH (send ep msg))

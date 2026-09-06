@@ -1,22 +1,22 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-{-|
+{- |
 Module      : Kernel.Userspace.Process
 Description : ELF loader -> PageMap -> EL0 entry with cleanup.
 -}
-module Kernel.Userspace.Process
-  ( runElf,
-    forkProc,
-    procInfo,
-    waitPid,
-    killPid,
-    procBrkGrow,
-    stackTop,
-  )
+module Kernel.Userspace.Process (
+  runElf,
+  forkProc,
+  procInfo,
+  waitPid,
+  killPid,
+  procBrkGrow,
+  stackTop,
+)
 where
 
 import Control.Concurrent (tryPutMVar, tryTakeMVar)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, void, when)
 import Data.Bits (complement, shiftR, (.&.))
 import Data.Char (ord)
 import qualified Data.Map.Strict as Map
@@ -102,19 +102,20 @@ runElf elf argv envp = withQSem userSem $ do
                         _ <- liftIO (withCString "[run] fork after enter\n" c_uart_puts)
                         code <- liftIO c_get_exit
                         _ <- liftIO c_clear_exit
-                        _ <- liftIO (tryPutMVar processExitVar (fromIntegral code) >> return ())
+                        _ <- liftIO (void (tryPutMVar processExitVar (fromIntegral code)))
                         return ()
                       _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
                       return (Right pid)
 
--- | Fork slice (Track O, no COW, no signals): dormant copy of the
--- parent address space into a fresh PageMap + Pid. Segments, brk-grown
--- pages and the stack page are deep-copied page by page (capped at 8192
--- pages); tables are freshly allocated by 'setPage'. The child shares
--- nothing writable with the parent. Spawning the child on EL0 (register
--- copy at the svc trap) waits on the delegation ring -- same pattern as
--- the fd slice -- so svc 0x08 returns ENOSYS until then; exit codes keep
--- flowing through the existing 'waitPid' path. Runs under 'userSem'.
+{- | Fork slice (Track O, no COW, no signals): dormant copy of the
+parent address space into a fresh PageMap + Pid. Segments, brk-grown
+pages and the stack page are deep-copied page by page (capped at 8192
+pages); tables are freshly allocated by 'setPage'. The child shares
+nothing writable with the parent. Spawning the child on EL0 (register
+copy at the svc trap) waits on the delegation ring -- same pattern as
+the fd slice -- so svc 0x08 returns ENOSYS until then; exit codes keep
+flowing through the existing 'waitPid' path. Runs under 'userSem'.
+-}
 forkProc :: Pid -> H (Either LoadError Pid)
 forkProc parentPid = withQSem userSem $ do
   mp <- readRef procMap
@@ -204,9 +205,10 @@ initBreak elf = case elfSegs elf of
     segEnd s = segVaddr s + fromIntegral (segMemSz s)
     align16 w = (w + 15) .&. complement 15
 
--- | Lay argc/argv+envp on the stack page. Returns adjusted sp (16-byte aligned).
--- Layout: argc, argv[argc+1] (NULL-terminated), envp[envc+1] (NULL-terminated),
--- then NUL-terminated strings. Bounds: 64 entries and 1024 bytes per string.
+{- | Lay argc/argv+envp on the stack page. Returns adjusted sp (16-byte aligned).
+Layout: argc, argv[argc+1] (NULL-terminated), envp[envc+1] (NULL-terminated),
+then NUL-terminated strings. Bounds: 64 entries and 1024 bytes per string.
+-}
 setupArgStack :: Ptr Word8 -> [String] -> [String] -> H (Either LoadError Word64)
 setupArgStack stk argv envp
   | length argv > 64 = return (Left NoSpace)
@@ -289,7 +291,7 @@ pollExit = loop
       if exited /= 0
         then do
           c <- liftIO c_get_exit
-          _ <- liftIO (tryTakeMVar processExitVar >> return ())
+          _ <- liftIO (void (tryTakeMVar processExitVar))
           return (fromIntegral c)
         else do
           m <- liftIO (tryTakeMVar processExitVar)
@@ -299,8 +301,9 @@ pollExit = loop
               threadDelay 1000
               loop
 
--- | Grow a process break within the user window. Maps zero pages for
--- [oldBrk, newBrk); over-window yields OutOfWindow, OOM yields NoSpace.
+{- | Grow a process break within the user window. Maps zero pages for
+[oldBrk, newBrk); over-window yields OutOfWindow, OOM yields NoSpace.
+-}
 procBrkGrow :: Pid -> Word64 -> H (Either LoadError Word64)
 procBrkGrow pid newBrk = withQSem userSem $ do
   mp <- readRef procMap
@@ -348,7 +351,7 @@ mapSegments pdir elf = go (elfSegs elf) []
           cleanup allocated
           return (Left err)
         Right addrs -> go rest (addrs ++ allocated)
-    cleanup addrs =
+    cleanup =
       mapM_
         ( \va -> do
             mInfo <- VM.getPage pdir va
@@ -358,7 +361,6 @@ mapSegments pdir elf = go (elfSegs elf) []
                 _ <- VM.setPage pdir va Nothing
                 HPages.freePage (fromPhysPage (VM.physPage info))
         )
-        addrs
 
 mapOneSegment :: VM.PageMap -> [Word8] -> Segment -> H (Either LoadError [VM.VAddr])
 mapOneSegment pdir bytes seg =
@@ -393,7 +395,7 @@ mapOneSegment pdir bytes seg =
         else loop 0 []
 
 indexBytes :: [Word8] -> Int -> Word8
-indexBytes xs i = go xs i
+indexBytes = go
   where
     go [] _ = 0
     go (y : _) 0 = y
@@ -440,5 +442,5 @@ freePDir pdir = do
           HPages.freePage l0
   where
     tableFromDesc d
-      | d `mod` 2 == 0 = Nothing
+      | even d = Nothing
       | otherwise = Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))

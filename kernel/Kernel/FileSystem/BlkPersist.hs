@@ -1,14 +1,14 @@
 {-# LANGUAGE GHC2024 #-}
 
 -- | RamFS <-> virtio-blk persistence. Volatile by default; explicit save/restore only.
-module Kernel.FileSystem.BlkPersist
-  ( PersistError (..),
-    persistErrorToString,
-    persistSave,
-    persistRestore,
-    encodeImage,
-    decodeImage,
-  )
+module Kernel.FileSystem.BlkPersist (
+  PersistError (..),
+  persistErrorToString,
+  persistSave,
+  persistRestore,
+  encodeImage,
+  decodeImage,
+)
 where
 
 import Data.Bits (complement, shiftL, shiftR, (.&.))
@@ -42,23 +42,25 @@ maxPathLen = 1024
 magic :: [Word8]
 magic = [0x48, 0x46, 0x53, 0x31]
 
--- | Version allowlist: v1 legacy (13-byte header, implicit caps=0),
--- v2 current (17-byte header, explicit caps word). Writes use v2.
+{- | Version allowlist: v1 legacy (13-byte header, implicit caps=0),
+v2 current (17-byte header, explicit caps word). Writes use v2.
+-}
 versionLegacy, versionCurrent :: Word8
 versionLegacy = 0x01
 versionCurrent = 0x02
 
--- | Caps allowlist mask: no feature bits defined yet, so any nonzero
--- caps word is hostile/foreign and rejected before any persist read.
+{- | Caps allowlist mask: no feature bits defined yet, so any nonzero
+caps word is hostile/foreign and rejected before any persist read.
+-}
 allowedCaps :: Int
 allowedCaps = 0x00
 
 word32LE :: Word32 -> [Word8]
 word32LE w =
-  [ fromIntegral w,
-    fromIntegral (w `shiftR` 8),
-    fromIntegral (w `shiftR` 16),
-    fromIntegral (w `shiftR` 24)
+  [ fromIntegral w
+  , fromIntegral (w `shiftR` 8)
+  , fromIntegral (w `shiftR` 16)
+  , fromIntegral (w `shiftR` 24)
   ]
 
 word16LE :: Int -> [Word8]
@@ -110,9 +112,10 @@ getU16 off bs
       (Just b0, Just b1) -> Just (fromIntegral b0 + (fromIntegral b1 `shiftL` 8))
       _ -> Nothing
 
--- | Pure header decode shared by decodeImage and persistRestore.
--- Returns (caps, total, count, header length). All offset sums run in
--- Integer so hostile lengths cannot wrap into range.
+{- | Pure header decode shared by decodeImage and persistRestore.
+Returns (caps, total, count, header length). All offset sums run in
+Integer so hostile lengths cannot wrap into range.
+-}
 decodeHeader :: [Word8] -> Either String (Int, Int, Int, Int)
 decodeHeader bytes
   | length bytes < 13 = Left "truncated header"
@@ -155,7 +158,7 @@ decodeImage bytes = case decodeHeader bytes of
         | otherwise ->
             let pbs = take plen (drop (off + 2) img)
                 path = map (chr . fromIntegral) pbs
-             in if null path || safeHead path /= Just '/' || any (== 0) pbs
+             in if null path || safeHead path /= Just '/' || elem 0 pbs
                   then Left "bad path"
                   else case getU32 (off + 2 + plen) img of
                     Nothing -> Left "truncated entry"
@@ -244,11 +247,12 @@ collectAll = go ["/"] []
                     Left e -> return (Left e)
                     Right (fs, ds) -> return (Right ((full, bs) : fs, ds))
 
--- | Restore blk slot into ramfs (clears current FS first).
--- Header (magic + version allowlist + caps + total + count) is validated
--- from block 0 and total is checked against device capacity before any
--- further block is read, so a hostile declared count/total cannot drive
--- unbounded reads. Ramfs is only cleared after the full image decodes.
+{- | Restore blk slot into ramfs (clears current FS first).
+Header (magic + version allowlist + caps + total + count) is validated
+from block 0 and total is checked against device capacity before any
+further block is read, so a hostile declared count/total cannot drive
+unbounded reads. Ramfs is only cleared after the full image decodes.
+-}
 persistRestore :: Int -> H (Either PersistError ())
 persistRestore slot = do
   r0 <- Blk.blkReadBlockBytes slot 0

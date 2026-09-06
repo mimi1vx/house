@@ -1,12 +1,13 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
--- | Virtio-MMIO probe (slot 0..7 at 0x0a000000+i*0x200). Probe-only, no
--- queue/IRQ enable. Logs each slot to dmesg.
-module Kernel.Driver.VirtioProbe
-  ( VirtioSlotInfo (..),
-    virtioScan,
-    virtioDeviceName,
-  )
+{- | Virtio-MMIO probe (slot 0..7 at 0x0a000000+i*0x200). Probe-only, no
+queue/IRQ enable. Logs each slot to dmesg.
+-}
+module Kernel.Driver.VirtioProbe (
+  VirtioSlotInfo (..),
+  virtioScan,
+  virtioDeviceName,
+)
 where
 
 import Data.Word (Word32)
@@ -18,12 +19,12 @@ import H.Monad (H, liftIO)
 import qualified Kernel.Driver.Dmesg as Dmesg
 
 -- | Per-slot probe result.
-data VirtioSlotInfo = VirtioSlotInfo
-  { vsiSlot :: Int,
-    vsiPresent :: Bool,
-    vsiDeviceId :: Word32,
-    vsiVendorId :: Word32,
-    vsiSpi :: Maybe IntId
+data VirtioSlotInfo = VirtioSlotInfo {
+  vsiSlot :: Int
+  , vsiPresent :: Bool
+  , vsiDeviceId :: Word32
+  , vsiVendorId :: Word32
+  , vsiSpi :: Maybe IntId
   }
   deriving (Eq, Show)
 
@@ -31,9 +32,10 @@ foreign import ccall unsafe "virtio_probe_slot"
   c_virtio_probe_slot ::
     Int -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> IO Int
 
--- | Probe all 8 MMIO slots, log to dmesg, return list.
--- device_id 4 (virtio-rng) is named explicitly so `virtio scan` + dmesg
--- surface the Track O RNG slice without extra queue code.
+{- | Probe all 8 MMIO slots, log to dmesg, return list.
+device_id 4 (virtio-rng) is named explicitly so `virtio scan` + dmesg
+surface the Track O RNG slice without extra queue code.
+-}
 virtioScan :: H [VirtioSlotInfo]
 virtioScan = mapM probeOne [0 .. 7]
   where

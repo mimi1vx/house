@@ -1,9 +1,8 @@
 -- | Unsafe operations
-
 module H.Unsafe where
 
-import System.IO.Unsafe(unsafePerformIO)
-import H.Monad(H,runH)
+import H.Monad (H, runH)
+import System.IO.Unsafe (unsafePerformIO)
 
 unsafePerformH :: H a -> a
 unsafePerformH = unsafePerformIO . runH

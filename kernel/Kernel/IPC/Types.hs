@@ -1,17 +1,18 @@
--- | IPC Types: L4 sync rendezvous primitives.
--- Copy + page-grant payload, bounded words, capability Endpoint.
-module Kernel.IPC.Types
-  ( Perm (..),
-    Grant (..),
-    IpcError (..),
-    EndpointId (..),
-    Message (..),
-    Endpoint (..),
-    mkMessage,
-    isValidGrant,
-    maxMsgWords,
-    maxNameLen,
-  )
+{- | IPC Types: L4 sync rendezvous primitives.
+Copy + page-grant payload, bounded words, capability Endpoint.
+-}
+module Kernel.IPC.Types (
+  Perm (..),
+  Grant (..),
+  IpcError (..),
+  EndpointId (..),
+  Message (..),
+  Endpoint (..),
+  mkMessage,
+  isValidGrant,
+  maxMsgWords,
+  maxNameLen,
+)
 where
 
 import Data.Word (Word64, Word8)
@@ -29,11 +30,12 @@ maxNameLen = 255
 data Perm = RO | RW
   deriving (Eq, Show)
 
--- | Page grant — ownership transfer of one 'P.Page Word8'.
--- Invariant: 'grantPage' satisfies 'P.validPage' and is pageSize-aligned.
-data Grant = Grant
-  { grantPage :: P.Page Word8,
-    grantPerm :: Perm
+{- | Page grant — ownership transfer of one 'P.Page Word8'.
+Invariant: 'grantPage' satisfies 'P.validPage' and is pageSize-aligned.
+-}
+data Grant = Grant {
+  grantPage :: P.Page Word8
+  , grantPerm :: Perm
   }
   deriving (Eq, Show)
 
@@ -54,22 +56,24 @@ newtype EndpointId = EndpointId Word64
   deriving (Eq, Ord, Show)
 
 -- | Synchronous rendezvous message: tag + up to 8 words + optional grant.
-data Message = Message
-  { msgTag :: Word64,
-    msgWords :: [Word64],
-    msgGrant :: Maybe Grant
+data Message = Message {
+  msgTag :: Word64
+  , msgWords :: [Word64]
+  , msgGrant :: Maybe Grant
   }
   deriving (Eq, Show)
 
--- | Endpoint handle — duplicable capability (Id generated under QSem).
--- Actual queue lives in 'Kernel.IPC.Endpoint.EndpointState'.
-data Endpoint = Endpoint
-  { epId :: EndpointId
+{- | Endpoint handle — duplicable capability (Id generated under QSem).
+Actual queue lives in 'Kernel.IPC.Endpoint.EndpointState'.
+-}
+data Endpoint = Endpoint {
+  epId :: EndpointId
   }
   deriving (Eq, Show)
 
--- | Smart constructor: total, rejects length>8 with Left.
--- Grant validity is checked via 'P.validPage'.
+{- | Smart constructor: total, rejects length>8 with Left.
+Grant validity is checked via 'P.validPage'.
+-}
 mkMessage :: Word64 -> [Word64] -> Maybe Grant -> Either IpcError Message
 mkMessage tag ws mg
   | length ws > maxMsgWords = Left QueueFull

@@ -9,8 +9,9 @@ infixl 1 #, #!, <#
 (#) :: (Functor f) => (a -> b) -> f a -> f b
 f # x = fmap f x
 
--- | Apply a function returned by a monadic computation to an argument returned
--- by a monadic computation
+{- | Apply a function returned by a monadic computation to an argument returned
+by a monadic computation
+-}
 (<#) :: (Monad m) => m (a -> b) -> m a -> m b
 f <# x = ap f x
 

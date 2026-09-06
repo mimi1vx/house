@@ -5,13 +5,13 @@ import Data.Word (Word32, Word64)
 import H.AdHocMem (Ptr, absolutePtr64, alignPtr, minusPtr, nullPtr)
 
 setBit' :: (Bits a) => Int -> a -> a
-setBit' b = flip setBit b
+setBit' = flip setBit
 
 clearBit' :: (Bits a) => Int -> a -> a
-clearBit' b = flip clearBit b
+clearBit' = flip clearBit
 
 testBit' :: (Bits a) => Int -> a -> Bool
-testBit' b = flip testBit b
+testBit' = flip testBit
 
 condBit :: (Bits a) => Bool -> Int -> a -> a
 condBit True = setBit'

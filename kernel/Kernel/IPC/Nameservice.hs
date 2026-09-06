@@ -1,15 +1,16 @@
--- | Well-known name registry (String -> Endpoint) + delegatable caps.
--- Names ≤255, no empty or '/' per H.FileSystem.splitPath style.
--- Lock order: nsSem -> epSem (never hold epSem across nsRegister).
--- Capability slice (Track S, log-only): 'nsLookupChecked' runs 'checkCap'
--- (dmesg on mismatch, still allows) so violations are visible pre-deny.
-module Kernel.IPC.Nameservice
-  ( nsRegister,
-    nsLookup,
-    nsLookupChecked,
-    nsUnregister,
-    nsList,
-  )
+{- | Well-known name registry (String -> Endpoint) + delegatable caps.
+Names ≤255, no empty or '/' per H.FileSystem.splitPath style.
+Lock order: nsSem -> epSem (never hold epSem across nsRegister).
+Capability slice (Track S, log-only): 'nsLookupChecked' runs 'checkCap'
+(dmesg on mismatch, still allows) so violations are visible pre-deny.
+-}
+module Kernel.IPC.Nameservice (
+  nsRegister,
+  nsLookup,
+  nsLookupChecked,
+  nsUnregister,
+  nsList,
+)
 where
 
 import Data.Map.Strict (Map)
@@ -56,8 +57,9 @@ nsLookup name = withQSem nsSem $ do
   m <- readRef nsMap
   return (Map.lookup name m)
 
--- | Checked lookup: miss logs to dmesg (maps to NoSuchEndpoint at the trap
--- boundary); hit runs 'checkCap' (log-only, still allows on mismatch).
+{- | Checked lookup: miss logs to dmesg (maps to NoSuchEndpoint at the trap
+boundary); hit runs 'checkCap' (log-only, still allows on mismatch).
+-}
 nsLookupChecked :: String -> Maybe CapToken -> H (Either IpcError Endpoint)
 nsLookupChecked name mtok = do
   mep <- nsLookup name

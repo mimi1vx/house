@@ -1,34 +1,35 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
--- | Raw foreign surface for shell dispatch (UART, PSCI, RAM/DTB refs,
--- buddy stats, TTBR, mmap/mprotect, demand paging). See rust/c-abi.md.
-module Kernel.Shell.Foreign
-  ( c_uart_puts,
-    conMirror,
-    c_uptime,
-    c_off,
-    c_reset,
-    c_ram_ref,
-    c_stack_top_ref,
-    c_ram_source_ref,
-    c_smp_ref,
-    c_dtb_ref,
-    c_bank_count,
-    c_bank_get,
-    c_mem_stats,
-    c_buddy_total,
-    c_buddy_free,
-    c_get_ttbrs,
-    c_mmap,
-    c_munmap,
-    c_mprotect,
-    c_malloc_stats,
-    c_demand_single,
-    c_demand_100,
-    c_is_ro_page,
-    c_tlb_shootdown,
-    c_asid_for,
-  )
+{- | Raw foreign surface for shell dispatch (UART, PSCI, RAM/DTB refs,
+buddy stats, TTBR, mmap/mprotect, demand paging). See rust/c-abi.md.
+-}
+module Kernel.Shell.Foreign (
+  c_uart_puts,
+  conMirror,
+  c_uptime,
+  c_off,
+  c_reset,
+  c_ram_ref,
+  c_stack_top_ref,
+  c_ram_source_ref,
+  c_smp_ref,
+  c_dtb_ref,
+  c_bank_count,
+  c_bank_get,
+  c_mem_stats,
+  c_buddy_total,
+  c_buddy_free,
+  c_get_ttbrs,
+  c_mmap,
+  c_munmap,
+  c_mprotect,
+  c_malloc_stats,
+  c_demand_single,
+  c_demand_100,
+  c_is_ro_page,
+  c_tlb_shootdown,
+  c_asid_for,
+)
 where
 
 import Control.Exception (SomeException, catch)
@@ -44,14 +45,16 @@ import qualified Kernel.Driver.Virtio.Con as Con
 
 foreign import ccall unsafe "uart_puts" c_uart_puts_raw :: Ptr CChar -> IO ()
 
--- | All shell output flows through here. Console-mirror interposition point:
--- when 'con mirror on', every UART line is best-effort duplicated to the
--- virtio-console TX queue (dropped when not inited, never blocks the shell).
+{- | All shell output flows through here. Console-mirror interposition point:
+when 'con mirror on', every UART line is best-effort duplicated to the
+virtio-console TX queue (dropped when not inited, never blocks the shell).
+-}
 c_uart_puts :: Ptr CChar -> IO ()
 c_uart_puts p = c_uart_puts_raw p >> mirrorOut p
 
--- | Best-effort mirror of one UART string to the console slot. Swallows all
--- exceptions; drops silently unless mirror is on and the server is inited.
+{- | Best-effort mirror of one UART string to the console slot. Swallows all
+exceptions; drops silently unless mirror is on and the server is inited.
+-}
 mirrorOut :: Ptr CChar -> IO ()
 mirrorOut p = do
   on <- runH (readRef conMirror)

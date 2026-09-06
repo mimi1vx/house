@@ -1,24 +1,23 @@
-module Kernel.Debug
-    ( v_defaultConsole
-    , Kernel.Debug.putStr
-    , Kernel.Debug.putStrLn
-    ) where
+module Kernel.Debug (
+  vDefaultConsole,
+  Kernel.Debug.putStr,
+  Kernel.Debug.putStrLn,
+)
+where
+
+-- import Control.Concurrent.Chan
+import H.Concurrency
 
 {-P:
 import Prelude hiding (putStr,putStrLn)
 -}
-import H.Monad(H)
-import H.Unsafe(unsafePerformH)
-
-
---import Control.Concurrent.Chan
-import H.Concurrency 
-
+import H.Monad (H)
+import H.Unsafe (unsafePerformH)
 import Kernel.Console
 
-{-# NOINLINE v_defaultConsole #-}
-v_defaultConsole :: MVar Console
-v_defaultConsole = unsafePerformH $ newEmptyMVar
+{-# NOINLINE vDefaultConsole #-}
+vDefaultConsole :: MVar Console
+vDefaultConsole = unsafePerformH newEmptyMVar
 
 putStr :: String -> H ()
 putStr = wrap putString
@@ -28,8 +27,10 @@ putStrLn = wrap putStringLn
 
 wrap :: (Console -> String -> H ()) -> String -> H ()
 wrap f str =
-    do empty <- isEmptyMVar v_defaultConsole
-       if empty
-          then return ()
-          else do chan <- readMVar v_defaultConsole
-                  f chan str
+  do
+    empty <- isEmptyMVar vDefaultConsole
+    if empty
+      then return ()
+      else do
+        chan <- readMVar vDefaultConsole
+        f chan str

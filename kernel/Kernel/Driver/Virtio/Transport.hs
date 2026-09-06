@@ -1,20 +1,22 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
--- | Virtio-MMIO transport — device-agnostic negotiation + queue + IRQ->Endpoint.
--- Lock order: virtioSem distinct from drvSem/nsSem/epSem; never hold virtioSem across nsRegister.
-module Kernel.Driver.Virtio.Transport
-  ( VirtioDevice (..),
-    virtioInit,
-    virtioTeardown,
-    virtioNotify,
-    virtioInterruptStatus,
-    virtioAck,
-    virtioGetStatus,
-    virtioStatusAll,
-    virtioLookup,
-  )
+{- | Virtio-MMIO transport — device-agnostic negotiation + queue + IRQ->Endpoint.
+Lock order: virtioSem distinct from drvSem/nsSem/epSem; never hold virtioSem across nsRegister.
+-}
+module Kernel.Driver.Virtio.Transport (
+  VirtioDevice (..),
+  virtioInit,
+  virtioTeardown,
+  virtioNotify,
+  virtioInterruptStatus,
+  virtioAck,
+  virtioGetStatus,
+  virtioStatusAll,
+  virtioLookup,
+)
 where
 
+import Control.Monad (forM_)
 import Data.Bits ((.&.), (.|.))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -38,14 +40,14 @@ import qualified Kernel.IPC.Nameservice as NS
 import Kernel.IPC.Types (Endpoint)
 
 -- | Device record kept in transport map.
-data VirtioDevice = VirtioDevice
-  { vdSlot :: Int,
-    vdId :: Word32,
-    vdVendor :: Word32,
-    vdStatus :: Word32,
-    vdIntId :: IntId,
-    vdQueue :: Maybe VirtQueue,
-    vdEndpoint :: Maybe Endpoint
+data VirtioDevice = VirtioDevice {
+  vdSlot :: Int
+  , vdId :: Word32
+  , vdVendor :: Word32
+  , vdStatus :: Word32
+  , vdIntId :: IntId
+  , vdQueue :: Maybe VirtQueue
+  , vdEndpoint :: Maybe Endpoint
   }
   deriving (Eq, Show)
 
@@ -156,8 +158,7 @@ virtioInit slot
                                         _ <- c_get_status slot pSt
                                         st <- peek pSt
                                         let st2 = st .|. 0x04
-                                        r <- c_set_status slot st2
-                                        return r
+                                        c_set_status slot st2
                                       if stRes /= 0
                                         then do Dmesg.dmesgLog ("virtio stRes slot " ++ show slot ++ "=" ++ show stRes); freeQueue vq; return (Left (cErrToVirtioError (fromIntegral stRes)))
                                         else do
@@ -198,9 +199,7 @@ virtioTeardown slot
               _ <- NS.nsUnregister ("virtio-slot" ++ show slot)
               IPC.freeEndpoint ep
             Nothing -> return ()
-          case vdQueue dev of
-            Just vq -> freeQueue vq
-            Nothing -> return ()
+          forM_ (vdQueue dev) freeQueue
           _ <- liftIO $ c_set_status slot 0
           Dmesg.dmesgLog ("virtio slot " ++ show slot ++ ": teardown")
           return (Right ())
@@ -238,10 +237,9 @@ virtioGetStatus :: Int -> H (Either VirtioError Word32)
 virtioGetStatus slot
   | not (slotValid slot) = return (Left BadSlot)
   | otherwise = do
-      r <- liftIO $ alloca $ \pSt -> do
+      liftIO $ alloca $ \pSt -> do
         rc <- c_get_status slot pSt
         if rc /= 0 then return (Left (cErrToVirtioError (fromIntegral rc))) else do v <- peek pSt; return (Right v)
-      return r
 
 -- | Lookup device by slot (if initialized).
 virtioLookup :: Int -> H (Maybe VirtioDevice)

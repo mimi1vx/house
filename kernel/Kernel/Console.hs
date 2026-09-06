@@ -1,17 +1,18 @@
-module Kernel.Console
-  ( Console,
-    putString,
-    putStringLn,
-    Kernel.Console.putChar,
-    putChar',
-    clearScreen,
-    moveCursorBackward,
-    clearEOL,
-    syncConsole,
-  )
+module Kernel.Console (
+  Console,
+  putString,
+  putStringLn,
+  Kernel.Console.putChar,
+  putChar',
+  clearScreen,
+  moveCursorBackward,
+  clearEOL,
+  syncConsole,
+)
 where
 
 import H.Concurrency
+
 {-P:
 import Prelude hiding (putChar)
 -}
@@ -50,7 +51,7 @@ putChar' (Console vConsole) attrs char =
 clearScreen :: Console -> H ()
 clearScreen (Console vConsole) =
   withMVar vConsole $ \console ->
-    do writeChan (consoleChan console) $ ClearScreen
+    do writeChan (consoleChan console) ClearScreen
 
 moveCursorBackward :: Console -> Int -> H ()
 moveCursorBackward (Console vConsole) count =

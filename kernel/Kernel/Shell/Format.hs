@@ -1,11 +1,11 @@
 -- | Pure shell formatting helpers shared by HouseA64 and Shell modules.
-module Kernel.Shell.Format
-  ( hexDigit,
-    showHex,
-    showHex64,
-    showFsError,
-    toExecError,
-  )
+module Kernel.Shell.Format (
+  hexDigit,
+  showHex,
+  showHex64,
+  showFsError,
+  toExecError,
+)
 where
 
 import Data.Word (Word64)
@@ -49,7 +49,6 @@ showHex64 w
       | otherwise = go (n `div` 16) ++ [hexDigit (fromIntegral (n `mod` 16))]
 
 showFsError :: FS.FsError -> String
-
 showFsError e = case e of
   FS.ENOENT -> "ENOENT: No such file or directory"
   FS.EEXIST -> "EEXIST: File exists"

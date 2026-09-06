@@ -1,20 +1,21 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-local-binds -Wno-type-defaults -Wno-overlapping-patterns -Wno-unused-top-binds #-}
 
--- | Virtio-console server — Endpoint + Grant, rx0+tx1, IRQ->Endpoint.
--- Lock order: conSem distinct from virtioSem/drvSem/nsSem/epSem; never hold conSem across nsRegister.
-module Kernel.Driver.Virtio.Con.Server
-  ( ConServer (..),
-    conServerInit,
-    conServerTeardown,
-    conWrite,
-    conRead,
-    conWriteBytes,
-    conReadBytes,
-  )
+{- | Virtio-console server — Endpoint + Grant, rx0+tx1, IRQ->Endpoint.
+Lock order: conSem distinct from virtioSem/drvSem/nsSem/epSem; never hold conSem across nsRegister.
+-}
+module Kernel.Driver.Virtio.Con.Server (
+  ConServer (..),
+  conServerInit,
+  conServerTeardown,
+  conWrite,
+  conRead,
+  conWriteBytes,
+  conReadBytes,
+)
 where
 
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.Char (chr)
 import Data.Map.Strict (Map)
@@ -80,7 +81,7 @@ busyDelayUs us = liftIO $ do
   let target = t0 + fromIntegral us * 1000
   let loop = do
         t <- c_uptime_ns
-        if t < target then loop else return ()
+        when (t < target) loop
   loop
 
 wantedMask :: Word64
@@ -298,8 +299,9 @@ serialNote :: ConKind -> String
 serialNote ConConsole = ""
 serialNote (ConSerial p) = " serial ports=" ++ show p
 
--- | Serial control queues (q2/q3). Console yields Nothing; runs before
--- DRIVER_OK next to the port queue setup. Failures free what they took.
+{- | Serial control queues (q2/q3). Console yields Nothing; runs before
+DRIVER_OK next to the port queue setup. Failures free what they took.
+-}
 setupSerialCtrl :: ConKind -> Int -> H (Either ConError (Maybe (VirtQueue, VirtQueue)))
 setupSerialCtrl ConConsole _ = return (Right Nothing)
 setupSerialCtrl (ConSerial _) slot = do
@@ -358,8 +360,9 @@ pokeCtrl p i ev v = do
   poke (p `plusPtr` 6) (fromIntegral v :: Word8)
   poke (p `plusPtr` 7) (fromIntegral (v `shiftR` 8) :: Word8)
 
--- | Wait for the posted control-RX buffer to complete and parse the event
--- as (port id, event). Nothing on timeout, error, or short (< 8 B) reply.
+{- | Wait for the posted control-RX buffer to complete and parse the event
+as (port id, event). Nothing on timeout, error, or short (< 8 B) reply.
+-}
 waitCtrlEvent :: Int -> Word32 -> Ptr Word8 -> Int -> H (Maybe (Int, Int))
 waitCtrlEvent slot rid ptr tries
   | tries <= 0 = return Nothing
@@ -389,10 +392,11 @@ waitCtrlEvent slot rid ptr tries
         Right Nothing -> waitCtrlEvent slot rid ptr (tries - 1)
         Left _ -> return Nothing
 
--- | Serial port discovery: DEVICE_READY, then take the first PORT_ADD id.
--- Port 0 is QEMU's reserved console stub; real virtserialport ids start at 1
--- and live on queues 2*id/2*id+1. The posted buffer is freed on completion;
--- on timeout it is leaked once (never freed while posted) and init fails.
+{- | Serial port discovery: DEVICE_READY, then take the first PORT_ADD id.
+Port 0 is QEMU's reserved console stub; real virtserialport ids start at 1
+and live on queues 2*id/2*id+1. The posted buffer is freed on completion;
+on timeout it is leaked once (never freed while posted) and init fails.
+-}
 discoverPort :: Int -> H (Either ConError Int)
 discoverPort slot = do
   mgRx <- G.grantAlloc
@@ -427,8 +431,9 @@ discoverPort slot = do
                         Just _ -> do G.grantFree gRx; return (Left (ConIoError 97))
                         Nothing -> return (Left (ConIoError 97))
 
--- | Serial port open: PORT_READY then PORT_OPEN for a discovered id.
--- QEMU marks guest_connected on OPEN, which unblocks both directions.
+{- | Serial port open: PORT_READY then PORT_OPEN for a discovered id.
+QEMU marks guest_connected on OPEN, which unblocks both directions.
+-}
 openPort :: Int -> Int -> H (Either ConError ())
 openPort slot pid = do
   mg <- G.grantAlloc
@@ -459,9 +464,10 @@ openPort slot pid = do
 
 -- Allocates, flushes, and QueueReady-marks both queues. Cleans up on failure.
 
--- | Port queue pair setup for explicit transport indices (console 0/1,
--- serial port 0 on 0/1, port N>=1 on 2*N+2/2*N+3).
--- Allocates, flushes, and QueueReady-marks both queues. Cleans up on failure.
+{- | Port queue pair setup for explicit transport indices (console 0/1,
+serial port 0 on 0/1, port N>=1 on 2*N+2/2*N+3).
+Allocates, flushes, and QueueReady-marks both queues. Cleans up on failure.
+-}
 setupPortQueues :: Int -> Int -> Int -> H (Either ConError (VirtQueue, VirtQueue, Word32, Word32))
 setupPortQueues slot rxQ txQ
   | not (slotValid slot) = return (Left ConBadSlot)
@@ -500,8 +506,9 @@ setupPortQueues slot rxQ txQ
                             else return (Right (vqRx, vqTx, qsizeRx, qsizeTx))
         _ -> return (Left (ConIoError 5))
 
--- | Attach a live device: IRQ, endpoint, registry, RX replenish. Shared by
--- the console and serial init paths.
+{- | Attach a live device: IRQ, endpoint, registry, RX replenish. Shared by
+the console and serial init paths.
+-}
 attachDevice :: Int -> ConKind -> VirtQueue -> VirtQueue -> Maybe (VirtQueue, VirtQueue) -> H (Either ConError ConDevice)
 attachDevice slot kind vqRx vqTx mCtrl = do
   DGIC.enableSpi (fromIntegral (16 + slot))

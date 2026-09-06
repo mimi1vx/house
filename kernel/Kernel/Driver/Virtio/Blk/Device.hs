@@ -1,13 +1,13 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 -- | Low-level per-slot helpers over C FFI. Validates slot/device_id, maps errors.
-module Kernel.Driver.Virtio.Blk.Device
-  ( blkProbeCapacity,
-    blkSubmitRead,
-    blkSubmitWrite,
-    blkPollUsed,
-    blkGetCapacitySectors,
-  )
+module Kernel.Driver.Virtio.Blk.Device (
+  blkProbeCapacity,
+  blkSubmitRead,
+  blkSubmitWrite,
+  blkPollUsed,
+  blkGetCapacitySectors,
+)
 where
 
 import Data.Word (Word32, Word64, Word8)

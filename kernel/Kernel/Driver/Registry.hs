@@ -1,12 +1,13 @@
--- | Driver registry wrapping 'Kernel.IPC.Nameservice'.
--- Lock order: @drvSem@ outermost, @nsSem@ inner — never invert.
--- Endpoint table's @endpointSem@ only around queue splice, never across registry calls.
-module Kernel.Driver.Registry
-  ( registerDriver,
-    unregisterDriver,
-    lookupDriver,
-    listDrivers,
-  )
+{- | Driver registry wrapping 'Kernel.IPC.Nameservice'.
+Lock order: @drvSem@ outermost, @nsSem@ inner — never invert.
+Endpoint table's @endpointSem@ only around queue splice, never across registry calls.
+-}
+module Kernel.Driver.Registry (
+  registerDriver,
+  unregisterDriver,
+  lookupDriver,
+  listDrivers,
+)
 where
 
 import Data.Map.Strict (Map)
@@ -37,13 +38,14 @@ validDriverName s
   | '/' `elem` s = Left (InvalidName "name contains '/'")
   | otherwise = Right ()
 
--- | Register a driver: insert into 'drvMap' then 'nsRegister'. On 'NameExists'
--- roll back the 'drvMap' insert. Lock order @drvSem@ outermost, @nsSem@ inner:
--- validation runs outside sems, then @drvSem@ is held across 'nsRegister'
--- (which takes @nsSem@) to keep @drvMap@ and @nsMap@ consistent.
--- Note: 'NS.nsRegister' handles the global uniqueness check under @nsSem@;
--- we hold @drvSem@ across the call to keep @drvMap@ and @nsMap@ consistent
--- without inverting lock order — caller never holds @epSem@ here.
+{- | Register a driver: insert into 'drvMap' then 'nsRegister'. On 'NameExists'
+roll back the 'drvMap' insert. Lock order @drvSem@ outermost, @nsSem@ inner:
+validation runs outside sems, then @drvSem@ is held across 'nsRegister'
+(which takes @nsSem@) to keep @drvMap@ and @nsMap@ consistent.
+Note: 'NS.nsRegister' handles the global uniqueness check under @nsSem@;
+we hold @drvSem@ across the call to keep @drvMap@ and @nsMap@ consistent
+without inverting lock order — caller never holds @epSem@ here.
+-}
 registerDriver :: String -> Endpoint -> Maybe IntId -> DriverKind -> H (Either DriverError ())
 registerDriver name ep mIntId kind = case validDriverName name of
   Left e -> return (Left e)

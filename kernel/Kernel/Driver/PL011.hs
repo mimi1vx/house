@@ -1,12 +1,14 @@
-module Kernel.Driver.PL011
-  ( launchConsoleDriver,
-    launchPL011KeyboardDriver,
-  )
+{-# LANGUAGE GHC2024 #-}
+
+module Kernel.Driver.PL011 (
+  launchConsoleDriver,
+  launchPL011KeyboardDriver,
+)
 where
 
+import Control.Concurrent qualified as C
 import Data.Char (chr)
 import Data.Set qualified as Set
-import qualified Control.Concurrent as C
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CChar (..), CInt (..))
 import H.Concurrency
@@ -29,10 +31,10 @@ launchConsoleDriver = do
   chan <- newChan
   vConsole <-
     newMVar
-      ConsoleData
-        { consoleChan = chan,
-          consoleHeight = 25,
-          consoleWidth = 80
+      ConsoleData {
+        consoleChan = chan
+        , consoleHeight = 25
+        , consoleWidth = 80
         }
   _ <- forkH $ consumer chan
   return (Console vConsole)
@@ -54,10 +56,11 @@ launchConsoleDriver = do
     dispatch ClearEOL = cPutStr "\ESC[K"
     dispatch (Sync ack) = C.putMVar ack ()
 
--- | PL011 RX → KeyPress producer. Polls the UART non-blocking register
--- with a 10 ms threadDelay so the single-capability RTS can still service
--- the GIC dispatcher and ticker. Each received byte is mapped to a minimal
--- KeyPress (Set.empty modifiers) sufficient for LineEditor.
+{- | PL011 RX → KeyPress producer. Polls the UART non-blocking register
+with a 10 ms threadDelay so the single-capability RTS can still service
+the GIC dispatcher and ticker. Each received byte is mapped to a minimal
+KeyPress (Set.empty modifiers) sufficient for LineEditor.
+-}
 launchPL011KeyboardDriver :: H (Chan KeyPress)
 launchPL011KeyboardDriver = do
   chan <- newChan

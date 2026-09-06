@@ -1,31 +1,32 @@
 -- | Ad-hoc memory access, not necessarily safe!
-module H.AdHocMem
-  ( module H.AdHocMem,
-    H,
-    IO.Storable,
-    Ptr,
-    nullPtr,
-    plusPtr,
-    minusPtr,
-    alignPtr,
-    advancePtr,
-    castPtr,
-    Word32,
-    Word64,
-  )
+module H.AdHocMem (
+  module H.AdHocMem,
+  H,
+  IO.Storable,
+  Ptr,
+  nullPtr,
+  plusPtr,
+  minusPtr,
+  alignPtr,
+  advancePtr,
+  castPtr,
+  Word32,
+  Word64,
+)
 where
 
 import Data.Array.IArray (IArray, assocs, bounds)
 import Data.Array.IO (IOUArray, MArray, freeze, newArray_, writeArray)
+
 -- For SPECIALIZE pragma:
 import Data.Array.Unboxed (UArray)
 import Data.Ix (Ix, index, range)
-import Data.Word
-  ( Word16,
-    Word32,
-    Word64,
-    Word8,
-  )
+import Data.Word (
+  Word16,
+  Word32,
+  Word64,
+  Word8,
+ )
 import Foreign.Marshal (advancePtr)
 import qualified Foreign.Marshal as IO (allocaArray, copyArray, moveBytes, withArray)
 import qualified Foreign.Marshal.Alloc as IO (free, mallocBytes)

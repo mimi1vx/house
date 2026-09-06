@@ -1,9 +1,10 @@
--- | PL011 driver as IPC server demo.
--- Demonstrates drivers-as-servers pattern that driver-framework will generalize.
--- Original Kernel.Driver.PL011 stays intact for comparison.
-module Kernel.Driver.PL011Server
-  ( launchPL011Server,
-  )
+{- | PL011 driver as IPC server demo.
+Demonstrates drivers-as-servers pattern that driver-framework will generalize.
+Original Kernel.Driver.PL011 stays intact for comparison.
+-}
+module Kernel.Driver.PL011Server (
+  launchPL011Server,
+)
 where
 
 import Foreign.C.Types (CChar (..))
@@ -15,9 +16,10 @@ import Kernel.IPC.Types (IpcError, Message (..))
 
 foreign import ccall unsafe "uart_putc" c_uart_putc :: CChar -> IO ()
 
--- | Launch PL011 server: new endpoint, register "pl011", loop on recv.
--- Tag 0: putc each msgWords word (truncated to CChar); tag 1: grant echo; else error reply.
--- Lock order: 'newEndpoint' releases @endpointSem@ before 'nsRegister' takes @nsSem@ (sequential, never nested).
+{- | Launch PL011 server: new endpoint, register "pl011", loop on recv.
+Tag 0: putc each msgWords word (truncated to CChar); tag 1: grant echo; else error reply.
+Lock order: 'newEndpoint' releases @endpointSem@ before 'nsRegister' takes @nsSem@ (sequential, never nested).
+-}
 launchPL011Server :: H (Either IpcError ())
 launchPL011Server = do
   ep <- newEndpoint
@@ -32,7 +34,7 @@ launchPL011Server = do
       (msg, rv) <- recv ep
       case msgTag msg of
         0 -> do
-          liftIO $ mapM_ (\w -> c_uart_putc (fromIntegral w)) (msgWords msg)
+          liftIO $ mapM_ (c_uart_putc . fromIntegral) (msgWords msg)
           reply rv (Right (Message 0 [] Nothing))
         1 -> do
           -- grant echo: return grant as-is

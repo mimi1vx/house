@@ -1,0 +1,24 @@
+# House HLint policy: the full tree must be hint-clean (`hlint` exit 0).
+# Entries below suppress only load-bearing names and intentional semantics;
+# everything else is fixed at the source. Each entry carries its reason.
+#
+# FFI/ABI surface: foreign exports and C/POSIX mirrors must keep their
+# C-side spellings (callers are Rust/boot/C, not Haskell).
+- ignore: {name: Use camelCase, within: house_main}
+- ignore: {name: Use camelCase, within: house_spike_main}
+- ignore: {name: Use camelCase, within: house_irqcheck_main}
+- ignore: {name: Use camelCase, within: c_uart_puts}
+- ignore: {name: Use camelCase, within: o_RDONLY}
+- ignore: {name: Use camelCase, within: o_WRONLY}
+- ignore: {name: Use camelCase, within: o_RDWR}
+- ignore: {name: Use camelCase, within: o_CREAT}
+- ignore: {name: Use camelCase, within: o_TRUNC}
+- ignore: {name: Use camelCase, within: seek_SET}
+- ignore: {name: Use camelCase, within: seek_CUR}
+- ignore: {name: Use camelCase, within: seek_END}
+# Wire-format parsers are intentionally ASCII-only: Data.Char.isDigit
+# accepts Unicode Nd digits, which would widen hostile-input grammars.
+- ignore: {name: Use isDigit}
+# Single-field data -> newtype is a representation change with no unit
+# coverage on these modules; revisit alongside tests, not in a reformat.
+- ignore: {name: Use newtype instead of data}

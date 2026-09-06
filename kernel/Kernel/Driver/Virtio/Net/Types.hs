@@ -1,31 +1,30 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-
--- | Virtio-net types — MAC, IPv4, errors, device record.
--- Strictness: MAC/IPv4 are strict Word8 tuples; NetDevice fields strict.
--- Exceptions: all validation returns Either, no partial head/fromJust/!!.
--- Bounds: slot 0..7, MTU 1500, maxPacketBytes 2048 fits Grant page.
-module Kernel.Driver.Virtio.Net.Types
-  ( NetError (..),
-    netErrorToString,
-    Mac (..),
-    showMac,
-    macBroadcast,
-    macToWords,
-    Ipv4 (..),
-    showIpv4,
-    ipv4ToWord32,
-    word32ToIpv4,
-    validateIpv4,
-    isBroadcast,
-    NetDevice (..),
-    virtioNetHdrSize,
-    ethHeaderLen,
-    ipv4HeaderLen,
-    udpHeaderLen,
-    mtu,
-    maxPacketBytes,
-    arpEntryValid,
-  )
+{- | Virtio-net types — MAC, IPv4, errors, device record.
+Strictness: MAC/IPv4 are strict Word8 tuples; NetDevice fields strict.
+Exceptions: all validation returns Either, no partial head/fromJust/!!.
+Bounds: slot 0..7, MTU 1500, maxPacketBytes 2048 fits Grant page.
+-}
+module Kernel.Driver.Virtio.Net.Types (
+  NetError (..),
+  netErrorToString,
+  Mac (..),
+  showMac,
+  macBroadcast,
+  macToWords,
+  Ipv4 (..),
+  showIpv4,
+  ipv4ToWord32,
+  word32ToIpv4,
+  validateIpv4,
+  isBroadcast,
+  NetDevice (..),
+  virtioNetHdrSize,
+  ethHeaderLen,
+  ipv4HeaderLen,
+  udpHeaderLen,
+  mtu,
+  maxPacketBytes,
+  arpEntryValid,
+)
 where
 
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
@@ -123,16 +122,16 @@ isBroadcast (Ipv4 255 255 255 255) = True
 isBroadcast _ = False
 
 -- | Virtio-net device record.
-data NetDevice = NetDevice
-  { netSlot :: Int,
-    netMac :: Mac,
-    netIp :: Maybe Ipv4,
-    netGw :: Ipv4,
-    netMask :: Ipv4,
-    netIntId :: IntId,
-    netEndpoint :: Endpoint,
-    netRxQueue :: VirtQueue,
-    netTxQueue :: VirtQueue
+data NetDevice = NetDevice {
+  netSlot :: Int
+  , netMac :: Mac
+  , netIp :: Maybe Ipv4
+  , netGw :: Ipv4
+  , netMask :: Ipv4
+  , netIntId :: IntId
+  , netEndpoint :: Endpoint
+  , netRxQueue :: VirtQueue
+  , netTxQueue :: VirtQueue
   }
   deriving (Eq, Show)
 

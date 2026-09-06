@@ -1,19 +1,20 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
--- | Low-level per-slot helpers over C FFI for virtio-console (ID 3).
--- Validates slot 0..7 and maps C errors to ConError.
-module Kernel.Driver.Virtio.Con.Device
-  ( conProbe,
-    conSubmitRx,
-    conSubmitTx,
-    conPollUsed,
-    conInvalidate,
-    conSaveQueues,
-    conSaveCtrlQueues,
-    conSetPortQueues,
-    conSubmitCtrlRx,
-    conSubmitCtrlTx,
-  )
+{- | Low-level per-slot helpers over C FFI for virtio-console (ID 3).
+Validates slot 0..7 and maps C errors to ConError.
+-}
+module Kernel.Driver.Virtio.Con.Device (
+  conProbe,
+  conSubmitRx,
+  conSubmitTx,
+  conPollUsed,
+  conInvalidate,
+  conSaveQueues,
+  conSaveCtrlQueues,
+  conSetPortQueues,
+  conSubmitCtrlRx,
+  conSubmitCtrlTx,
+)
 where
 
 import Data.Word (Word32, Word64, Word8)
@@ -64,13 +65,14 @@ cErrToConError n = case n of
 slotValid :: Int -> Bool
 slotValid n = n >= 0 && n < 8
 
--- | Probe slot for virtio-console. device_id 3 is the serial bus in both
--- cases: a pure 2-queue console (cols/rows config only) yields ConConsole,
--- while a multiport bus (max_nr_ports readable, control queues q2/q3)
--- yields ConSerial — this covers virtconsole and virtserialport ports alike,
--- since virtserialport data needs the control handshake to flow.
--- device_id 11 (rproc-serial) reports ConSerial when its config carries a
--- sane port count; any other id yields ConNotCon.
+{- | Probe slot for virtio-console. device_id 3 is the serial bus in both
+cases: a pure 2-queue console (cols/rows config only) yields ConConsole,
+while a multiport bus (max_nr_ports readable, control queues q2/q3)
+yields ConSerial — this covers virtconsole and virtserialport ports alike,
+since virtserialport data needs the control handshake to flow.
+device_id 11 (rproc-serial) reports ConSerial when its config carries a
+sane port count; any other id yields ConNotCon.
+-}
 conProbe :: Int -> H (Either ConError ConKind)
 conProbe slot
   | not (slotValid slot) = return (Left ConBadSlot)
@@ -122,8 +124,9 @@ conSubmitTx slot dataPtr dataLen
         then return (Left (cErrToConError (fromIntegral r)))
         else do v <- peek pReq; return (Right v)
 
--- | Poll used ring for qidx 0 (rx), 1 (tx), 2 (ctrl-rx), 3 (ctrl-tx).
--- Returns Nothing if no completion.
+{- | Poll used ring for qidx 0 (rx), 1 (tx), 2 (ctrl-rx), 3 (ctrl-tx).
+Returns Nothing if no completion.
+-}
 conPollUsed :: Int -> Int -> H (Either ConError (Maybe (Word32, Word32)))
 conPollUsed slot qidx
   | not (slotValid slot) = return (Left ConBadSlot)
@@ -177,9 +180,10 @@ conSubmitCtrlTx slot dataPtr dataLen
         then return (Left (cErrToConError (fromIntegral r)))
         else do v <- peek pReq; return (Right v)
 
--- | Map the port queue pair (transport indices) used by port RX/TX submits.
--- Console default is 0/1; serial sets the discovered port pair
--- (0/1 for id 0, else 2*id+2/2*id+3) after PORT_ADD discovery.
+{- | Map the port queue pair (transport indices) used by port RX/TX submits.
+Console default is 0/1; serial sets the discovered port pair
+(0/1 for id 0, else 2*id+2/2*id+3) after PORT_ADD discovery.
+-}
 conSetPortQueues :: Int -> Word32 -> Word32 -> H (Either ConError ())
 conSetPortQueues slot rxQ txQ
   | not (slotValid slot) = return (Left ConBadSlot)

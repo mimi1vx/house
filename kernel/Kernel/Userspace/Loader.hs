@@ -1,6 +1,6 @@
 {-# LANGUAGE GHC2024 #-}
 
-{-|
+{- |
 Module      : Kernel.Userspace.Loader
 Description : Pure ELF64 aarch64 parser with caps (untrusted input).
 Stability   : experimental
@@ -10,15 +10,15 @@ Validates e_ident, e_machine=183, e_type=2, phnum<=8, each PT_LOAD segment
 p_vaddr in window, p_filesz<=p_memsz, p_memsz<=256K, total pages<=64,
 overflow guards, no partial functions.
 -}
-module Kernel.Userspace.Loader
-  ( LoadError (..),
-    Segment (..),
-    Elf (..),
-    loadElf,
-    loadErrorToString,
-    maxElfBytes,
-    maxPhnum,
-  )
+module Kernel.Userspace.Loader (
+  LoadError (..),
+  Segment (..),
+  Elf (..),
+  loadElf,
+  loadErrorToString,
+  maxElfBytes,
+  maxPhnum,
+)
 where
 
 import Data.Bits (Bits (shiftL), (.&.), (.|.))
@@ -56,19 +56,19 @@ data LoadError
   | Truncated
   deriving (Eq, Show)
 
-data Segment = Segment
-  { segVaddr :: Word64,
-    segFileOff :: Int,
-    segFileSz :: Int,
-    segMemSz :: Int,
-    segFlags :: Word32
+data Segment = Segment {
+  segVaddr :: Word64
+  , segFileOff :: Int
+  , segFileSz :: Int
+  , segMemSz :: Int
+  , segFlags :: Word32
   }
   deriving (Eq, Show)
 
-data Elf = Elf
-  { elfEntry :: Word64,
-    elfSegs :: [Segment],
-    elfBytes :: [Word8]
+data Elf = Elf {
+  elfEntry :: Word64
+  , elfSegs :: [Segment]
+  , elfBytes :: [Word8]
   }
   deriving (Eq, Show)
 
@@ -230,7 +230,8 @@ validateSegments segs bytes entry =
       if off < 0 || fsz < 0 then Left OverlapSize else Right ()
       if off > len then Left OverlapSize else Right ()
       if fsz > len - off then Left OverlapSize else Right ()
-      if va .&. 4095 /= 0 && (off `mod` 4096) /= 0 then Right () else Right () -- allow any page offset? already checked align
+
+-- allow any page offset (alignment already checked above)
 
 -- helpers: total, bounds-checked LE reads
 getWord16LE :: [Word8] -> Int -> Either LoadError Word64
@@ -279,8 +280,9 @@ getWord64LE bs off
           w7 = fromIntegral b7 :: Word64
       Right (w0 .|. (w1 `shiftL` 8) .|. (w2 `shiftL` 16) .|. (w3 `shiftL` 24) .|. (w4 `shiftL` 32) .|. (w5 `shiftL` 40) .|. (w6 `shiftL` 48) .|. (w7 `shiftL` 56))
 
--- | Total index; Left Truncated on out-of-range (callers pre-check bounds,
--- so Left is unreachable in practice but typed, never ErrorCall).
+{- | Total index; Left Truncated on out-of-range (callers pre-check bounds,
+so Left is unreachable in practice but typed, never ErrorCall).
+-}
 index :: [Word8] -> Int -> Either LoadError Word8
 index = go
   where

@@ -1,37 +1,39 @@
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 
--- | Pure packet encode/decode — ARP, IPv4, UDP, DHCP, ICMP checksum.
--- No FFI, total parsers returning Either NetError. Tested via ghci round-trip.
-module Kernel.Driver.Virtio.Net.Stack
-  ( ArpPacket (..),
-    Ipv4Packet (..),
-    UdpPacket (..),
-    DhcpMsg (..),
-    DnsResponse (..),
-    encodeEthernet,
-    decodeEthernet,
-    encodeArp,
-    decodeArp,
-    encodeIpv4,
-    decodeIpv4,
-    encodeUdp,
-    decodeUdp,
-    encodeIcmpEcho,
-    decodeIcmpEcho,
-    encodeDhcpDiscover,
-    encodeDhcpRequest,
-    decodeDhcp,
-    encodeDnsQuery,
-    decodeDnsResponse,
-    validateDnsName,
-    ipv4Checksum,
-    udpChecksum,
-    macBroadcast,
-    arpTableLookup,
-  )
+{- | Pure packet encode/decode — ARP, IPv4, UDP, DHCP, ICMP checksum.
+No FFI, total parsers returning Either NetError. Tested via ghci round-trip.
+-}
+module Kernel.Driver.Virtio.Net.Stack (
+  ArpPacket (..),
+  Ipv4Packet (..),
+  UdpPacket (..),
+  DhcpMsg (..),
+  DnsResponse (..),
+  encodeEthernet,
+  decodeEthernet,
+  encodeArp,
+  decodeArp,
+  encodeIpv4,
+  decodeIpv4,
+  encodeUdp,
+  decodeUdp,
+  encodeIcmpEcho,
+  decodeIcmpEcho,
+  encodeDhcpDiscover,
+  encodeDhcpRequest,
+  decodeDhcp,
+  encodeDnsQuery,
+  decodeDnsResponse,
+  validateDnsName,
+  ipv4Checksum,
+  udpChecksum,
+  macBroadcast,
+  arpTableLookup,
+)
 where
 
 import Data.Bits (shiftL, shiftR, xor, (.&.), (.|.))
+import Data.Char (isAsciiLower, isAsciiUpper)
 import Data.List (foldl')
 import Data.Word (Word16, Word32, Word8)
 import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetError (..), macBroadcast, showIpv4, showMac)
@@ -47,40 +49,40 @@ safeIndex xs i
     go (_ : ys) n = go ys (n - 1)
 
 -- | ARP packet.
-data ArpPacket = ArpPacket
-  { arpOp :: Word16,
-    arpSenderMac :: Mac,
-    arpSenderIp :: Ipv4,
-    arpTargetMac :: Mac,
-    arpTargetIp :: Ipv4
+data ArpPacket = ArpPacket {
+  arpOp :: Word16
+  , arpSenderMac :: Mac
+  , arpSenderIp :: Ipv4
+  , arpTargetMac :: Mac
+  , arpTargetIp :: Ipv4
   }
   deriving (Eq, Show)
 
 -- | IPv4 packet (without ethernet).
-data Ipv4Packet = Ipv4Packet
-  { ipv4Src :: Ipv4,
-    ipv4Dst :: Ipv4,
-    ipv4Proto :: Word8,
-    ipv4Ttl :: Word8,
-    ipv4Payload :: [Word8]
+data Ipv4Packet = Ipv4Packet {
+  ipv4Src :: Ipv4
+  , ipv4Dst :: Ipv4
+  , ipv4Proto :: Word8
+  , ipv4Ttl :: Word8
+  , ipv4Payload :: [Word8]
   }
   deriving (Eq, Show)
 
 -- | UDP packet.
-data UdpPacket = UdpPacket
-  { udpSrcPort :: Word16,
-    udpDstPort :: Word16,
-    udpPayload :: [Word8]
+data UdpPacket = UdpPacket {
+  udpSrcPort :: Word16
+  , udpDstPort :: Word16
+  , udpPayload :: [Word8]
   }
   deriving (Eq, Show)
 
 -- | DHCP message (minimal).
-data DhcpMsg = DhcpMsg
-  { dhcpXid :: Word32,
-    dhcpYiaddr :: Ipv4,
-    dhcpSiaddr :: Ipv4,
-    dhcpMsgType :: Word8,
-    dhcpServerId :: Maybe Ipv4
+data DhcpMsg = DhcpMsg {
+  dhcpXid :: Word32
+  , dhcpYiaddr :: Ipv4
+  , dhcpSiaddr :: Ipv4
+  , dhcpMsgType :: Word8
+  , dhcpServerId :: Maybe Ipv4
   }
   deriving (Eq, Show)
 
@@ -200,9 +202,10 @@ encodeIpv4 src dst proto payload =
     word16be w = [fromIntegral (w `shiftR` 8), fromIntegral w]
     ipv4ToList (Ipv4 a b c d) = [a, b, c, d]
 
--- | Decode IPv4. Returns packet or error.
--- Bounds: IHL>=5, hdrLen=IHL*4 <= frame, hdrLen <= totalLen <= frame;
--- trailing Ethernet padding beyond totalLen is ignored.
+{- | Decode IPv4. Returns packet or error.
+Bounds: IHL>=5, hdrLen=IHL*4 <= frame, hdrLen <= totalLen <= frame;
+trailing Ethernet padding beyond totalLen is ignored.
+-}
 decodeIpv4 :: [Word8] -> Either NetError Ipv4Packet
 decodeIpv4 bytes
   | length bytes < 20 = Left (NetInvalidArg "ipv4 short")
@@ -232,14 +235,11 @@ decodeIpv4 bytes
           if hdrLen > length bytes
             then Left (NetInvalidArg "ipv4 hlen")
             else
-              if totalLen < hdrLen || totalLen < 20
+              if totalLen < hdrLen || totalLen < 20 || length bytes < totalLen
                 then Left (NetInvalidArg "ipv4 len")
                 else
-                  if length bytes < totalLen
-                    then Left (NetInvalidArg "ipv4 len")
-                    else
-                      let payload = take (totalLen - hdrLen) (drop hdrLen bytes)
-                       in Right (Ipv4Packet src dst proto ttl payload)
+                  let payload = take (totalLen - hdrLen) (drop hdrLen bytes)
+                   in Right (Ipv4Packet src dst proto ttl payload)
   where
     at i = maybe (Left (NetInvalidArg "ipv4 trunc")) Right (safeIndex bytes i)
 
@@ -359,9 +359,10 @@ encodeDhcp msgType xid mac mReq mServer =
 arpTableLookup :: Ipv4 -> [(Ipv4, Mac)] -> Maybe Mac
 arpTableLookup ip tbl = lookup ip (take 32 tbl)
 
--- | Decode minimal DHCP BOOTREPLY. Total; options TLV walk bounded by packet length.
--- Cursor is (offset, remaining): each step consumes >=1 byte, TLV needs
--- 2+len <= remaining (checked_add style); truncated headers/values reject.
+{- | Decode minimal DHCP BOOTREPLY. Total; options TLV walk bounded by packet length.
+Cursor is (offset, remaining): each step consumes >=1 byte, TLV needs
+2+len <= remaining (checked_add style); truncated headers/values reject.
+-}
 decodeDhcp :: [Word8] -> Either NetError DhcpMsg
 decodeDhcp bytes
   | length bytes < 240 = Left (NetInvalidArg "dhcp short")
@@ -425,14 +426,15 @@ decodeDhcp bytes
 -- with a depth bound (≤8) so a hostile loop can only yield Left.
 
 -- | Decoded DNS A answer with the query xid it belongs to.
-data DnsResponse = DnsResponse
-  { dnsXid :: Word16,
-    dnsA :: Ipv4
+data DnsResponse = DnsResponse {
+  dnsXid :: Word16
+  , dnsA :: Ipv4
   }
   deriving (Eq, Show)
 
--- | Validate a dotted name into labels. Total: rejects empty names,
--- empty labels, labels >63, total >253, and non [0-9A-Za-z-] bytes.
+{- | Validate a dotted name into labels. Total: rejects empty names,
+empty labels, labels >63, total >253, and non [0-9A-Za-z-] bytes.
+-}
 validateDnsName :: String -> Either NetError [String]
 validateDnsName s
   | null s = Left (NetInvalidArg "dns empty")
@@ -455,27 +457,28 @@ validateDnsName s
       | length lbl > 63 = Left (NetInvalidArg "dns label too long")
       | all dnsChar lbl = Right lbl
       | otherwise = Left (NetInvalidArg "dns bad char")
-    dnsChar c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-'
+    dnsChar c = (c >= '0' && c <= '9') || isAsciiLower c || isAsciiUpper c || c == '-'
 
--- | Encode an A-record query (RD set, QD=1). Label bytes are the raw
--- ASCII codes (validateDnsName already restricted the alphabet).
+{- | Encode an A-record query (RD set, QD=1). Label bytes are the raw
+ASCII codes (validateDnsName already restricted the alphabet).
+-}
 encodeDnsQuery :: Word16 -> String -> Either NetError [Word8]
 encodeDnsQuery xid name = do
   labels <- validateDnsName name
   let qname = concatMap (\l -> fromIntegral (length l) : map (fromIntegral . fromEnum) l) labels ++ [0]
       hdr =
-        [ fromIntegral (xid `shiftR` 8),
-          fromIntegral xid,
-          0x01,
-          0x00, -- RD
-          0x00,
-          0x01, -- QDCOUNT=1
-          0x00,
-          0x00, -- ANCOUNT=0
-          0x00,
-          0x00, -- NSCOUNT=0
-          0x00,
-          0x00 -- ARCOUNT=0
+        [ fromIntegral (xid `shiftR` 8)
+        , fromIntegral xid
+        , 0x01
+        , 0x00 -- RD
+        , 0x00
+        , 0x01 -- QDCOUNT=1
+        , 0x00
+        , 0x00 -- ANCOUNT=0
+        , 0x00
+        , 0x00 -- NSCOUNT=0
+        , 0x00
+        , 0x00 -- ARCOUNT=0
         ]
       question = qname ++ [0x00, 0x01, 0x00, 0x01] -- QTYPE=A, QCLASS=IN
       pkt = hdr ++ question
@@ -483,9 +486,10 @@ encodeDnsQuery xid name = do
     then Left (NetInvalidArg "dns query too long")
     else Right pkt
 
--- | Decode a DNS response, returning the xid and the first A-record RDATA.
--- Requires QR=1, RCODE=0, QD≥1, AN≥1; the question is skipped (pointers
--- allowed) and only the first answer is parsed (TYPE=A, CLASS=IN, RDLEN=4).
+{- | Decode a DNS response, returning the xid and the first A-record RDATA.
+Requires QR=1, RCODE=0, QD≥1, AN≥1; the question is skipped (pointers
+allowed) and only the first answer is parsed (TYPE=A, CLASS=IN, RDLEN=4).
+-}
 decodeDnsResponse :: [Word8] -> Either NetError DnsResponse
 decodeDnsResponse bytes
   | length bytes < 12 = Left (NetInvalidArg "dns short")

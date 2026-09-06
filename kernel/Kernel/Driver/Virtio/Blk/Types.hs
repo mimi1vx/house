@@ -1,18 +1,17 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-
--- | Virtio-blk types — 4K blocks, wire 512B sectors (Q2=B).
--- Strictness: capacity and LBA are strict Word64, counts strict Word32.
--- Exceptions: all validation returns Either, no partial head/fromJust/!!.
--- Bounds: slot 0..7, block count 1 per Grant page, LBA *8 <= capacity.
-module Kernel.Driver.Virtio.Blk.Types
-  ( BlkError (..),
-    blkErrorToString,
-    blockBytes,
-    sectorBytes,
-    sectorsPerBlock,
-    maxBlocksPerGrant,
-    validateLba,
-  )
+{- | Virtio-blk types — 4K blocks, wire 512B sectors (Q2=B).
+Strictness: capacity and LBA are strict Word64, counts strict Word32.
+Exceptions: all validation returns Either, no partial head/fromJust/!!.
+Bounds: slot 0..7, block count 1 per Grant page, LBA *8 <= capacity.
+-}
+module Kernel.Driver.Virtio.Blk.Types (
+  BlkError (..),
+  blkErrorToString,
+  blockBytes,
+  sectorBytes,
+  sectorsPerBlock,
+  maxBlocksPerGrant,
+  validateLba,
+)
 where
 
 import Data.Word (Word32, Word64)
@@ -51,9 +50,10 @@ sectorsPerBlock = 8
 maxBlocksPerGrant :: Word32
 maxBlocksPerGrant = 1
 
--- | Validate LBA (in 4K blocks) + count (blocks) against capacity (sectors).
--- Returns unit on success. Arithmetic runs in Integer so a wrapping
--- Word64 LBA cannot alias into range (hostile capacity/LBA bytes).
+{- | Validate LBA (in 4K blocks) + count (blocks) against capacity (sectors).
+Returns unit on success. Arithmetic runs in Integer so a wrapping
+Word64 LBA cannot alias into range (hostile capacity/LBA bytes).
+-}
 validateLba :: Word64 -> Word32 -> Word64 -> Either BlkError ()
 validateLba lba count capSectors
   | count == 0 = Left (BlkInvalidArg "count 0")

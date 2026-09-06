@@ -1,20 +1,20 @@
 {-# LANGUAGE GHC2024 #-}
 
-{-|
+{- |
 Module      : Kernel.Userspace.Types
 Description : Process bookkeeping for EL0 loader.
 Stability   : experimental
 
 Lock order: ... -> netSem -> userSem -> epSem . Never hold userSem across takeMVar or init_page_dir.
 -}
-module Kernel.Userspace.Types
-  ( Pid (..),
-    Process (..),
-    pidNext,
-    procMap,
-    userSem,
-    processExitVar,
-  )
+module Kernel.Userspace.Types (
+  Pid (..),
+  Process (..),
+  pidNext,
+  procMap,
+  userSem,
+  processExitVar,
+)
 where
 
 import Data.Map.Strict (Map)
@@ -28,11 +28,11 @@ import H.VirtualMemory (PageMap, VAddr)
 newtype Pid = Pid Int
   deriving (Eq, Ord, Show)
 
-data Process = Process
-  { procPid :: Pid,
-    procPdir :: PageMap,
-    procEntry :: VAddr,
-    procBrk :: VAddr
+data Process = Process {
+  procPid :: Pid
+  , procPdir :: PageMap
+  , procEntry :: VAddr
+  , procBrk :: VAddr
   }
   deriving (Eq, Show)
 

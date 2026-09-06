@@ -1,27 +1,29 @@
+{-# LANGUAGE GHC2024 #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-local-binds -Wno-type-defaults -Wno-overlapping-patterns -Wno-unused-top-binds #-}
 
--- | Virtio-net server — Endpoint + Grant, rx0+tx1, ARP/IPv4/UDP, IRQ->Endpoint.
--- Lock order: netSem distinct from virtioSem/drvSem/nsSem/epSem; never hold netSem across nsRegister.
-module Kernel.Driver.Virtio.Net.Server
-  ( NetServer (..),
-    netServerInit,
-    netServerTeardown,
-    netPing,
-    netUdpSend,
-    netDhcp,
-    netDns,
-    netArpLs,
-    netIfConfig,
-    netGetMac,
-  )
+{- | Virtio-net server — Endpoint + Grant, rx0+tx1, ARP/IPv4/UDP, IRQ->Endpoint.
+Lock order: netSem distinct from virtioSem/drvSem/nsSem/epSem; never hold netSem across nsRegister.
+-}
+module Kernel.Driver.Virtio.Net.Server (
+  NetServer (..),
+  netServerInit,
+  netServerTeardown,
+  netPing,
+  netUdpSend,
+  netDhcp,
+  netDns,
+  netArpLs,
+  netIfConfig,
+  netGetMac,
+)
 where
 
 import Control.Concurrent (forkIO)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Data.Bits (shiftL, (.&.), (.|.))
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, plusPtr)
@@ -30,21 +32,21 @@ import H.Concurrency (QSem, newQSem, withQSem)
 import H.Interrupts (spi)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
-import qualified H.Pages as P
+import H.Pages qualified as P
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Dmesg as Dmesg
-import qualified Kernel.Driver.GIC as DGIC
-import qualified Kernel.Driver.IRQ as DIRQ
-import qualified Kernel.Driver.Registry as DrvReg
+import Kernel.Driver.Dmesg qualified as Dmesg
+import Kernel.Driver.GIC qualified as DGIC
+import Kernel.Driver.IRQ qualified as DIRQ
+import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Net.Device (netInvalidate, netPollUsed, netProbeMac, netSaveQueues, netSubmitRx, netSubmitTx)
 import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), UdpPacket (..), decodeArp, decodeDhcp, decodeDnsResponse, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeDnsQuery, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), macBroadcast, showIpv4, showMac, virtioNetHdrSize)
 import Kernel.Driver.Virtio.Queue (allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
-import qualified Kernel.IPC.Endpoint as IPC
-import qualified Kernel.IPC.Grant as G
-import qualified Kernel.IPC.Nameservice as NS
+import Kernel.IPC.Endpoint qualified as IPC
+import Kernel.IPC.Grant qualified as G
+import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (Grant (..), Message (..))
 
 foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int
@@ -99,8 +101,9 @@ netDnsSeen = unsafePerformH $ newRef Nothing
 netRxGrants :: Ref (Map Int (Map Word32 Grant))
 netRxGrants = unsafePerformH $ newRef Map.empty
 
--- | RX batch-cap drop counter (Track S): drainRx is bounded per call so a
--- hostile RX burst degrades to drops + dmesg instead of starving RTS caps.
+{- | RX batch-cap drop counter (Track S): drainRx is bounded per call so a
+hostile RX burst degrades to drops + dmesg instead of starving RTS caps.
+-}
 {-# NOINLINE netRxDrops #-}
 netRxDrops :: Ref Word64
 netRxDrops = unsafePerformH $ newRef 0
@@ -115,7 +118,7 @@ busyDelayUs us = liftIO $ do
   let target = t0 + fromIntegral us * 1000
   let loop = do
         t <- c_uptime_ns
-        if t < target then loop else return ()
+        when (t < target) loop
   loop
 
 wantedMask :: Word64
@@ -468,8 +471,9 @@ waitDhcpMsg slot xid wantType waitedMs
           busyDelayUs 20000 >> waitDhcpMsg slot xid wantType (waitedMs - 20)
         _ -> do busyDelayUs 20000; waitDhcpMsg slot xid wantType (waitedMs - 20)
 
--- | DNS A resolver slice (Track O, no TCP): UDP query to 10.0.2.3:53.
--- Reuses the Track H safeIndex decoder; no retransmit/congestion state.
+{- | DNS A resolver slice (Track O, no TCP): UDP query to 10.0.2.3:53.
+Reuses the Track H safeIndex decoder; no retransmit/congestion state.
+-}
 netDns :: Int -> String -> H (Either NetError String)
 netDns slot name
   | not (slotValid slot) = return (Left NetBadSlot)
@@ -550,7 +554,7 @@ netIfConfig slot
         Just dev -> do
           free <- P.freePageCount
           grants <- withQSem netSem $ do gm <- readRef netRxGrants; case Map.lookup slot gm of { Just inner -> return (Map.size inner); Nothing -> return 0 }
-          let ipStr = case netIp dev of Just ip -> showIpv4 ip; Nothing -> "none"
+          let ipStr = maybe "none" showIpv4 (netIp dev)
               gwStr = showIpv4 (netGw dev)
               maskStr = showIpv4 (netMask dev)
               macStr = showMac (netMac dev)
@@ -614,8 +618,9 @@ sendArpRequest slot dev target = do
       eth = encodeEthernet macBroadcast srcMac 0x0806 arp
   txPacket slot eth
 
--- | Drain RX completions, learn ARP, stash ICMP/DHCP replies, replenish grants.
--- Bounded 'netRxBatchCap' per call; overflow is counted + dmesg-logged.
+{- | Drain RX completions, learn ARP, stash ICMP/DHCP replies, replenish grants.
+Bounded 'netRxBatchCap' per call; overflow is counted + dmesg-logged.
+-}
 drainRx :: Int -> H ()
 drainRx slot = go netRxBatchCap
   where

@@ -1,6 +1,6 @@
 {-# LANGUAGE GHC2024 #-}
 
-{-|
+{- |
 Module      : Kernel.Userspace.Fd
 Description : EL0 fd table over the volatile ramfs.
 Stability   : experimental
@@ -19,36 +19,36 @@ EL0 trap wiring waits on the delegation ring (same pattern as the IPC
 slice): 'Syscall' reserves 0x04..0x07 + 0x0A and svc returns ENOSYS
 until then. The shell 'fdtest' verb exercises this table from EL1.
 -}
-module Kernel.Userspace.Fd
-  ( Fd (..),
-    FdError (..),
-    fdErrorToString,
-    fdOpen,
-    fdRead,
-    fdWrite,
-    fdClose,
-    fdSeek,
-    maxFdCount,
-    maxFdBytes,
-    o_RDONLY,
-    o_WRONLY,
-    o_RDWR,
-    o_CREAT,
-    o_TRUNC,
-    seek_SET,
-    seek_CUR,
-    seek_END,
-  )
+module Kernel.Userspace.Fd (
+  Fd (..),
+  FdError (..),
+  fdErrorToString,
+  fdOpen,
+  fdRead,
+  fdWrite,
+  fdClose,
+  fdSeek,
+  maxFdCount,
+  maxFdBytes,
+  o_RDONLY,
+  o_WRONLY,
+  o_RDWR,
+  o_CREAT,
+  o_TRUNC,
+  seek_SET,
+  seek_CUR,
+  seek_END,
+)
 where
 
 import Data.Bits (complement, (.&.))
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import H.Concurrency (QSem, newQSem, withQSem)
+import H.FileSystem qualified as FS
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import qualified H.FileSystem as FS
 
 -- | File descriptor (3..34; 0-2 reserved for stdio convention).
 newtype Fd = Fd Int
@@ -91,10 +91,10 @@ maxFdBytes :: Int
 maxFdBytes = 65536
 
 -- | Table entry: absolute path + offset + access mode.
-data Entry = Entry
-  { entPath :: FilePath,
-    entOff :: Int,
-    entAcc :: Int
+data Entry = Entry {
+  entPath :: FilePath
+  , entOff :: Int
+  , entAcc :: Int
   }
   deriving (Eq, Show)
 
@@ -127,8 +127,9 @@ lookupEntry fd = withQSem fdSem $ do
   m <- readRef fdTable
   return (Map.lookup fd m)
 
--- | Open a ramfs path. Creates (empty) on O_CREAT when missing;
--- truncates on O_TRUNC. Directories reject with EISDIR via fsStat.
+{- | Open a ramfs path. Creates (empty) on O_CREAT when missing;
+truncates on O_TRUNC. Directories reject with EISDIR via fsStat.
+-}
 fdOpen :: FilePath -> Int -> H (Either FdError Fd)
 fdOpen path flags
   | not (validFlags flags) = return (Left (FdInval "bad flags"))

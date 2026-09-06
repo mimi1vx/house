@@ -1,24 +1,26 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
--- | GIC-native interrupts (aarch64). Replaces the i8259 PIC programming
--- via H.IOPorts and C-side setIRQTable.
-module H.Interrupts
-  ( IntId (..),
-    ppiVirtTimer,
-    ppiPhysTimer,
-    spi,
-    enableInt,
-    disableInt,
-    eoi,
-    installHandler,
-    enableInterrupts,
-    disableInterrupts,
-  )
+{- | GIC-native interrupts (aarch64). Replaces the i8259 PIC programming
+via H.IOPorts and C-side setIRQTable.
+-}
+module H.Interrupts (
+  IntId (..),
+  ppiVirtTimer,
+  ppiPhysTimer,
+  spi,
+  enableInt,
+  disableInt,
+  eoi,
+  installHandler,
+  enableInterrupts,
+  disableInterrupts,
+)
 where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (SomeException, catch)
+import Control.Monad (when)
 import Data.Array.IO (IOArray, newArray, readArray, writeArray)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Ix (Ix)
@@ -57,10 +59,11 @@ enableInt (IntId n) = liftIO $ c_enableInt n
 disableInt :: IntId -> H ()
 disableInt (IntId n) = liftIO $ c_disableInt n
 
--- | End-of-interrupt. No-op on aarch64: the ISR already EOIs via
--- ICC_EOIR1_EL1 (EOImode=0 does priority drop+deactivate together).
--- Kept for API compatibility; downstream wrappers no longer need to call it
--- after the handler.
+{- | End-of-interrupt. No-op on aarch64: the ISR already EOIs via
+ICC_EOIR1_EL1 (EOImode=0 does priority drop+deactivate together).
+Kept for API compatibility; downstream wrappers no longer need to call it
+after the handler.
+-}
 eoi :: IntId -> H ()
 eoi _ = return ()
 
@@ -79,16 +82,16 @@ handlerTable = unsafePerformIO $ newArray (0, 1023) Nothing
 dispatcherStarted :: IORef Bool
 dispatcherStarted = unsafePerformIO $ newIORef False
 
--- | Install a handler for an INTID. Idempotently starts the dispatcher thread
--- on first call. The dispatcher blocks in threadWaitRead on the IRQ pipe fd
--- (poll shim proven by phase-2 timerfd) and drains the SPSC ring.
+{- | Install a handler for an INTID. Idempotently starts the dispatcher thread
+on first call. The dispatcher blocks in threadWaitRead on the IRQ pipe fd
+(poll shim proven by phase-2 timerfd) and drains the SPSC ring.
+-}
 installHandler :: IntId -> H () -> H ()
 installHandler (IntId n) handler = liftIO $ do
   sptr <- newStablePtr handler
   let idx = fromIntegral n
-  if idx >= 0 && idx < 1024
-    then writeArray handlerTable idx (Just sptr)
-    else return ()
+  when (idx >= 0 && idx < 1024) $
+    writeArray handlerTable idx (Just sptr)
   -- start dispatcher once
   started <- readIORef dispatcherStarted
   if started
@@ -131,5 +134,5 @@ dispatcherLoop = loop
             Nothing -> drainBounded (n - 1)
             Just sptr -> do
               h <- deRefStablePtr sptr
-              (runH h `catch` \(_ :: SomeException) -> return ())
+              runH h `catch` \(_ :: SomeException) -> return ()
               drainBounded (n - 1)

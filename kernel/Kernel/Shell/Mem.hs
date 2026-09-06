@@ -1,10 +1,10 @@
 -- | Memory/filesystem-status shell commands: free, mem, detect, palloc.
-module Kernel.Shell.Mem
-  ( handleFree,
-    handleMem,
-    handleDetect,
-    handlePalloc,
-  )
+module Kernel.Shell.Mem (
+  handleFree,
+  handleMem,
+  handleDetect,
+  handlePalloc,
+)
 where
 
 import Control.Exception (SomeException, catch)
@@ -15,21 +15,21 @@ import Foreign.Storable (peek)
 import GHC.Conc (getNumCapabilities, getNumProcessors)
 import H.Monad (runH)
 import qualified H.Pages as HPages
-import Kernel.Shell.Foreign
-  ( c_bank_count,
-    c_bank_get,
-    c_buddy_free,
-    c_buddy_total,
-    c_dtb_ref,
-    c_get_ttbrs,
-    c_malloc_stats,
-    c_mem_stats,
-    c_ram_ref,
-    c_ram_source_ref,
-    c_smp_ref,
-    c_stack_top_ref,
-    c_uart_puts,
-  )
+import Kernel.Shell.Foreign (
+  c_bank_count,
+  c_bank_get,
+  c_buddy_free,
+  c_buddy_total,
+  c_dtb_ref,
+  c_get_ttbrs,
+  c_malloc_stats,
+  c_mem_stats,
+  c_ram_ref,
+  c_ram_source_ref,
+  c_smp_ref,
+  c_stack_top_ref,
+  c_uart_puts,
+ )
 import Kernel.Shell.Format (showHex, showHex64)
 
 handleFree :: IO ()

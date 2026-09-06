@@ -1,8 +1,9 @@
--- | VM diagnostic shell command: demand pager + mmap/mprotect/munmap +
--- isolate + ASID + shootdown, reported as vm-ok / vm-fail.
-module Kernel.Shell.Vm
-  ( handleVm,
-  )
+{- | VM diagnostic shell command: demand pager + mmap/mprotect/munmap +
+isolate + ASID + shootdown, reported as vm-ok / vm-fail.
+-}
+module Kernel.Shell.Vm (
+  handleVm,
+)
 where
 
 import Control.Exception (SomeException, catch)
@@ -16,17 +17,17 @@ import H.Monad (runH)
 import qualified H.Pages as HPages
 import qualified H.PhysicalMemory as HPhys
 import qualified H.VirtualMemory as VM
-import Kernel.Shell.Foreign
-  ( c_asid_for,
-    c_demand_100,
-    c_demand_single,
-    c_is_ro_page,
-    c_mmap,
-    c_mprotect,
-    c_munmap,
-    c_tlb_shootdown,
-    c_uart_puts,
-  )
+import Kernel.Shell.Foreign (
+  c_asid_for,
+  c_demand_100,
+  c_demand_single,
+  c_is_ro_page,
+  c_mmap,
+  c_mprotect,
+  c_munmap,
+  c_tlb_shootdown,
+  c_uart_puts,
+ )
 
 handleVm :: IO ()
 handleVm = do

@@ -10,7 +10,7 @@ import H.Monad (H, liftIO, runH, trappedRunH)
 
 -- * Thread control
 
-forkH :: (H a) -> H ThreadId
+forkH :: H a -> H ThreadId
 killH :: ThreadId -> H ()
 yield :: H ()
 threadDelay :: Int -> H ()
@@ -41,7 +41,7 @@ withMVar :: MVar a -> (a -> H b) -> H b
 newQSem :: Int -> H QSem
 signalQSem :: QSem -> H ()
 waitQSem :: QSem -> H ()
-withQSem :: QSem -> (H a) -> H a
+withQSem :: QSem -> H a -> H a
 
 ------------------------ IMPLEMENTATION ----------------------------------------
 
@@ -55,7 +55,7 @@ yield = liftIO IO.yield
 threadDelay = liftIO . IO.threadDelay
 
 -- Channels --------------------------------------------------------------------
-newChan = liftIO $ IO.newChan
+newChan = liftIO IO.newChan
 
 readChan ch = liftIO $ IO.readChan ch
 
@@ -70,7 +70,7 @@ writeList2Chan ch xs = liftIO $ IO.writeList2Chan ch xs
 -- MVars -----------------------------------------------------------------------
 newMVar x = liftIO $ IO.newMVar x
 
-newEmptyMVar = liftIO $ IO.newEmptyMVar
+newEmptyMVar = liftIO IO.newEmptyMVar
 
 takeMVar v = liftIO $ IO.takeMVar v
 

@@ -21,10 +21,10 @@ data ConsoleCommand
     -- uart_puts writers (shell command output).
     Sync (MVar ())
 
-data ConsoleData = ConsoleData
-  { consoleChan :: Chan ConsoleCommand,
-    consoleHeight :: Int,
-    consoleWidth :: Int
+data ConsoleData = ConsoleData {
+  consoleChan :: Chan ConsoleCommand
+  , consoleHeight :: Int
+  , consoleWidth :: Int
   }
 
 data Console = Console (MVar ConsoleData)

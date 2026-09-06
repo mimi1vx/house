@@ -1,9 +1,11 @@
 -- #hide, prune, ingore-exports
 
--- | Support for access to raw physical pages of all kinds
---  Not for direct use by H clients
+{- | Support for access to raw physical pages of all kinds
+ Not for direct use by H clients
+-}
 module H.Pages (Page, pageSize, allocPage, freePage, registerPage, zeroPage, validPage, freePageCount) where
 
+import Data.Maybe (isJust)
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..))
 import H.AdHocMem (Ptr, castPtr, nullPtr, peek, plusPtr, poke)
@@ -33,7 +35,7 @@ allocPage = do
   cleanRegisteredPages
   allocPageFromList
 
-freePage a = freePageToList a
+freePage = freePageToList
 
 -- Following specify absolute range of available pages.
 -- Can safely assume these contain constants.
@@ -128,7 +130,7 @@ cleanRegisteredPages =
     check (_, w, _) =
       do
         s <- deRefWeak w
-        return (s /= Nothing)
+        return (isJust s)
     clean (p, _, f) = f p
     spanM _q [] = return ([], [])
     spanM q (x : xs) =
@@ -141,7 +143,7 @@ cleanRegisteredPages =
           else
             return (ys, x : zs)
 
-zeroPage p = sequence_ [poke ((castPtr p) `plusPtr` i) (0 :: Word8) | i <- [0 .. pageSize - 1]]
+zeroPage p = sequence_ [poke (castPtr p `plusPtr` i) (0 :: Word8) | i <- [0 .. pageSize - 1]]
 
 freePageCount = do
   n <- withQSem pageSem $ do pages <- readRef freeList; return (length pages)

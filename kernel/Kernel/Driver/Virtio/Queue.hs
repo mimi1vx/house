@@ -1,33 +1,35 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
--- | Virtio split virtqueue — bounded allocation over 'H.Pages'.
--- One queue per slot, 1..64 entries (clamped), up to 3 pages.
--- Invariants: pages are 4 KiB aligned 'validPage', reclaimed via 'freeQueue'.
-module Kernel.Driver.Virtio.Queue
-  ( VirtQueue (..),
-    allocQueue,
-    freeQueue,
-    queueSize,
-    queueDescPa,
-    queueAvailPa,
-    queueUsedPa,
-  )
+{- | Virtio split virtqueue — bounded allocation over 'H.Pages'.
+One queue per slot, 1..64 entries (clamped), up to 3 pages.
+Invariants: pages are 4 KiB aligned 'validPage', reclaimed via 'freeQueue'.
+-}
+module Kernel.Driver.Virtio.Queue (
+  VirtQueue (..),
+  allocQueue,
+  freeQueue,
+  queueSize,
+  queueDescPa,
+  queueAvailPa,
+  queueUsedPa,
+)
 where
 
+import Control.Monad (when)
 import Data.Word (Word32, Word64, Word8)
 import Foreign.Ptr (Ptr)
 import H.Monad (H)
 import qualified H.Pages as P
 
 -- | Virtqueue backed by H.Pages.
-data VirtQueue = VirtQueue
-  { vqDesc :: P.Page Word8,
-    vqAvail :: P.Page Word8,
-    vqUsed :: P.Page Word8,
-    vqSize :: Word32,
-    vqDescPa :: Word64,
-    vqAvailPa :: Word64,
-    vqUsedPa :: Word64
+data VirtQueue = VirtQueue {
+  vqDesc :: P.Page Word8
+  , vqAvail :: P.Page Word8
+  , vqUsed :: P.Page Word8
+  , vqSize :: Word32
+  , vqDescPa :: Word64
+  , vqAvailPa :: Word64
+  , vqUsedPa :: Word64
   }
   deriving (Eq, Show)
 
@@ -67,7 +69,7 @@ allocQueue reqSize
 freeQueue :: VirtQueue -> H ()
 freeQueue vq = mapM_ freeIfValid [vqDesc vq, vqAvail vq, vqUsed vq]
   where
-    freeIfValid p = if P.validPage p then P.freePage p else return ()
+    freeIfValid p = when (P.validPage p) $ P.freePage p
 
 -- | Accessors (total).
 queueSize :: VirtQueue -> Word32

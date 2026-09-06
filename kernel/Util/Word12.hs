@@ -51,9 +51,10 @@ instance Real Word12 where
 
 {-# NOINLINE toEnumError #-}
 
--- | Invariant: called only when Enum.toEnum receives an out-of-range tag.
--- Required by the Enum class contract (result type is @b@, no Either);
--- call sites are hostile-input parsers that must range-check first.
+{- | Invariant: called only when Enum.toEnum receives an out-of-range tag.
+Required by the Enum class contract (result type is @b@, no Either);
+call sites are hostile-input parsers that must range-check first.
+-}
 toEnumError :: (HasCallStack, Show a) => String -> Int -> (a, a) -> b
 toEnumError inst_ty i bnds =
   error $
@@ -66,9 +67,10 @@ toEnumError inst_ty i bnds =
 
 {-# NOINLINE succError #-}
 
--- | Invariant: called only on succ maxBound / pred minBound.
--- Required by the Enum class contract; bounded-enumeration callers
--- must guard the boundary first.
+{- | Invariant: called only on succ maxBound / pred minBound.
+Required by the Enum class contract; bounded-enumeration callers
+must guard the boundary first.
+-}
 succError :: (HasCallStack) => String -> a
 succError inst_ty =
   error $ "Enum.succ{" ++ inst_ty ++ "}: tried to take `succ' of maxBound"
@@ -151,6 +153,6 @@ instance Bits Word12 where
   bitSize _ = bits
   bitSizeMaybe _ = Just bits
   isSigned _ = False
-  testBit x i = testBit (unwrap x) i
+  testBit x = testBit (unwrap x)
   bit i = wrap (narrow (bit i))
   popCount x = popCount (unwrap x)
