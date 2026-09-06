@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)] // hosted tests link std (Miri gate, step 9)
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 #![allow(unused_variables)]

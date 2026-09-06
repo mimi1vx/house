@@ -163,3 +163,87 @@ pub unsafe extern "C" fn buddy_contains(p: *mut u8) -> i32 {
     let (s, e) = unsafe { (BUDDY_START, BUDDY_END) };
     if v >= s && v < e { 1 } else { 0 }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 16-page Miri-owned backing store: buddy_init aligns start up / end
+    // down to 4K, so the usable count is derived in-test, never assumed.
+    // Single lifecycle test: the allocator globals are process-wide, so
+    // parallel tests would race (Miri flags data races); one ordered
+    // sequence keeps the state machine deterministic.
+    static mut BACKING: [u8; 65536] = [0xA5; 65536];
+
+    #[test]
+    fn buddy_page_lifecycle() {
+        let (start, end) = unsafe {
+            let base = BACKING.as_mut_ptr() as u64;
+            buddy_init(base, base + 65536);
+            let s = (base.checked_add(4095).unwrap_or(u64::MAX)) & !4095u64;
+            let e = (base + 65536) & !4095u64;
+            (s, e)
+        };
+        let pages = ((end - start) >> 12) as i32;
+        assert!(pages >= 14);
+        // SAFETY: init ran once above; queries read stable counters.
+        unsafe {
+            assert_eq!(buddy_total_count(), pages);
+            assert_eq!(buddy_free_count(), pages);
+
+            // Alloc: distinct, 4K-aligned, zero-filled pages.
+            let p0 = buddy_alloc_page();
+            let p1 = buddy_alloc_page();
+            assert!(!p0.is_null() && !p1.is_null());
+            assert_ne!(p0, p1);
+            assert_eq!(p0 as usize & 4095, 0);
+            assert_eq!(p1 as usize & 4095, 0);
+            assert_eq!(buddy_free_count(), pages - 2);
+            for i in 0..4096 {
+                assert_eq!(*p0.add(i), 0);
+            }
+            assert_eq!(buddy_contains(p0), 1);
+            assert_eq!(buddy_contains(core::ptr::null_mut()), 0);
+            assert_eq!(buddy_contains(p0.wrapping_add(1)), 0);
+
+            // Free returns the page to the head (LIFO reuse).
+            buddy_free_page(p0);
+            assert_eq!(buddy_free_count(), pages - 1);
+            let p2 = buddy_alloc_page();
+            assert_eq!(p2, p0);
+            assert_eq!(buddy_free_count(), pages - 2);
+
+            // Out-of-range, misaligned, and null frees are ignored.
+            buddy_free_page(core::ptr::null_mut());
+            buddy_free_page(0x1000 as *mut u8);
+            buddy_free_page(p1.wrapping_add(7));
+            assert_eq!(buddy_free_count(), pages - 2);
+
+            // Drain: exactly the remaining pages, then null.
+            let mut got = 0;
+            loop {
+                let p = buddy_alloc_page();
+                if p.is_null() {
+                    break;
+                }
+                got += 1;
+            }
+            assert_eq!(got, pages - 2);
+            assert_eq!(buddy_free_count(), 0);
+            assert!(buddy_alloc_page().is_null());
+
+            // Stats with null outputs must not fault.
+            let mut total = 0u64;
+            let mut free = 0u64;
+            house_mem_stats(&mut total, &mut free);
+            assert_eq!(total as i32, pages);
+            assert_eq!(free, 0);
+            house_mem_stats(core::ptr::null_mut(), core::ptr::null_mut());
+
+            // Return the two held pages; free-list head count recovers.
+            buddy_free_page(p1);
+            buddy_free_page(p2);
+            assert_eq!(buddy_free_count(), 2);
+        }
+    }
+}

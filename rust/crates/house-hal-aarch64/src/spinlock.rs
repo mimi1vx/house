@@ -22,6 +22,13 @@ impl RawSpinLock {
         }
     }
 
+    // Miri cannot execute `asm!`: hosted tests are single-threaded, so the
+    // exclusive monitor is elided (logic under test is unaffected).
+    #[cfg(miri)]
+    #[inline]
+    pub fn lock(&self) {}
+
+    #[cfg(not(miri))]
     #[inline]
     pub fn lock(&self) {
         // SAFETY: LDAXR/STXR exclusive monitor on shared lock word; DMB SY orders.
@@ -41,6 +48,14 @@ impl RawSpinLock {
         };
     }
 
+    // Miri stub (see `lock`): uncontended acquire always succeeds.
+    #[cfg(miri)]
+    #[inline]
+    pub fn try_lock(&self) -> bool {
+        true
+    }
+
+    #[cfg(not(miri))]
     #[inline]
     pub fn try_lock(&self) -> bool {
         // SAFETY: single LDAXR/STXR attempt; returns true on acquire.
@@ -66,6 +81,12 @@ impl RawSpinLock {
         res == 0
     }
 
+    // Miri stub (see `lock`): nothing to release.
+    #[cfg(miri)]
+    #[inline]
+    pub fn unlock(&self) {}
+
+    #[cfg(not(miri))]
     #[inline]
     pub fn unlock(&self) {
         // SAFETY: STLR releases exclusive ownership; DMB SY pairs with lock.

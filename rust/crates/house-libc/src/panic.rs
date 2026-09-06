@@ -9,6 +9,8 @@ use core::panic::PanicInfo;
 
 /// Freestanding panic handler — never reached in normal boot (`panic="abort"`).
 /// Loops on `wfi` matching `tinylibc/sys.c:exit`/`abort` and `c_start.c:fatal_exception`.
+/// Kernel-link only: hosted tests use std's handler instead.
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
@@ -22,10 +24,14 @@ fn panic(_info: &PanicInfo) -> ! {
 
 /// Stack-protector guard for Debian-built RTS archives that were compiled with
 /// `-fstack-protector`. Value matches `tinylibc/sys.c:uintptr_t __stack_chk_guard`.
+/// Kernel-link only (glibc owns this symbol on hosted builds).
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub static __stack_chk_guard: u64 = 0xdeadbeef_cafef00d;
 
 /// Stack-smash failure — halts like `panic` (no unwinding in `panic="abort"` kernel).
+/// Kernel-link only, same reason as the guard above.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __stack_chk_fail() -> ! {
     loop {

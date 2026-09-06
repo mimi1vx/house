@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)] // hosted tests link std (Miri gate, step 9)
 
 //! Arch-agnostic HAL trait surface — extension point for `house-hal-riscv64`.
 //!

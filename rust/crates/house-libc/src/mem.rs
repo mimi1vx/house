@@ -7,7 +7,7 @@ use core::ptr;
 
 // SAFETY: caller guarantees dst and src valid for n bytes, n <= isize::MAX,
 // dst/src not overlapping for memcpy (for memmove overlap direction is handled).
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     // Byte-wise copy to avoid unaligned 8-byte accesses that may fault on some QEMU/hvf configs
@@ -27,7 +27,7 @@ pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut 
     dst
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if dst == src as *mut u8 || n == 0 {
@@ -64,7 +64,7 @@ pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
     let val = c as u8;
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
     dst
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     for i in 0..n {
@@ -94,7 +94,7 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
     let target = c as u8;
     for i in 0..n {
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
 // cap. Release keeps zero cost (debug_assert compiled out under panic=abort).
 const CSTR_DEBUG_CAP: usize = 4096;
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     // Trust boundary (rust/c-abi.md): caller guarantees NUL-termination —
     // Haskell withCString upholds it; device/EL0 bytes must be
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
     let mut p = s;
     let mut remaining = max;
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
     // Trust boundary (rust/c-abi.md): both inputs NUL-terminated by the
     // caller; device/EL0 bytes must be strnlen-pre-bound before reaching here.
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     for i in 0..n {
         let ca = unsafe { ptr::read(a.add(i)) };
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): src NUL-terminated and dst sized by the
     // caller; device/EL0 bytes must be strnlen-pre-bound before reaching here.
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     dst
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut d = dst;
     let mut s = src;
@@ -234,7 +234,7 @@ pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): both inputs NUL-terminated and dst
     // sized by the caller (strlen/strcpy below re-probe). Device/EL0 bytes
@@ -247,7 +247,7 @@ pub unsafe extern "C" fn strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
     dst
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): s NUL-terminated by the caller;
     // device/EL0 bytes must be strnlen-pre-bound before reaching here.
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *mut u8 {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): s NUL-terminated by the caller;
     // device/EL0 bytes must be strnlen-pre-bound before reaching here.
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *mut u8 {
     last
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcasecmp(a: *const u8, b: *const u8) -> i32 {
     // Trust boundary (rust/c-abi.md): both inputs NUL-terminated by the
     // caller; device/EL0 bytes must be strnlen-pre-bound before reaching here.
@@ -323,5 +323,150 @@ pub unsafe extern "C" fn strcasecmp(a: *const u8, b: *const u8) -> i32 {
             pa = pa.add(1);
             pb = pb.add(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // SAFETY on every call below: all pointers come from live stack buffers
+    // sized for the access; contracts from rust/c-abi.md hold.
+
+    #[test]
+    fn memcpy_round_trip_returns_dst() {
+        let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut dst = [0u8; 8];
+        let r = unsafe { memcpy(dst.as_mut_ptr(), src.as_ptr(), 8) };
+        assert_eq!(r, dst.as_mut_ptr());
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn memcpy_zero_len_leaves_dst() {
+        let src = [9u8; 4];
+        let mut dst = [0u8; 4];
+        unsafe { memcpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(dst, [0u8; 4]);
+    }
+
+    #[test]
+    fn memmove_overlapping_forward() {
+        let mut buf = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        unsafe {
+            let p = buf.as_mut_ptr();
+            memmove(p, p.add(2), 4);
+        }
+        assert_eq!(buf, [3, 4, 5, 6, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn memmove_overlapping_backward() {
+        let mut buf = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        unsafe {
+            let p = buf.as_mut_ptr();
+            memmove(p.add(2), p, 4);
+        }
+        assert_eq!(buf, [1, 2, 1, 2, 3, 4, 7, 8]);
+    }
+
+    #[test]
+    fn memset_fills_and_returns_dst() {
+        let mut dst = [0u8; 8];
+        let r = unsafe { memset(dst.as_mut_ptr(), 0xAB, 8) };
+        assert_eq!(r, dst.as_mut_ptr());
+        assert_eq!(dst, [0xABu8; 8]);
+    }
+
+    #[test]
+    fn memcmp_equal_prefix_and_sign() {
+        let a = *b"abcdef\0\0";
+        let b = *b"abcdeg\0\0";
+        assert_eq!(unsafe { memcmp(a.as_ptr(), a.as_ptr(), 8) }, 0);
+        assert!(unsafe { memcmp(a.as_ptr(), b.as_ptr(), 8) } < 0);
+        assert!(unsafe { memcmp(b.as_ptr(), a.as_ptr(), 8) } > 0);
+        assert_eq!(unsafe { memcmp(a.as_ptr(), b.as_ptr(), 5) }, 0);
+    }
+
+    #[test]
+    fn memchr_found_and_missed() {
+        let s = *b"hello world\0\0\0\0";
+        let hit = unsafe { memchr(s.as_ptr(), b'w' as i32, 11) };
+        assert_eq!(hit, unsafe { s.as_ptr().add(6) } as *mut u8);
+        assert!(unsafe { memchr(s.as_ptr(), b'z' as i32, 11) }.is_null());
+    }
+
+    #[test]
+    fn strlen_and_strnlen() {
+        let s = b"hello\0";
+        assert_eq!(unsafe { strlen(s.as_ptr()) }, 5);
+        assert_eq!(unsafe { strnlen(s.as_ptr(), 3) }, 3);
+        assert_eq!(unsafe { strnlen(s.as_ptr(), 99) }, 5);
+    }
+
+    #[test]
+    fn strcmp_orders_and_equals() {
+        let a = b"abc\0";
+        let b = b"abd\0";
+        assert_eq!(unsafe { strcmp(a.as_ptr(), a.as_ptr()) }, 0);
+        assert!(unsafe { strcmp(a.as_ptr(), b.as_ptr()) } < 0);
+        assert!(unsafe { strcmp(b.as_ptr(), a.as_ptr()) } > 0);
+        assert_eq!(unsafe { strncmp(a.as_ptr(), b.as_ptr(), 2) }, 0);
+        assert!(unsafe { strncmp(a.as_ptr(), b.as_ptr(), 3) } < 0);
+    }
+
+    #[test]
+    fn strcpy_copies_nul() {
+        let mut dst = [0xFFu8; 8];
+        let src = b"hi\0";
+        let r = unsafe { strcpy(dst.as_mut_ptr(), src.as_ptr()) };
+        assert_eq!(r, dst.as_mut_ptr());
+        assert_eq!(&dst[..4], b"hi\0\xFF");
+    }
+
+    #[test]
+    fn strncpy_pads_short_src() {
+        let mut dst = [0xFFu8; 8];
+        let src = b"hi\0";
+        unsafe { strncpy(dst.as_mut_ptr(), src.as_ptr(), 6) };
+        assert_eq!(&dst[..7], b"hi\0\0\0\0\xFF");
+    }
+
+    #[test]
+    fn strncpy_truncates_without_nul() {
+        let mut dst = [0u8; 4];
+        let src = b"abcdef\0";
+        unsafe { strncpy(dst.as_mut_ptr(), src.as_ptr(), 4) };
+        assert_eq!(dst, *b"abcd");
+    }
+
+    #[test]
+    fn strcat_appends() {
+        let mut dst = [0u8; 12];
+        unsafe {
+            strcpy(dst.as_mut_ptr(), b"foo\0".as_ptr());
+            strcat(dst.as_mut_ptr(), b"bar\0".as_ptr());
+        }
+        assert_eq!(&dst[..7], b"foobar\0");
+    }
+
+    #[test]
+    fn strchr_and_strrchr() {
+        let s = b"abca\0";
+        let first = unsafe { strchr(s.as_ptr(), b'a' as i32) };
+        let last = unsafe { strrchr(s.as_ptr(), b'a' as i32) };
+        assert_eq!(first, s.as_ptr() as *mut u8);
+        assert_eq!(last, unsafe { s.as_ptr().add(3) } as *mut u8);
+        assert!(unsafe { strchr(s.as_ptr(), b'z' as i32) }.is_null());
+        assert!(unsafe { strrchr(s.as_ptr(), b'z' as i32) }.is_null());
+    }
+
+    #[test]
+    fn strcasecmp_folds_ascii() {
+        let a = b"Hello\0";
+        let b = b"hELLO\0";
+        let c = b"help\0";
+        assert_eq!(unsafe { strcasecmp(a.as_ptr(), b.as_ptr()) }, 0);
+        assert!(unsafe { strcasecmp(a.as_ptr(), c.as_ptr()) } < 0);
     }
 }
