@@ -5,6 +5,7 @@
 module Kernel.Driver.VirtioProbe
   ( VirtioSlotInfo (..),
     virtioScan,
+    virtioDeviceName,
   )
 where
 
@@ -31,6 +32,8 @@ foreign import ccall unsafe "virtio_probe_slot"
     Int -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> IO Int
 
 -- | Probe all 8 MMIO slots, log to dmesg, return list.
+-- device_id 4 (virtio-rng) is named explicitly so `virtio scan` + dmesg
+-- surface the Track O RNG slice without extra queue code.
 virtioScan :: H [VirtioSlotInfo]
 virtioScan = mapM probeOne [0 .. 7]
   where
@@ -44,10 +47,19 @@ virtioScan = mapM probeOne [0 .. 7]
         return (VirtioSlotInfo slot present did vid spiId)
       let line =
             if vsiPresent info
-              then "virtio slot " ++ show (vsiSlot info) ++ ": device_id=" ++ show (vsiDeviceId info) ++ " vendor=0x" ++ showHex (vsiVendorId info) ++ " spi=" ++ maybe "?" show (vsiSpi info)
+              then "virtio slot " ++ show (vsiSlot info) ++ ": device_id=" ++ show (vsiDeviceId info) ++ " (" ++ virtioDeviceName (vsiDeviceId info) ++ ") vendor=0x" ++ showHex (vsiVendorId info) ++ " spi=" ++ maybe "?" show (vsiSpi info)
               else "virtio slot " ++ show (vsiSlot info) ++ ": empty"
       Dmesg.dmesgLog line
       return info
+
+-- | Total device_id render; unknown ids stay numeric.
+virtioDeviceName :: Word32 -> String
+virtioDeviceName did = case did of
+  1 -> "virtio-net"
+  2 -> "virtio-blk"
+  3 -> "virtio-con"
+  4 -> "virtio-rng"
+  _ -> "unknown"
 
 showHex :: Word32 -> String
 showHex v

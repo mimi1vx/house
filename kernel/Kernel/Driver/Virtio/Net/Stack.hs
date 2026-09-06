@@ -7,6 +7,7 @@ module Kernel.Driver.Virtio.Net.Stack
     Ipv4Packet (..),
     UdpPacket (..),
     DhcpMsg (..),
+    DnsResponse (..),
     encodeEthernet,
     decodeEthernet,
     encodeArp,
@@ -20,6 +21,9 @@ module Kernel.Driver.Virtio.Net.Stack
     encodeDhcpDiscover,
     encodeDhcpRequest,
     decodeDhcp,
+    encodeDnsQuery,
+    decodeDnsResponse,
+    validateDnsName,
     ipv4Checksum,
     udpChecksum,
     macBroadcast,
@@ -414,3 +418,156 @@ decodeDhcp bytes
                 _ -> Left (NetInvalidArg "dhcp opts trunc")
               _ -> parseOpts (off + need) (drop n rest) mt sv
     parseOpts _ [_] _ _ = Left (NetInvalidArg "dhcp opts trunc")
+
+-- DNS (Track O slice, no TCP) -------------------------------------------------
+-- Minimal A-record query/response over UDP/53 via 10.0.2.3. Total parsers:
+-- every index goes through 'safeIndex'; compression pointers are followed
+-- with a depth bound (≤8) so a hostile loop can only yield Left.
+
+-- | Decoded DNS A answer with the query xid it belongs to.
+data DnsResponse = DnsResponse
+  { dnsXid :: Word16,
+    dnsA :: Ipv4
+  }
+  deriving (Eq, Show)
+
+-- | Validate a dotted name into labels. Total: rejects empty names,
+-- empty labels, labels >63, total >253, and non [0-9A-Za-z-] bytes.
+validateDnsName :: String -> Either NetError [String]
+validateDnsName s
+  | null s = Left (NetInvalidArg "dns empty")
+  | length s > 253 = Left (NetInvalidArg "dns too long")
+  | otherwise = go s
+  where
+    go str = case break (== '.') str of
+      (lbl, []) -> single lbl
+      (lbl, _ : rest)
+        | null rest -> Left (NetInvalidArg "dns trailing dot")
+        | otherwise -> do
+            l <- oneLabel lbl
+            ls <- go rest
+            Right (l : ls)
+    single lbl = do
+      l <- oneLabel lbl
+      Right [l]
+    oneLabel lbl
+      | null lbl = Left (NetInvalidArg "dns empty label")
+      | length lbl > 63 = Left (NetInvalidArg "dns label too long")
+      | all dnsChar lbl = Right lbl
+      | otherwise = Left (NetInvalidArg "dns bad char")
+    dnsChar c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-'
+
+-- | Encode an A-record query (RD set, QD=1). Label bytes are the raw
+-- ASCII codes (validateDnsName already restricted the alphabet).
+encodeDnsQuery :: Word16 -> String -> Either NetError [Word8]
+encodeDnsQuery xid name = do
+  labels <- validateDnsName name
+  let qname = concatMap (\l -> fromIntegral (length l) : map (fromIntegral . fromEnum) l) labels ++ [0]
+      hdr =
+        [ fromIntegral (xid `shiftR` 8),
+          fromIntegral xid,
+          0x01,
+          0x00, -- RD
+          0x00,
+          0x01, -- QDCOUNT=1
+          0x00,
+          0x00, -- ANCOUNT=0
+          0x00,
+          0x00, -- NSCOUNT=0
+          0x00,
+          0x00 -- ARCOUNT=0
+        ]
+      question = qname ++ [0x00, 0x01, 0x00, 0x01] -- QTYPE=A, QCLASS=IN
+      pkt = hdr ++ question
+  if length pkt > 512
+    then Left (NetInvalidArg "dns query too long")
+    else Right pkt
+
+-- | Decode a DNS response, returning the xid and the first A-record RDATA.
+-- Requires QR=1, RCODE=0, QD≥1, AN≥1; the question is skipped (pointers
+-- allowed) and only the first answer is parsed (TYPE=A, CLASS=IN, RDLEN=4).
+decodeDnsResponse :: [Word8] -> Either NetError DnsResponse
+decodeDnsResponse bytes
+  | length bytes < 12 = Left (NetInvalidArg "dns short")
+  | otherwise = do
+      b0 <- at 0
+      b1 <- at 1
+      f0 <- at 2
+      f1 <- at 3
+      qd0 <- at 4
+      qd1 <- at 5
+      an0 <- at 6
+      an1 <- at 7
+      let xid = (fromIntegral b0 `shiftL` 8) .|. fromIntegral b1 :: Word16
+          qr = f0 .&. 0x80
+          rcode = f1 .&. 0x0F
+          qd = (fromIntegral qd0 `shiftL` 8) .|. fromIntegral qd1 :: Int
+          an = (fromIntegral an0 `shiftL` 8) .|. fromIntegral an1 :: Int
+      if qr == 0
+        then Left (NetInvalidArg "dns not response")
+        else
+          if rcode /= 0
+            then Left (NetInvalidArg "dns rcode")
+            else
+              if qd < 1 || an < 1
+                then Left (NetInvalidArg "dns count")
+                else do
+                  qEnd <- skipQuestions 12 qd
+                  ansEnd <- skipName qEnd
+                  t0 <- atOff ansEnd 0
+                  t1 <- atOff ansEnd 1
+                  c0 <- atOff ansEnd 2
+                  c1 <- atOff ansEnd 3
+                  l0 <- atOff ansEnd 8
+                  l1 <- atOff ansEnd 9
+                  let typ = (fromIntegral t0 `shiftL` 8) .|. fromIntegral t1 :: Int
+                      cls = (fromIntegral c0 `shiftL` 8) .|. fromIntegral c1 :: Int
+                      rdlen = (fromIntegral l0 `shiftL` 8) .|. fromIntegral l1 :: Int
+                  if typ /= 1 || cls /= 1 || rdlen /= 4
+                    then Left (NetInvalidArg "dns not A")
+                    else do
+                      a0 <- atOff (ansEnd + 10) 0
+                      a1 <- atOff (ansEnd + 10) 1
+                      a2 <- atOff (ansEnd + 10) 2
+                      a3 <- atOff (ansEnd + 10) 3
+                      Right (DnsResponse xid (Ipv4 a0 a1 a2 a3))
+  where
+    at i = maybe (Left (NetInvalidArg "dns trunc")) Right (safeIndex bytes i)
+    atOff base i = maybe (Left (NetInvalidArg "dns trunc")) Right (safeIndex bytes (base + i))
+    skipQuestions off 0 = Right off
+    skipQuestions off n = do
+      nameEnd <- skipName off
+      -- QTYPE(2)+QCLASS(2) must be present.
+      _ <- atOff nameEnd 0
+      _ <- atOff nameEnd 1
+      _ <- atOff nameEnd 2
+      _ <- atOff nameEnd 3
+      skipQuestions (nameEnd + 4) (n - 1)
+    -- Skip one possibly-compressed name, returning the offset after it.
+    skipName off = walk off 0
+      where
+        walk :: Int -> Int -> Either NetError Int
+        walk o depth
+          | depth > 8 = Left (NetInvalidArg "dns ptr depth")
+          | otherwise = do
+              len <- maybe (Left (NetInvalidArg "dns trunc")) Right (safeIndex bytes o)
+              if len == 0
+                then Right (o + 1)
+                else
+                  if len .&. 0xC0 == 0xC0
+                    then do
+                      lo <- maybe (Left (NetInvalidArg "dns trunc")) Right (safeIndex bytes (o + 1))
+                      let ptr = ((fromIntegral len .&. 0x3F) `shiftL` 8) .|. fromIntegral lo :: Int
+                      if ptr >= length bytes
+                        then Left (NetInvalidArg "dns ptr range")
+                        else do
+                          _ <- walk ptr (depth + 1)
+                          Right (o + 2)
+                    else
+                      if len .&. 0xC0 /= 0
+                        then Left (NetInvalidArg "dns label bits")
+                        else do
+                          let n = fromIntegral len :: Int
+                          if n > 63 || o + 1 + n > length bytes
+                            then Left (NetInvalidArg "dns label len")
+                            else walk (o + 1 + n) depth

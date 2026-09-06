@@ -10,6 +10,7 @@ module Kernel.Driver.Virtio.Net.Server
     netPing,
     netUdpSend,
     netDhcp,
+    netDns,
     netArpLs,
     netIfConfig,
     netGetMac,
@@ -37,7 +38,7 @@ import qualified Kernel.Driver.IRQ as DIRQ
 import qualified Kernel.Driver.Registry as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Net.Device (netInvalidate, netPollUsed, netProbeMac, netSaveQueues, netSubmitRx, netSubmitTx)
-import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), UdpPacket (..), decodeArp, decodeDhcp, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
+import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), UdpPacket (..), decodeArp, decodeDhcp, decodeDnsResponse, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeDnsQuery, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), macBroadcast, showIpv4, showMac, virtioNetHdrSize)
 import Kernel.Driver.Virtio.Queue (allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
@@ -88,6 +89,11 @@ netIcmpSeen = unsafePerformH $ newRef Map.empty
 {-# NOINLINE netDhcpSeen #-}
 netDhcpSeen :: Ref (Maybe Stack.DhcpMsg)
 netDhcpSeen = unsafePerformH $ newRef Nothing
+
+-- | Last DNS A answer seen on UDP sport 53 (Track O resolver slice).
+{-# NOINLINE netDnsSeen #-}
+netDnsSeen :: Ref (Maybe Stack.DnsResponse)
+netDnsSeen = unsafePerformH $ newRef Nothing
 
 {-# NOINLINE netRxGrants #-}
 netRxGrants :: Ref (Map Int (Map Word32 Grant))
@@ -462,6 +468,67 @@ waitDhcpMsg slot xid wantType waitedMs
           busyDelayUs 20000 >> waitDhcpMsg slot xid wantType (waitedMs - 20)
         _ -> do busyDelayUs 20000; waitDhcpMsg slot xid wantType (waitedMs - 20)
 
+-- | DNS A resolver slice (Track O, no TCP): UDP query to 10.0.2.3:53.
+-- Reuses the Track H safeIndex decoder; no retransmit/congestion state.
+netDns :: Int -> String -> H (Either NetError String)
+netDns slot name
+  | not (slotValid slot) = return (Left NetBadSlot)
+  | otherwise = do
+      mDev <- withQSem netSem $ do m <- readRef netMap; return (Map.lookup slot m)
+      case mDev of
+        Nothing -> return (Left (NetInvalidArg "not initialized"))
+        Just dev -> case Stack.encodeDnsQuery 0 name of
+          Left e -> return (Left e)
+          Right _ -> do
+            t0 <- liftIO c_uptime_ns
+            let xid = fromIntegral (t0 .&. 0xFFFF) :: Word16
+            case Stack.encodeDnsQuery xid name of
+              Left e -> return (Left e)
+              Right q -> dnsTries slot dev name xid q 0
+
+dnsTries :: Int -> NetDevice -> String -> Word16 -> [Word8] -> Int -> H (Either NetError String)
+dnsTries slot dev name xid q attempt
+  | attempt >= 3 = return (Left NetDhcpFailed)
+  | otherwise = do
+      _ <- withQSem netSem $ do writeRef netDnsSeen Nothing
+      let udp = Stack.encodeUdp 45678 53 q
+          ownIp = case netIp dev of Just ip -> ip; Nothing -> Ipv4 10 0 2 15
+          dnsIp = Ipv4 10 0 2 3
+      drainRx slot
+      mMac <- lookupArp dnsIp
+      dmac <- case mMac of
+        Just m -> return (Just m)
+        Nothing -> arpResolve slot dev dnsIp
+      case dmac of
+        Nothing -> return (Left NetArpTimeout)
+        Just mac -> do
+          let ipPkt = encodeIpv4 ownIp dnsIp 17 udp
+              eth = encodeEthernet mac (netMac dev) 0x0800 ipPkt
+          rTx <- txPacket slot eth
+          case rTx of
+            Left _ -> do busyDelayUs (100000 * (attempt + 1)); dnsTries slot dev name xid q (attempt + 1)
+            Right () -> do
+              mResp <- waitDnsMsg slot xid 1500
+              case mResp of
+                Nothing -> do busyDelayUs (100000 * (attempt + 1)); dnsTries slot dev name xid q (attempt + 1)
+                Just resp -> return (Right (name ++ " -> " ++ showIpv4 (Stack.dnsA resp)))
+
+waitDnsMsg :: Int -> Word16 -> Int -> H (Maybe Stack.DnsResponse)
+waitDnsMsg slot xid waitedMs
+  | waitedMs <= 0 = do
+      drainRx slot
+      withQSem netSem $ do
+        m <- readRef netDnsSeen
+        case m of
+          Just d | Stack.dnsXid d == xid -> return (Just d)
+          _ -> return Nothing
+  | otherwise = do
+      drainRx slot
+      m <- withQSem netSem $ readRef netDnsSeen
+      case m of
+        Just d | Stack.dnsXid d == xid -> return (Just d)
+        _ -> do busyDelayUs 20000; waitDnsMsg slot xid (waitedMs - 20)
+
 -- | ARP ls with 60 s expiry.
 netArpLs :: H [(Ipv4, Mac)]
 netArpLs = do
@@ -619,6 +686,10 @@ drainRx slot = go netRxBatchCap
                     | udpSrcPort udp == 67 && udpDstPort udp == 68 ->
                         case decodeDhcp (udpPayload udp) of
                           Right dhcp -> withQSem netSem $ do writeRef netDhcpSeen (Just dhcp)
+                          Left _ -> return ()
+                    | udpSrcPort udp == 53 ->
+                        case decodeDnsResponse (udpPayload udp) of
+                          Right resp -> withQSem netSem $ do writeRef netDnsSeen (Just resp)
                           Left _ -> return ()
                     | otherwise -> return ()
                   Left _ -> return ()

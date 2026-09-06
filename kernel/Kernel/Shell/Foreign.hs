@@ -22,6 +22,7 @@ module Kernel.Shell.Foreign
     c_mmap,
     c_munmap,
     c_mprotect,
+    c_malloc_stats,
     c_demand_single,
     c_demand_100,
     c_is_ro_page,
@@ -104,6 +105,8 @@ foreign import ccall unsafe "mmap" c_mmap :: Ptr () -> CSize -> CInt -> CInt -> 
 foreign import ccall unsafe "munmap" c_munmap :: Ptr () -> CSize -> IO CInt
 
 foreign import ccall unsafe "mprotect" c_mprotect :: Ptr () -> CSize -> CInt -> IO CInt
+
+foreign import ccall unsafe "house_malloc_stats" c_malloc_stats :: Ptr Word64 -> Ptr Word64 -> IO ()
 
 foreign import ccall unsafe "house_vm_demand_single" c_demand_single :: IO CInt
 

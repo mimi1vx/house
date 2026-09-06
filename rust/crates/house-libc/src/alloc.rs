@@ -43,6 +43,10 @@ static mut ALLOC_LOCK: u32 = 0;
 // Intrusive free-list head over the same 64 MiB pool (first-fit reuse);
 // nodes live in freed payloads, so no extra memory is consumed.
 static mut FREE_HEAD: *mut u8 = core::ptr::null_mut();
+// Live payload bytes + all-time high-water (Track O observability for the
+// allocator-aware `mem` line; updated under ALLOC_LOCK only).
+static mut MALLOC_USED: usize = 0;
+static mut MALLOC_HIGH: usize = 0;
 
 #[inline]
 unsafe fn spin_lock(ptr: *mut u32) {
@@ -131,6 +135,10 @@ unsafe fn pool_alloc_locked(n: usize, align: usize) -> *mut u8 {
                 if size >= n_eff {
                     *link = ptr::read(cur as *const *mut u8);
                     ptr::write_unaligned((cur as usize - 16) as *mut u64, MALLOC_MAGIC);
+                    MALLOC_USED = MALLOC_USED.saturating_add(size);
+                    if MALLOC_USED > MALLOC_HIGH {
+                        MALLOC_HIGH = MALLOC_USED;
+                    }
                     return cur;
                 }
                 link = cur as *mut *mut u8;
@@ -190,6 +198,12 @@ unsafe fn pool_alloc_locked(n: usize, align: usize) -> *mut u8 {
     }
     malloc_cur = end_u as *mut u8;
     unsafe { MALLOC_CUR = malloc_cur };
+    unsafe {
+        MALLOC_USED = MALLOC_USED.saturating_add(n_eff);
+        if MALLOC_USED > MALLOC_HIGH {
+            MALLOC_HIGH = MALLOC_USED;
+        }
+    }
     p
 }
 
@@ -222,6 +236,7 @@ pub unsafe extern "C" fn free(p: *mut u8) {
             ptr::write_unaligned((p as usize - 16) as *mut u64, 0);
             ptr::write(p as *mut *mut u8, FREE_HEAD);
             FREE_HEAD = p;
+            MALLOC_USED = MALLOC_USED.saturating_sub(size);
         },
         Some(_) => unsafe {
             // Unreachable: payloads are normalized to >= MIN. Clear the magic
@@ -234,6 +249,25 @@ pub unsafe extern "C" fn free(p: *mut u8) {
         },
     }
     unsafe { spin_unlock(&raw mut ALLOC_LOCK) };
+}
+
+/// void house_malloc_stats(uint64_t *used_out, uint64_t *high_out) — Track O
+/// observability for the allocator-aware `mem` line (lock-protected snapshot).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_malloc_stats(used_out: *mut u64, high_out: *mut u64) {
+    // SAFETY: ALLOC_LOCK protects both counters; out pointers are optional.
+    unsafe { spin_lock(&raw mut ALLOC_LOCK) };
+    let (used, high) = unsafe { (MALLOC_USED as u64, MALLOC_HIGH as u64) };
+    unsafe { spin_unlock(&raw mut ALLOC_LOCK) };
+    // SAFETY: caller guarantees out pointers are valid or null.
+    unsafe {
+        if !used_out.is_null() {
+            *used_out = used;
+        }
+        if !high_out.is_null() {
+            *high_out = high;
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

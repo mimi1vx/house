@@ -3,6 +3,15 @@
 const HOUSE_SVC_WRITE: u32 = 0x01;
 const HOUSE_SVC_EXIT: u32 = 0x02;
 const HOUSE_SVC_BRK: u32 = 0x03;
+// Track O fd/fork numbers (Haskell Fd table + forkProc land first; EL0 trap
+// delegation ring wires them next -- same pattern as the IPC slice).
+const HOUSE_SVC_OPEN: u32 = 0x04;
+const HOUSE_SVC_READ: u32 = 0x05;
+const HOUSE_SVC_WRITE_FD: u32 = 0x06;
+const HOUSE_SVC_CLOSE: u32 = 0x07;
+const HOUSE_SVC_FORK: u32 = 0x08;
+const HOUSE_SVC_WAIT: u32 = 0x09;
+const HOUSE_SVC_SEEK: u32 = 0x0A;
 const HOUSE_SVC_IPC_SEND: u32 = 0x10;
 const HOUSE_SVC_IPC_RECV: u32 = 0x11;
 const HOUSE_SVC_IPC_CALL: u32 = 0x12;
@@ -195,6 +204,16 @@ pub unsafe extern "C" fn house_svc_dispatch(
             }
             HOUSE_SVC_BRK => {
                 uart_puts(b"[svc] ENOSYS brk\n\0".as_ptr());
+                if !gpr.is_null() {
+                    *gpr = -38i64 as u64;
+                }
+                -38
+            }
+            HOUSE_SVC_OPEN | HOUSE_SVC_READ | HOUSE_SVC_WRITE_FD | HOUSE_SVC_CLOSE
+            | HOUSE_SVC_FORK | HOUSE_SVC_WAIT | HOUSE_SVC_SEEK => {
+                // Track O: Haskell EL1 table lands first; the trap-safe
+                // delegation ring wires EL0 next. Fail closed, never touch memory.
+                uart_puts(b"[svc] ENOSYS fd/fork\n\0".as_ptr());
                 if !gpr.is_null() {
                     *gpr = -38i64 as u64;
                 }

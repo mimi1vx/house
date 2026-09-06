@@ -7,7 +7,7 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (forM_, when)
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits (complement, shiftL, shiftR, (.&.), (.|.))
 import Data.Char (chr)
 import Data.List (isPrefixOf)
 import Data.Word (Word8)
@@ -20,6 +20,7 @@ import GHC.Conc
     setNumCapabilities,
   )
 import qualified H.FileSystem as FS
+import qualified H.VirtualMemory as VM
 import H.Monad (runH)
 import H.Mutable (writeRef)
 import qualified Kernel.Driver.Dmesg as Dmesg
@@ -345,6 +346,8 @@ house_main = do
       ["udpecho", ip, port] -> handleUdpEcho ip port ""
       ["arp", "ls"] -> handleArpLs
       ["net", "dhcp"] -> handleNetDhcp
+      ["dns", name] -> handleDns name
+      ["dns"] -> withCString "usage: dns <name>\n" c_uart_puts
       ["net"] -> withCString "usage: net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>\n" c_uart_puts
       ["con", "init", s] -> handleConInit s
       ["con", "status", s] -> handleConStatus s
@@ -360,6 +363,8 @@ house_main = do
       ["detect"] -> handleDetect
       ["vm"] -> handleVm
       ["palloc"] -> handlePalloc
+      ["fdtest"] -> handleFdtest
+      ["forktest"] -> handleForktest
       ["run"] -> withCString "usage: run <path> [args...]\n" c_uart_puts
       ("run" : p : args) -> handleRun p args
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
@@ -500,7 +505,7 @@ house_main = do
               ++ show (VProbe.vsiSlot i)
               ++ ": "
               ++ ( if VProbe.vsiPresent i
-                     then "device_id=" ++ show (VProbe.vsiDeviceId i) ++ " vendor=0x" ++ showHex (fromIntegral (VProbe.vsiVendorId i)) ++ " spi=" ++ maybe "?" show (VProbe.vsiSpi i)
+                     then "device_id=" ++ show (VProbe.vsiDeviceId i) ++ " (" ++ VProbe.virtioDeviceName (VProbe.vsiDeviceId i) ++ ") vendor=0x" ++ showHex (fromIntegral (VProbe.vsiVendorId i)) ++ " spi=" ++ maybe "?" show (VProbe.vsiSpi i)
                      else "empty"
                  )
       withCString (unlines (map fmt infos)) c_uart_puts
@@ -717,7 +722,78 @@ house_main = do
       case r of
         Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
+    handleDns name = do
+      xs <- runH NS.nsList
+      let slot = findNetSlot xs
+      r <- runH (Net.netDns slot name)
+      case r of
+        Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+        Right s -> withCString (s ++ "\n") c_uart_puts
     defaultEnv = ["HOUSE=1", "PATH=/bin"]
+    handleForktest = do
+      r <- runH $ do
+        mBytes <- FS.fsReadBytes "/bin/hello"
+        case mBytes of
+          Left e -> return (Left (showFsError e))
+          Right bytes -> case ULdr.loadElf bytes of
+            Left le -> return (Left (toExecError le))
+            Right elf -> do
+              res <- U.runElf elf ["/bin/hello"] defaultEnv
+              case res of
+                Left le2 -> return (Left (toExecError le2))
+                Right pidA -> do
+                  rf <- U.forkProc pidA
+                  case rf of
+                    Left le3 -> do _ <- U.killPid pidA; return (Left (toExecError le3))
+                    Right pidB -> do
+                      ok <- forkIsolated pidA pidB
+                      _ <- U.killPid pidA
+                      _ <- U.killPid pidB
+                      if ok then return (Right ()) else return (Left "not isolated")
+      case r of
+        Left e -> withCString ("forktest fail " ++ e ++ "\n") c_uart_puts
+        Right () -> withCString "forktest ok\n" c_uart_puts
+    forkIsolated pidA pidB = do
+      ma <- U.procInfo pidA
+      mb <- U.procInfo pidB
+      case (ma, mb) of
+        (Just pa, Just pb)
+          | U.procPdir pa /= U.procPdir pb
+          , U.procEntry pa == U.procEntry pb
+          , U.procBrk pa == U.procBrk pb -> do
+              let va = U.procEntry pa .&. complement 4095
+              ia <- VM.getPage (U.procPdir pa) va
+              ib <- VM.getPage (U.procPdir pb) va
+              case (ia, ib) of
+                (Just a, Just b) ->
+                  return (VM.physPage a /= VM.physPage b && VM.writable a == VM.writable b)
+                _ -> return False
+        _ -> return False
+    handleFdtest = do
+      r <- runH $ do
+        mFd <- U.fdOpen "/fdtest" 578 -- O_RDWR|O_CREAT|O_TRUNC
+        case mFd of
+          Left e -> return (Left (U.fdErrorToString e))
+          Right fd -> do
+            w <- U.fdWrite fd "hello fd"
+            case w of
+              Left e -> do _ <- U.fdClose fd; return (Left (U.fdErrorToString e))
+              Right _ -> do
+                s <- U.fdSeek fd 0 0 -- SEEK_SET
+                case s of
+                  Left e -> do _ <- U.fdClose fd; return (Left (U.fdErrorToString e))
+                  Right _ -> do
+                    c <- U.fdRead fd 64
+                    case c of
+                      Left e -> do _ <- U.fdClose fd; return (Left (U.fdErrorToString e))
+                      Right txt -> do
+                        _ <- U.fdClose fd
+                        if txt == "hello fd"
+                          then return (Right ())
+                          else return (Left ("mismatch: " ++ txt))
+      case r of
+        Left e -> withCString ("fdtest fail " ++ e ++ "\n") c_uart_puts
+        Right () -> withCString "fdtest ok\n" c_uart_puts
     handleRun path args = do
       r <- runH $ do
         mBytes <- FS.fsReadBytes path
@@ -743,7 +819,7 @@ house_main = do
           "       preempt -- preemption demo",
           "       wastemem <number> -- allocate memory",
           "       free -- show H.Pages + buddy + ram",
-          "       mem -- show ram/stack/buddy+ttbr",
+          "       mem -- show ram/stack/buddy+libc pool/ttbr",
           "       detect -- show ram/stack/caps",
           "       vm -- demand pager 100 pages + mmap/mprotect/munmap + isolate + asid+smp shootdown",
           "       smp -- show SMP cores online | smp up <core> | smp down <core> -- hotplug to ceiling 32, caps mirror online",
@@ -766,8 +842,11 @@ house_main = do
           "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)",
           "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; ramfs volatile, sync persists HFS1, mount restores)",
           "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)",
+          "       dns <name> -- A-record lookup via 10.0.2.3 (UDP/53, no TCP; e.g. dns example.com)",
           "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3 console / multiport serial port0 + control q2/q3 DEVICE_READY/OPEN, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)",
-          "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)"
+          "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)",
+          "       fdtest -- EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A pending ring)",
+          "       forktest -- EL1 forkProc page-map copy + isolation check (no COW/signals; EL0 spawn 0x08 pending ring)"
         ]
     seqFib :: Int -> Int
     seqFib n

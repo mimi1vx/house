@@ -6,6 +6,8 @@ Description : ELF loader -> PageMap -> EL0 entry with cleanup.
 -}
 module Kernel.Userspace.Process
   ( runElf,
+    forkProc,
+    procInfo,
     waitPid,
     killPid,
     procBrkGrow,
@@ -22,7 +24,7 @@ import Data.Word (Word32, Word64, Word8)
 import Foreign.C.String (withCString)
 import Foreign.C.Types (CChar, CInt (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import H.AdHocMem (peekElemOff, poke)
+import H.AdHocMem (peek, peekElemOff, poke)
 import H.Concurrency (forkH, threadDelay, withQSem)
 import H.Monad (H, liftIO)
 import H.Mutable (modifyRef, readRef, writeRef)
@@ -104,6 +106,94 @@ runElf elf argv envp = withQSem userSem $ do
                         return ()
                       _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
                       return (Right pid)
+
+-- | Fork slice (Track O, no COW, no signals): dormant copy of the
+-- parent address space into a fresh PageMap + Pid. Segments, brk-grown
+-- pages and the stack page are deep-copied page by page (capped at 8192
+-- pages); tables are freshly allocated by 'setPage'. The child shares
+-- nothing writable with the parent. Spawning the child on EL0 (register
+-- copy at the svc trap) waits on the delegation ring -- same pattern as
+-- the fd slice -- so svc 0x08 returns ENOSYS until then; exit codes keep
+-- flowing through the existing 'waitPid' path. Runs under 'userSem'.
+forkProc :: Pid -> H (Either LoadError Pid)
+forkProc parentPid = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup parentPid mp of
+    Nothing -> return (Left (BadSegment "no such pid"))
+    Just parent -> do
+      mChild <- VM.allocPageMap
+      case mChild of
+        Nothing -> return (Left NoSpace)
+        Just childPdir -> do
+          r <- copyAddrSpace (procPdir parent) childPdir (copyHi (procBrk parent))
+          case r of
+            Left e -> do
+              freePDir childPdir
+              return (Left e)
+            Right () -> do
+              pidInt <- readRef pidNext
+              writeRef pidNext (pidInt + 1)
+              let child = Pid pidInt
+              modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent)))
+              return (Right child)
+  where
+    copyHi brk = max brk stackTop
+    -- Walk [minVAddr, hi), descending only into user tables: the fresh
+    -- 'allocPageMap' L1 carries cloned kernel entries, and 'getPage'
+    -- treats any valid desc as a table -- following a kernel block desc
+    -- faults (EL1 data abort). A desc is ours iff Valid+Table (0x3, the
+    -- 'descFromTable' shape) and its pointer passes 'validPage' (buddy /
+    -- user pool, never kernel RAM). Anything else skips its whole range.
+    copyAddrSpace src dst hi = do
+      d0 <- peekElemOff (VM.fromPageMap src) 0
+      case userTable d0 of
+        Nothing -> return (Right ())
+        Just l1 -> go l1 VM.minVAddr 0
+      where
+        userTable d
+          | d .&. 3 == 3
+          , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
+              Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
+          | otherwise = Nothing
+        l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
+        l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
+        go l1 va n
+          | va >= hi = return (Right ())
+          | n > (8192 :: Int) = return (Left NoSpace)
+          | otherwise = do
+              d1 <- peekElemOff l1 (l1i va)
+              case userTable d1 of
+                Nothing -> go l1 (nextL1 va) n
+                Just l2 -> do
+                  d2 <- peekElemOff l2 (l2i va)
+                  case userTable d2 of
+                    Nothing -> go l1 (nextL2 va) n
+                    Just _ -> do
+                      mInfo <- VM.getPage src va
+                      case mInfo of
+                        Nothing -> go l1 (va + 4096) n
+                        Just info -> do
+                          mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                          case mp2 of
+                            Nothing -> return (Left NoSpace)
+                            Just raw -> do
+                              copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
+                              ok <- VM.setPage dst va (Just (info {VM.physPage = toPhysPage (castPtr raw)}))
+                              if not ok
+                                then do HPages.freePage raw; return (Left NoSpace)
+                                else go l1 (va + 4096) (n + 1)
+        nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
+        nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
+    copyPageBytes src dst =
+      forM_ [0 .. 4095] $ \i -> do
+        b <- peek (src `plusPtr` i) :: H Word8
+        poke (dst `plusPtr` i) b
+
+-- | EL1 lookup for the forktest isolation check (caller holds no locks).
+procInfo :: Pid -> H (Maybe Process)
+procInfo pid = withQSem userSem $ do
+  mp <- readRef procMap
+  return (Map.lookup pid mp)
 
 -- | Initial break: end of highest loaded segment, 16-byte aligned.
 initBreak :: Elf -> Word64

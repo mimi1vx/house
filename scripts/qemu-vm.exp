@@ -69,10 +69,11 @@ expect {
     eof { puts "\nFAIL: qemu exited before marker"; exit 1 }
 }
 # Buddy/MM pressure leg (Track D): record buddy free/total at this geometry
+# plus Track O allocator line (buddy + libc pool used/high-water).
 send "mem\r"
 expect {
-    -re "buddy \[0-9\]+/\[0-9\]+ pages" { puts "\nPASS: buddy free/total" }
-    timeout { puts "\nFAIL: buddy timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "buddy \[0-9\]+/\[0-9\]+ pages libc \[0-9\]+/\[0-9\]+" { puts "\nPASS: buddy free/total + libc used/high" }
+    timeout { puts "\nFAIL: buddy+libc timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before buddy"; exit 1 }
 }
 catch {exec kill -9 [exp_pid]}

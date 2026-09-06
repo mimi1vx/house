@@ -22,6 +22,7 @@ import Kernel.Shell.Foreign
     c_buddy_total,
     c_dtb_ref,
     c_get_ttbrs,
+    c_malloc_stats,
     c_mem_stats,
     c_ram_ref,
     c_ram_source_ref,
@@ -32,7 +33,6 @@ import Kernel.Shell.Foreign
 import Kernel.Shell.Format (showHex, showHex64)
 
 handleFree :: IO ()
-
 handleFree = do
   fc <- runH HPages.freePageCount
   tot <- c_buddy_total
@@ -46,6 +46,7 @@ handleFree = do
     t <- peek pTot
     f <- peek pFree
     withCString ("free: H.Pages=" ++ show fc ++ " buddy " ++ show freeB ++ "/" ++ show tot ++ " mem " ++ show f ++ "/" ++ show t ++ " ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " smp=" ++ show smpV ++ "\n") c_uart_puts
+
 handleMem :: IO ()
 handleMem = do
   ram <- peek c_ram_ref
@@ -69,12 +70,18 @@ handleMem = do
       else return ""
   tot <- c_buddy_total
   fr <- c_buddy_free
+  (lUsed, lHigh) <- alloca $ \pU -> alloca $ \pH -> do
+    c_malloc_stats pU pH
+    u <- peek pU
+    h <- peek pH
+    return (u, h)
   alloca $ \p0 -> alloca $ \p1 -> alloca $ \pt -> do
     c_get_ttbrs p0 p1 pt
     t0 <- peek p0
     t1 <- peek p1
     tc <- peek pt
-    withCString ("mem: ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " banks=" ++ show nb ++ b0 ++ " smp=" ++ show smpV ++ " stack_top 0x" ++ showHex (fromIntegral stk) ++ " buddy " ++ show fr ++ "/" ++ show tot ++ " pages ttbr0 0x" ++ showHex64 t0 ++ " ttbr1 0x" ++ showHex64 t1 ++ " tcr 0x" ++ showHex64 tc ++ "\n") c_uart_puts
+    withCString ("mem: ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " banks=" ++ show nb ++ b0 ++ " smp=" ++ show smpV ++ " stack_top 0x" ++ showHex (fromIntegral stk) ++ " buddy " ++ show fr ++ "/" ++ show tot ++ " pages libc " ++ show lUsed ++ "/" ++ show lHigh ++ " ttbr0 0x" ++ showHex64 t0 ++ " ttbr1 0x" ++ showHex64 t1 ++ " tcr 0x" ++ showHex64 tc ++ "\n") c_uart_puts
+
 handleDetect :: IO ()
 handleDetect = do
   ram <- peek c_ram_ref
@@ -98,4 +105,3 @@ handlePalloc = do
     Just p -> do
       withCString ("palloc ok " ++ show (ptrToIntPtr (castPtr p)) ++ "\n") c_uart_puts
       runH (HPages.freePage p) `catch` (\(_ :: SomeException) -> return ())
-

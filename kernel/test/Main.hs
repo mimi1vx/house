@@ -123,6 +123,14 @@ propIcmpRoundTrip ident seqNum =
   let payload = [1] :: [Word8]
    in Stack.decodeIcmpEcho (Stack.encodeIcmpEcho ident seqNum payload) === Right (8, ident, seqNum, payload)
 
+propDnsRoundTrip :: Word16 -> Property
+propDnsRoundTrip xid =
+  case Stack.encodeDnsQuery xid "example.com" of
+    Left _ -> property False
+    Right q -> case dnsFakeResponse xid q of
+      Nothing -> property False
+      Just resp -> Stack.decodeDnsResponse resp === Right (Stack.DnsResponse xid (NT.Ipv4 93 184 216 34))
+
 propBlkRoundTrip :: TestFiles -> Property
 propBlkRoundTrip (TestFiles files) =
   counterexample "encode failed" $ case BP.encodeImage files of
@@ -143,6 +151,20 @@ dhcpReplyGolden =
 trunc :: [a] -> [a]
 trunc xs = take (length xs - 1) xs
 
+{- | Build a synthetic DNS response for a query: header xid/0x8180/qd1/an1
++ echoed question + one A answer (pointer to qname, 93.184.216.34).
+-}
+dnsFakeResponse :: Word16 -> [Word8] -> Maybe [Word8]
+dnsFakeResponse xid q
+  | length q < 12 = Nothing
+  | otherwise =
+      let hi = fromIntegral (xid `div` 256) :: Word8
+          lo = fromIntegral (xid `mod` 256) :: Word8
+          hdr = [hi, lo, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
+          question = drop 12 q
+          answer = [0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 93, 184, 216, 34]
+       in Just (hdr ++ question ++ answer)
+
 -- Main ----------------------------------------------------------------------
 
 main :: IO ()
@@ -154,6 +176,7 @@ main = do
       , checkQC "ipv4 round-trip" (propIpv4RoundTrip :: NT.Ipv4 -> NT.Ipv4 -> Word8 -> Property)
       , checkQC "udp round-trip" (propUdpRoundTrip :: Word16 -> Word16 -> Property)
       , checkQC "icmp round-trip" (propIcmpRoundTrip :: Word16 -> Word16 -> Property)
+      , checkQC "dns query/response round-trip" (propDnsRoundTrip :: Word16 -> Property)
       , checkQC "blkpersist round-trip" (propBlkRoundTrip :: TestFiles -> Property)
       , -- Stack truncated goldens: Left, never ErrorCall
         assertLeft "eth empty" (Stack.decodeEthernet [])
@@ -170,6 +193,13 @@ main = do
       , assertLeft "dhcp short" (Stack.decodeDhcp (take 239 dhcpReplyGolden))
       , assertLeft "dhcp truncated" (Stack.decodeDhcp (take 250 dhcpReplyGolden))
       , check "dhcp bootreply golden" (Stack.decodeDhcp dhcpReplyGolden == Right (Stack.DhcpMsg 0x12345678 (NT.Ipv4 0 0 0 0) (NT.Ipv4 0 0 0 0) 1 Nothing))
+      , -- DNS goldens (total decoder, never ErrorCall)
+        assertLeft "dns empty" (Stack.decodeDnsResponse [])
+      , assertLeft "dns short" (Stack.decodeDnsResponse (replicate 11 0))
+      , assertLeft "dns bad name" (Stack.encodeDnsQuery 1 "")
+      , assertLeft "dns bad char" (Stack.encodeDnsQuery 1 "bad_name")
+      , check "dns query golden" (Stack.encodeDnsQuery 0x1234 "example.com" == Right [0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 7, 101, 120, 97, 109, 112, 108, 101, 3, 99, 111, 109, 0, 0x00, 0x01, 0x00, 0x01])
+      , check "dns response golden" (case Stack.encodeDnsQuery 0x1234 "example.com" of Left _ -> False; Right q -> case dnsFakeResponse 0x1234 q of Nothing -> False; Just r -> Stack.decodeDnsResponse r == Right (Stack.DnsResponse 0x1234 (NT.Ipv4 93 184 216 34)))
       , -- Types display goldens (total nibble render)
         check "showMac golden" (NT.showMac (NT.Mac 0 1 2 3 4 5) == "00:01:02:03:04:05")
       , check "showMac broadcast" (NT.showMac NT.macBroadcast == "ff:ff:ff:ff:ff:ff")

@@ -23,6 +23,13 @@ module Kernel.Userspace.Syscall
   ( syscallWrite,
     syscallExit,
     syscallBrk,
+    syscallOpen,
+    syscallRead,
+    syscallWriteFd,
+    syscallClose,
+    syscallFork,
+    syscallWait,
+    syscallSeek,
     syscallIpcSend,
     syscallIpcRecv,
     syscallIpcCall,
@@ -36,6 +43,23 @@ syscallWrite, syscallExit, syscallBrk :: Int
 syscallWrite = 0x01
 syscallExit = 0x02
 syscallBrk = 0x03
+
+-- | Track O fd/fork numbers (svc #imm). The fd slice (0x04..0x07 + 0x0A)
+-- backs 'Kernel.Userspace.Fd' over ramfs; fork/wait (0x08/0x09) backs
+-- 'Kernel.Userspace.Process.forkProc'. Numbering resolves the plan's
+-- overlap (fd 0x04-0x07 vs fork 0x05/0x06): fd takes 0x04-0x07,
+-- fork/wait move to 0x08/0x09, lseek takes 0x0A. EL0 trap wiring waits
+-- on the delegation ring; svc returns ENOSYS (-38) until then.
+syscallOpen, syscallRead, syscallWriteFd, syscallClose :: Int
+syscallOpen = 0x04
+syscallRead = 0x05
+syscallWriteFd = 0x06
+syscallClose = 0x07
+
+syscallFork, syscallWait, syscallSeek :: Int
+syscallFork = 0x08
+syscallWait = 0x09
+syscallSeek = 0x0A
 
 -- | IPC ops (svc #imm), validated by `ipc.rs` before any queue touch.
 syscallIpcSend, syscallIpcRecv, syscallIpcCall, syscallIpcReply, syscallIpcGrantMap :: Int

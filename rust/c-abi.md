@@ -53,7 +53,7 @@ Future symbol additions that touch these paths get bounds review first
   (`10.0.2.0/24` user-mode NAT); there is no DNSSEC/TLS in this slice
   (accepted risk — Track S). The guest still expires ARP entries after 60 s
   and logs DHCP xid mismatches to `dmesg` instead of accepting them.
-- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`) and
+- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`, Track O fd/fork `0x04..0x0A` fail-closed ENOSYS until the trap delegation ring lands) and
   `house_ipc_svc_dispatch` (`IPC 0x10..0x14`) take raw `imm`/`x0..x3` from EL0;
   unknown `imm` returns an error, user pointers are validated before
   copy (`house_ipc_copy_msg` is length-bounded).
@@ -439,6 +439,7 @@ called from the HAL rearm path; `house_uptime_ns` backs timerfd pacing.
 | `house-libc` | `realloc` | `void *realloc(void *old, size_t n)` | `tinylibc/alloc.c` |
 | `house-libc` | `posix_memalign` | `int posix_memalign(void **out, size_t align, size_t n)` | `tinylibc/alloc.c` |
 | `house-libc` | `strdup` | `char *strdup(const char *s)` | `tinylibc/alloc.c` |
+| `house-libc` | `house_malloc_stats` | `void house_malloc_stats(uint64_t *used_out, uint64_t *high_out)` | `tinylibc/alloc.c` → `alloc.rs` (Track O observability: live payload bytes + high-water under `ALLOC_LOCK`) |
 | `house-libc` | `mmap` | `void *mmap(void *addr, size_t len, int prot, int flags, int fd, long off)` | `mm/vm.c` (+ `alloc.c` bump) |
 | `house-libc` | `munmap` | `int munmap(void *a, size_t len)` | `mm/vm.c` |
 | `house-libc` | `mprotect` | `int mprotect(void *a, size_t len, int prot)` | `mm/vm.c` |
