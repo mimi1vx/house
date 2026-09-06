@@ -130,7 +130,11 @@ static mut NET_SLOTS: [NetSlotState; 8] = [
 
 #[inline]
 fn slot_base(slot: i32) -> u64 {
-    BASE_H + slot as u64 * STRIDE_H
+    // checked_* defense in depth (see virtio_transport slot_base).
+    (slot as u64)
+        .checked_mul(STRIDE_H)
+        .and_then(|o| BASE_H.checked_add(o))
+        .unwrap_or(u64::MAX)
 }
 #[inline]
 fn slot_valid(slot: i32) -> bool {

@@ -129,7 +129,11 @@ pub unsafe extern "C" fn house_detect_early() {
         let Some(top) = top else {
             house_ram_bytes = FALLBACK_RAM;
             house_ram_source = b"fallback\0".as_ptr();
-            house_boot_stack_top = RAM_BASE + FALLBACK_RAM - STACK_RESERVE;
+            // checked_add/sub: const-safe (0x40000000+512M-2M), never wrap.
+            house_boot_stack_top = RAM_BASE
+                .checked_add(FALLBACK_RAM)
+                .and_then(|e| e.checked_sub(STACK_RESERVE))
+                .unwrap_or(RAM_BASE);
             house_smp = if smp >= 1 { smp } else { 2 };
             return;
         };

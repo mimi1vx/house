@@ -56,6 +56,16 @@ Future symbol additions that touch these paths get bounds review first
 - **Buddy containment.** `buddy_free_page`/`buddy_contains` reject null,
    misaligned, and out-of-range (`BUDDY_START..BUDDY_END`) pages; the managed
    window is `__heap_base+64M .. stack_top-N*64K` (N = detected cores).
+- **C-vs-Rust cache/TLBI parity.** The C provenance is fully
+  ported — no `dc cvac|dc ivac|dsb sy|tlbi` sites remain under
+  `platform/aarch64` (only `aarch64.ld`/`Makefile`/Haskell harnesses); `rg`
+  there is clean. Sole owners are now `mmio.rs` (`dc_cvac_range`/`dc_ivac_range`
+  64 B lines + `dsb sy`/`dmb sy`, `tlbi_vae1is[_ish]`/`tlbi_vmalle1is` +
+  `dsb ish`/`isb`, matching the pre-port `virtio_transport.c` flush and
+  `mmu.c` shootdown sequences) and `virtio_transport_dc_flush` (same
+  `dc cvac` loop + `dsb sy; dmb ish`), with `*_invalidate` before every RX
+  read (blk/net/con `poll_used` + Haskell `invalidateGrant`/`netInvalidate`/
+  `conInvalidate` before payload reads).
 
 Legend: **Crate** is the defining Rust crate; **Symbol** is the exact
 `#[no_mangle]` name `ld` expects; **C signature** is the pre-port C declaration;

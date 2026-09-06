@@ -65,14 +65,17 @@ pub unsafe fn mmio_w64(addr: u64, v: u64) {
 /// `base+off` must satisfy `mmio_r32` preconditions; overflow checked by caller.
 #[inline(always)]
 pub unsafe fn mmio_r32_off(base: usize, off: usize) -> u32 {
-    // SAFETY: caller guarantees base+off MMIO.
-    unsafe { mmio_r32((base + off) as u64) }
+    // SAFETY: caller guarantees base+off MMIO; overflow saturates to a
+    // fault-loud address instead of wrapping to a valid device.
+    let addr = base.checked_add(off).unwrap_or(usize::MAX) as u64;
+    unsafe { mmio_r32(addr) }
 }
 
 #[inline(always)]
 pub unsafe fn mmio_w32_off(base: usize, off: usize, v: u32) {
-    // SAFETY: caller guarantees base+off MMIO.
-    unsafe { mmio_w32((base + off) as u64, v) }
+    // SAFETY: caller guarantees base+off MMIO (see mmio_r32_off).
+    let addr = base.checked_add(off).unwrap_or(usize::MAX) as u64;
+    unsafe { mmio_w32(addr, v) }
 }
 
 /// Read 8-bit MMIO at `addr` via `ldrb`.
@@ -168,7 +171,11 @@ pub unsafe fn dc_cvac_range(pa: u64, len: usize) {
         let mut cur = pa & !(DC_LINE - 1);
         while cur < end {
             asm!("dc cvac, {0}", in(reg) cur, options(nostack, preserves_flags));
-            cur += DC_LINE;
+            // checked_add: a wrap near u64::MAX must end the loop, not spin.
+            match cur.checked_add(DC_LINE) {
+                Some(n) => cur = n,
+                None => break,
+            }
         }
         asm!("dsb sy", options(nostack, preserves_flags));
         asm!("dmb sy", options(nostack, preserves_flags));
@@ -189,7 +196,11 @@ pub unsafe fn dc_ivac_range(pa: u64, len: usize) {
         let mut cur = pa & !(DC_LINE - 1);
         while cur < end {
             asm!("dc ivac, {0}", in(reg) cur, options(nostack, preserves_flags));
-            cur += DC_LINE;
+            // checked_add: same wrap guard as dc_cvac_range.
+            match cur.checked_add(DC_LINE) {
+                Some(n) => cur = n,
+                None => break,
+            }
         }
         asm!("dsb sy", options(nostack, preserves_flags));
         asm!("dmb sy", options(nostack, preserves_flags));

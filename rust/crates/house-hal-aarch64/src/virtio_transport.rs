@@ -46,7 +46,12 @@ const VIRTIO_ERR_INVAL: i32 = -9;
 
 #[inline]
 fn slot_base(slot: i32) -> u64 {
-    BASE_H + slot as u64 * STRIDE_H
+    // checked_* defense in depth: callers check slot_valid first, but a
+    // wrapping base must fault loudly (u64::MAX), never alias a live device.
+    (slot as u64)
+        .checked_mul(STRIDE_H)
+        .and_then(|o| BASE_H.checked_add(o))
+        .unwrap_or(u64::MAX)
 }
 #[inline]
 fn slot_valid(slot: i32) -> bool {
@@ -70,7 +75,11 @@ pub unsafe extern "C" fn virtio_transport_dc_flush(pa: u64, len: usize) {
         let mut p = start;
         while p < end {
             core::arch::asm!("dc cvac, {0}", in(reg) p, options(nostack, preserves_flags));
-            p += 64;
+            // checked_add: a wrap near u64::MAX must end the loop, not spin.
+            match p.checked_add(64) {
+                Some(n) => p = n,
+                None => break,
+            }
         }
         core::arch::asm!("dsb sy; dmb ish", options(nostack, preserves_flags));
     }
