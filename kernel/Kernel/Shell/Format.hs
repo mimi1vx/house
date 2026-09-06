@@ -9,7 +9,7 @@ module Kernel.Shell.Format (
 where
 
 import Data.Word (Word64)
-import qualified H.FileSystem as FS
+import qualified Kernel.FileSystem.Vfs as FS
 import qualified Kernel.Userspace.Loader as ULdr
 
 -- | Total hex digit; the index is always reduced mod 16.

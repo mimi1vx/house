@@ -32,6 +32,7 @@ import qualified H.Pages as HPages
 import H.PhysicalMemory (fromPhysPage, toPhysPage)
 import H.Utils (ptrFromWord64)
 import qualified H.VirtualMemory as VM
+import qualified Kernel.FileSystem.Vfs as Vfs
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..))
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procMap, processExitVar, userSem)
 
@@ -61,6 +62,7 @@ runElf :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
 runElf elf argv envp = withQSem userSem $ do
   pidInt <- readRef pidNext
   writeRef pidNext (pidInt + 1)
+  _ <- Vfs.vfsEnsurePid pidInt
   let pid = Pid pidInt
   _ <- liftIO c_clear_exit
   mPdir <- VM.allocPageMap
@@ -117,7 +119,7 @@ the fd slice -- so svc 0x08 returns ENOSYS until then; exit codes keep
 flowing through the existing 'waitPid' path. Runs under 'userSem'.
 -}
 forkProc :: Pid -> H (Either LoadError Pid)
-forkProc parentPid = withQSem userSem $ do
+forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup parentPid mp of
     Nothing -> return (Left (BadSegment "no such pid"))
@@ -136,6 +138,7 @@ forkProc parentPid = withQSem userSem $ do
               writeRef pidNext (pidInt + 1)
               let child = Pid pidInt
               modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent)))
+              Vfs.vfsForkPid parentInt pidInt
               return (Right child)
   where
     copyHi brk = max brk stackTop
@@ -259,7 +262,7 @@ pokeWord64LE p o w = do
   poke (p `plusPtr` (o + 7)) (fromIntegral (w `shiftR` 56) :: Word8)
 
 waitPid :: Pid -> H Int
-waitPid pid = do
+waitPid pid@(Pid pidInt) = do
   code <- pollExit
   mProc <- withQSem userSem $ do
     mp <- readRef procMap
@@ -268,6 +271,7 @@ waitPid pid = do
       Just pr -> do
         writeRef procMap (Map.delete pid mp)
         return (Just pr)
+  Vfs.vfsReleasePid pidInt
   case mProc of
     Nothing -> return code
     Just pr -> do
@@ -275,13 +279,15 @@ waitPid pid = do
       return code
 
 killPid :: Pid -> H ()
-killPid pid = withQSem userSem $ do
-  mp <- readRef procMap
-  case Map.lookup pid mp of
-    Nothing -> return ()
-    Just pr -> do
-      writeRef procMap (Map.delete pid mp)
-      freePDir (procPdir pr)
+killPid pid@(Pid pidInt) = do
+  withQSem userSem $ do
+    mp <- readRef procMap
+    case Map.lookup pid mp of
+      Nothing -> return ()
+      Just pr -> do
+        writeRef procMap (Map.delete pid mp)
+        freePDir (procPdir pr)
+  Vfs.vfsReleasePid pidInt
 
 pollExit :: H Int
 pollExit = loop

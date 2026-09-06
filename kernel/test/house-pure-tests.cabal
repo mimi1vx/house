@@ -44,6 +44,9 @@ test-suite house-pure
     Kernel.Driver.Virtio.Transport
     Kernel.Driver.VirtioProbe
     Kernel.FileSystem.BlkPersist
+    Kernel.FileSystem.BlkFs
+    Kernel.FileSystem.RamFs
+    Kernel.FileSystem.Vfs
     Kernel.IPC.Endpoint
     Kernel.IPC.Grant
     Kernel.IPC.Nameservice

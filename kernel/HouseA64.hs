@@ -19,7 +19,6 @@ import GHC.Conc (
   pseq,
   setNumCapabilities,
  )
-import qualified H.FileSystem as FS
 import H.Monad (runH)
 import H.Mutable (writeRef)
 import qualified H.VirtualMemory as VM
@@ -41,6 +40,8 @@ import qualified Kernel.Driver.Virtio.Transport as VTrans
 import qualified Kernel.Driver.Virtio.Types as VTypes
 import qualified Kernel.Driver.VirtioProbe as VProbe
 import qualified Kernel.FileSystem.BlkPersist as BlkPersist
+import qualified Kernel.FileSystem.RamFs as RamFs
+import qualified Kernel.FileSystem.Vfs as FS
 import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
 import qualified Kernel.IPC.Nameservice as NS
@@ -2691,24 +2692,25 @@ house_main = do
   console <- runH PL011.launchConsoleDriver
   kbd <- runH PL011.launchPL011KeyboardDriver
   editor <- runH (LE.newEditor kbd console)
-  _ <- runH FS.fsInit
+  _ <- runH (FS.vfsMount FS.defaultNamespace "/" RamFs.ramfsOps)
+  _ <- runH (FS.vfsInit FS.defaultNamespace)
   -- bootstrap /bin/hello + /bin/argenv from embedded bytes if missing
   _ <- runH $ do
-    r <- FS.fsStat "/bin/hello"
+    r <- FS.vfsStat FS.defaultNamespace "/bin/hello"
     case r of
       Right _ -> return ()
       Left _ -> do
-        _ <- FS.fsMkdir "/bin"
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
         let txt = map (chr . fromIntegral) helloBytes
-        _ <- FS.fsWrite "/bin/hello" txt
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/hello" txt
         return ()
-    r2 <- FS.fsStat "/bin/argenv"
+    r2 <- FS.vfsStat FS.defaultNamespace "/bin/argenv"
     case r2 of
       Right _ -> return ()
       Left _ -> do
-        _ <- FS.fsMkdir "/bin"
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
         let txt2 = map (chr . fromIntegral) argenvBytes
-        _ <- FS.fsWrite "/bin/argenv" txt2
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/argenv" txt2
         return ()
   _ <- runH Dmesg.dmesgInit
   _ <- runH (Dmesg.dmesgLog "House driver framework online")
@@ -2821,7 +2823,7 @@ house_main = do
       (pre, _ : rest) -> case rest of
         [] -> withCString "EINVAL: missing target after >\n" c_uart_puts
         (target : _) -> do
-          r <- runH (FS.fsWrite target (unwords pre))
+          r <- runH (FS.vfsWrite FS.defaultNamespace target (unwords pre))
           case r of
             Left e -> withCString (showFsError e ++ "\n") c_uart_puts
             Right () -> return ()
@@ -2847,32 +2849,32 @@ house_main = do
             withCString ("smp down ok online=" ++ show k ++ "\n") c_uart_puts
       _ -> withCString "usage: smp down <core>\n" c_uart_puts
     handleLs p = do
-      r <- runH (FS.fsLs p)
+      r <- runH (FS.vfsLs FS.defaultNamespace p)
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right xs -> withCString (unwords xs ++ "\n") c_uart_puts
     handleCat p = do
-      r <- runH (FS.fsRead p)
+      r <- runH (FS.vfsRead FS.defaultNamespace p)
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
     handleMkdir p = do
-      r <- runH (FS.fsMkdir p)
+      r <- runH (FS.vfsMkdir FS.defaultNamespace p)
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right () -> return ()
     handleRm p = do
-      r <- runH (FS.fsRm p)
+      r <- runH (FS.vfsRm FS.defaultNamespace p)
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right () -> return ()
     handleStat p = do
-      r <- runH (FS.fsStat p)
+      r <- runH (FS.vfsStat FS.defaultNamespace p)
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right st -> withCString (show st ++ "\n") c_uart_puts
     handleWrite p txt = do
-      r <- runH (FS.fsWrite p txt)
+      r <- runH (FS.vfsWrite FS.defaultNamespace p txt)
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right () -> return ()
@@ -3178,7 +3180,7 @@ house_main = do
     defaultEnv = ["HOUSE=1", "PATH=/bin"]
     handleForktest = do
       r <- runH $ do
-        mBytes <- FS.fsReadBytes "/bin/hello"
+        mBytes <- FS.vfsReadBytes FS.defaultNamespace "/bin/hello"
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> case ULdr.loadElf bytes of
@@ -3242,7 +3244,7 @@ house_main = do
         Right () -> withCString "fdtest ok\n" c_uart_puts
     handleRun path args = do
       r <- runH $ do
-        mBytes <- FS.fsReadBytes path
+        mBytes <- FS.vfsReadBytes FS.defaultNamespace path
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> do

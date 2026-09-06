@@ -25,6 +25,7 @@ import H.FileSystem qualified as FS
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types qualified as NT
 import Kernel.FileSystem.BlkPersist qualified as BP
+import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.Userspace.Loader qualified as Ldr
 import System.Exit (exitFailure)
 import Test.QuickCheck (Arbitrary (..), Property, choose, counterexample, property, quickCheckResult, vectorOf, (===))
@@ -217,6 +218,14 @@ main = do
       , assertLeft "blk bad path" (BP.encodeImage [("noSlash", [1])])
       , assertLeft "blk empty path" (BP.encodeImage [("", [1])])
       , blkTruncGolden
+      , check "vfs longest-prefix" (Vfs.resolvePrefix [([], "root"), (["a"], "a"), (["a", "b"], "blk")] ["a", "b", "c"] == Just ("blk", ["c"]))
+      , check "vfs root-fallback" (Vfs.resolvePrefix [([], "root"), (["a"], "a")] ["z"] == Just ("root", ["z"]))
+      , check "vfs dotdot confined" (Vfs.splitPath "/a/../../b" == Right ["b"])
+      , check "vfs joinRel root" (Vfs.joinRel [] == "/")
+      , check "vfs joinRel nested" (Vfs.joinRel ["a", "b"] == "/a/b")
+      , check "vfs ns isolation" (Vfs.resolvePrefix [([], "ram")] ["mnt", "x"] == Just ("ram", ["mnt", "x"]) && Vfs.resolvePrefix [(["mnt"], "blk"), ([], "ram")] ["mnt", "x"] == Just ("blk", ["x"]))
+      , assertLeft "vfs mount relative" (Vfs.normalizeMount "ram")
+      , check "vfs headerTotal" (case BP.encodeImage [("/a", [1, 2, 3])] of Left _ -> False; Right img -> BP.headerTotal img == Right (length img))
       , -- splitPath goldens
         check "splitPath a/b" (FS.splitPath "/a/b" == Right ["a", "b"])
       , check "splitPath collapse" (FS.splitPath "/a//b" == Right ["a", "b"])

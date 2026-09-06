@@ -8,20 +8,21 @@ module Kernel.FileSystem.BlkPersist (
   persistRestore,
   encodeImage,
   decodeImage,
+  headerTotal,
 )
 where
 
 import Data.Bits (complement, shiftL, shiftR, (.&.))
 import Data.Char (chr, ord)
 import Data.Word (Word32, Word8)
-import H.FileSystem qualified as FS
 import H.Monad (H)
 import Kernel.Driver.Virtio.Blk.Server qualified as Blk
 import Kernel.Driver.Virtio.Blk.Types (BlkError)
+import Kernel.FileSystem.Vfs qualified as VFS
 
 data PersistError
   = PersistBlk BlkError
-  | PersistFs FS.FsError
+  | PersistFs VFS.FsError
   | PersistFormat String
   deriving (Eq, Show)
 
@@ -141,6 +142,14 @@ decodeHeader bytes
       | nFiles < 0 || nFiles > maxFiles = Left "bad count"
       | otherwise = Right (caps, total, nFiles, hdrLen)
 
+{- | Total declared by the header without decoding entries.
+Used by the VFS block backend to bound reads before trusting the body.
+-}
+headerTotal :: [Word8] -> Either String Int
+headerTotal bytes = case decodeHeader bytes of
+  Left s -> Left s
+  Right (_, total, _, _) -> Right total
+
 -- | Pure decode. Total; corrupt magic yields Left, never a crash.
 decodeImage :: [Word8] -> Either String [(FilePath, [Word8])]
 decodeImage bytes = case decodeHeader bytes of
@@ -210,12 +219,12 @@ persistSave slot = do
         Left e -> return (Left e)
         Right () -> writeBlocks s (lba + 1) rest
 
-collectAll :: H (Either FS.FsError [(FilePath, [Word8])])
+collectAll :: H (Either VFS.FsError [(FilePath, [Word8])])
 collectAll = go ["/"] []
   where
     go [] acc = return (Right acc)
     go (dir : stack) acc = do
-      eLs <- FS.fsLs dir
+      eLs <- VFS.vfsLs VFS.defaultNamespace dir
       case eLs of
         Left e -> return (Left e)
         Right names -> do
@@ -226,18 +235,18 @@ collectAll = go ["/"] []
     walkNames _ [] = return (Right ([], []))
     walkNames dir (n : ns) = do
       let full = if dir == "/" then "/" ++ n else dir ++ "/" ++ n
-      eSt <- FS.fsStat full
+      eSt <- VFS.vfsStat VFS.defaultNamespace full
       case eSt of
         Left e -> return (Left e)
         Right st ->
-          if FS.fsIsDir st
+          if VFS.fsIsDir st
             then do
               r <- walkNames dir ns
               case r of
                 Left e -> return (Left e)
                 Right (fs, ds) -> return (Right (fs, full : ds))
             else do
-              eR <- FS.fsRead full
+              eR <- VFS.vfsRead VFS.defaultNamespace full
               case eR of
                 Left e -> return (Left e)
                 Right s -> do
@@ -291,13 +300,13 @@ persistRestore slot = do
             Left e -> return (Left e)
             Right bs -> return (Right (b : bs))
     restoreFiles files = do
-      FS.fsInit
+      VFS.vfsInit VFS.defaultNamespace
       go files
     go [] = return (Right ())
     go ((p, bs) : rest) = do
       mapM_ ensureDir (parentDirs p)
       let s = map (chr . fromIntegral) bs
-      r <- FS.fsWrite p s
+      r <- VFS.vfsWrite VFS.defaultNamespace p s
       case r of
         Left e -> return (Left (PersistFs e))
         Right () -> go rest
@@ -314,7 +323,7 @@ persistRestore slot = do
     joinWith _ [x] = x
     joinWith s (x : xs) = x ++ s ++ joinWith s xs
     ensureDir d = do
-      r <- FS.fsMkdir d
+      r <- VFS.vfsMkdir VFS.defaultNamespace d
       case r of
         Left _ -> return ()
         Right () -> return ()

@@ -9,10 +9,10 @@ import Control.Monad (unless)
 import Data.List (elemIndices, isPrefixOf)
 import Data.Set (member)
 import H.Concurrency
-import qualified H.FileSystem as FS
 import H.Monad (H)
 import Kernel.Console
 import Kernel.Driver.Keyboard (KMod (..), KModSide (..), Key (..), KeyPress (..))
+import qualified Kernel.FileSystem.Vfs as VFS
 import Kernel.Types.Console (VideoAttributes)
 
 {---
@@ -236,7 +236,7 @@ completeWord :: String -> H String
 completeWord before = do
   let word = reverse (takeWhile (/= ' ') (reverse before))
       (dir, pref) = splitWord word
-  eLs <- FS.fsLs dir
+  eLs <- VFS.vfsLs VFS.defaultNamespace dir
   case eLs of
     Left _ -> return before
     Right names -> do
@@ -245,8 +245,8 @@ completeWord before = do
         [] -> return before
         [one] -> do
           let full = joinDir dir one
-          eSt <- FS.fsStat full
-          let slash = case eSt of Right st -> FS.fsIsDir st; _ -> False
+          eSt <- VFS.vfsStat VFS.defaultNamespace full
+          let slash = case eSt of Right st -> VFS.fsIsDir st; _ -> False
               target = one ++ (if slash then "/" else "")
               extra = drop (length pref) target
           return (before ++ extra)

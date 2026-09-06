@@ -33,6 +33,7 @@ module Kernel.Userspace (
   Kernel.Userspace.Fd.FdError (..),
   Kernel.Userspace.Fd.fdErrorToString,
   Kernel.Userspace.Fd.fdOpen,
+  Kernel.Userspace.Fd.fdOpenIn,
   Kernel.Userspace.Fd.fdRead,
   Kernel.Userspace.Fd.fdWrite,
   Kernel.Userspace.Fd.fdClose,
