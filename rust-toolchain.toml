@@ -1,4 +1,4 @@
 [toolchain]
-channel = "stable"
+channel = "nightly"
 targets = ["aarch64-unknown-none"]
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "miri"]
