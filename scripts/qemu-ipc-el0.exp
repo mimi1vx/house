@@ -1,0 +1,72 @@
+#!/usr/bin/expect -f
+# EL0 IPC ping-pong harness (multiprocess step 6): server RECV+REPLY and
+# client CALL pair through the park/resume ring with payload verified both
+# ways (`pong ok` + `served ok`, both exit 0).
+# Usage: expect scripts/qemu-ipc-el0.exp <kernel.bin> [marker] [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+if {$marker eq "" || $marker eq "hvf" || $marker eq "tcg"} {
+    set smp $mem
+    set mem $accel
+    set accel $marker
+    set marker "ipc-el0-ok"
+}
+if {$marker eq ""} { set marker "ipc-el0-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 90 } else { set timeout 60 }
+} else {
+    set timeout $timeout_arg
+}
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "ns reg pp\r"
+expect {
+    -re "registered pp|pp" { puts "\nPASS: ns reg pp" }
+    timeout { puts "\nFAIL: ns reg pp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ns reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "ipc el0pp pp\r"
+expect {
+    -re "served ok" { puts "\nPASS: EL0 server served + replied" }
+    timeout { puts "\nFAIL: served ok timeout (RECV/REPLY ring wedged?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before served ok"; exit 1 }
+}
+expect {
+    -re "pong ok" { puts "\nPASS: EL0 client pong (payload verified both ways)" }
+    timeout { puts "\nFAIL: pong ok timeout (CALL ring wedged?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before pong ok"; exit 1 }
+}
+expect {
+    -re "ipc el0pp ok server=0 client=0" { puts "\nPASS: both exited 0" }
+    timeout { puts "\nFAIL: el0pp ok timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before el0pp ok"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt at end" }
+    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof at end"; exit 1 }
+}
+puts "\nPASS: $marker"
+catch {exec kill -9 [exp_pid]}
+exit 0

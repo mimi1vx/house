@@ -66,40 +66,76 @@ pub unsafe extern "C" fn house_ipc_svc_dispatch(
 ) -> i64 {
     // SAFETY: trap context; integer validation plus page-table reads only,
     // never blocks on the Haskell rendezvous; unknown `op` returns an error.
-    unsafe {
-        let _ep = x0;
-        match op {
-            IPC_SEND | IPC_CALL | IPC_REPLY => {
-                let r = inline_words_ok(x1, x2);
-                if r != 0 {
-                    return r;
-                }
-                ENOSYS
+    let _ep = x0;
+    // SAFETY: validator contract (page-table reads only).
+    let r = unsafe { validate_ipc(op, x1, x2) };
+    if r == VALID_PARK {
+        return ENOSYS;
+    }
+    r
+}
+
+// Validation outcome shared by dispatch (errno inline) and the park gate.
+const VALID_PARK: i64 = 1;
+
+// SAFETY: integer validation plus EL1 page-table reads only; no locks,
+// no allocation, never blocks on the Haskell rendezvous.
+unsafe fn validate_ipc(op: u32, x1: u64, x2: u64) -> i64 {
+    // Integer validation plus page-table reads only; no locks, no blocking.
+    match op {
+        IPC_SEND | IPC_CALL | IPC_REPLY => {
+            // SAFETY: validator contract (page-table reads only).
+            let r = unsafe { inline_words_ok(x1, x2) };
+            if r != 0 {
+                return r;
             }
-            IPC_RECV => {
-                if x1 == 0 && x2 == 0 {
-                    return ENOSYS;
-                }
-                let r = inline_words_ok(x1, x2);
-                if r != 0 {
-                    return r;
-                }
-                ENOSYS
-            }
-            IPC_GRANT_MAP => {
-                if x2 > 1 {
-                    return EINVAL;
-                }
-                if x1 & 0xFFF != 0 {
-                    return EINVAL;
-                }
-                if validate_user_buffer(x1, 4096) != 0 {
-                    return EFAULT;
-                }
-                ENOSYS
-            }
-            _ => EINVAL,
+            VALID_PARK
         }
+        IPC_RECV => {
+            if x1 == 0 && x2 == 0 {
+                return VALID_PARK;
+            }
+            // SAFETY: validator contract (page-table reads only).
+            let r = unsafe { inline_words_ok(x1, x2) };
+            if r != 0 {
+                return r;
+            }
+            VALID_PARK
+        }
+        IPC_GRANT_MAP => {
+            if x2 > 1 {
+                return EINVAL;
+            }
+            if x1 & 0xFFF != 0 {
+                return EINVAL;
+            }
+            // SAFETY: page-table reads only.
+            if unsafe { validate_user_buffer(x1, 4096) } != 0 {
+                return EFAULT;
+            }
+            // Grant page transfer has no Haskell pairing yet: stay inline
+            // ENOSYS (handled by the dispatch wrapper, never parked).
+            ENOSYS
+        }
+        _ => EINVAL,
+    }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); same integer + page-table
+// validation as dispatch, no locks or allocation. Returns 1 when the call
+// validated and should park for Haskell pairing, 0 when validation failed
+// (caller falls through to dispatch for the precise errno), -22 unknown op.
+// GRANT_MAP always returns 0 (inline ENOSYS until the grant-transfer slice).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_ipc_should_park(op: u32, x1: u64, x2: u64) -> i32 {
+    // SAFETY: delegates to the lock-free validator.
+    let r = unsafe { validate_ipc(op, x1, x2) };
+    if r == VALID_PARK {
+        1
+    } else if r == ENOSYS || r == EFAULT || r == EINVAL {
+        0
+    } else {
+        -22
     }
 }
 

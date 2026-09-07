@@ -17,7 +17,7 @@ module Kernel.Userspace.Process (
 )
 where
 
-import Control.Concurrent (tryTakeMVar)
+import Control.Concurrent (tryPutMVar, tryTakeMVar)
 import Control.Monad (forM_, void, when)
 import Data.Bits (complement, shiftR, (.&.))
 import Data.Char (ord)
@@ -26,17 +26,21 @@ import Data.Word (Word32, Word64, Word8)
 import Foreign.C.String (withCString)
 import Foreign.C.Types (CChar, CInt (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import H.AdHocMem (allocaArray, peek, peekElemOff, poke)
+import H.AdHocMem (allocaArray, peek, peekElemOff, poke, pokeElemOff)
 import H.Concurrency (MVar, forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
-import H.Monad (H, liftIO)
-import H.Mutable (modifyRef, readRef, writeRef)
+import H.Monad (H, liftIO, runH)
+import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import qualified H.Pages as HPages
 import H.PhysicalMemory (fromPhysPage, toPhysPage)
+import H.Unsafe (unsafePerformH)
 import H.Utils (ptrFromWord64)
 import qualified H.VirtualMemory as VM
 import qualified Kernel.FileSystem.Vfs as Vfs
+import qualified Kernel.IPC.Endpoint as IPC
+import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..))
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
+import qualified System.Timeout as T
 
 foreign import ccall unsafe "house_enter_el0" c_enter_el0 :: Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO ()
 
@@ -60,6 +64,10 @@ foreign import ccall unsafe "house_el0_take_request" c_el0_take :: Ptr Word64 ->
 
 foreign import ccall unsafe "house_resume_el0" c_resume_el0 :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
 
+foreign import ccall unsafe "house_user_read" c_user_read :: Ptr Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO CInt
+
+foreign import ccall unsafe "house_user_write" c_user_write :: Ptr Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO CInt
+
 foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
@@ -69,11 +77,26 @@ foreign import ccall unsafe "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 stackTop :: Word64
 stackTop = 0x3FFFE000
 
-{- | Request parked by an EL0 trap (svc #imm). Only yield exists yet;
-IPC/fd/brk/fork ride the same ring next.
+{- | Request parked by an EL0 trap (svc #imm). Yield plus IPC
+0x10..0x13 ride the ring; GRANT_MAP 0x14 stays inline ENOSYS.
+Each IPC request carries the trapped x0..x3 (ep, va, nwords, tag).
 -}
-data ParkRequest = ReqYield | ReqUnknown Word32
+data ParkRequest
+  = ReqYield
+  | ReqIpcSend Word64 Word64 Word64 Word64
+  | ReqIpcRecv Word64 Word64 Word64
+  | ReqIpcCall Word64 Word64 Word64 Word64
+  | ReqIpcReply Word64 Word64 Word64 Word64
+  | ReqUnknown Word32
   deriving (Eq, Show)
+
+{- | Per-pid pending RECV reply slot for the EL0 REPLY trap. Inserted when a
+RECV parks its rendezvous handle, taken by the matching REPLY; reaped with
+NoSuchEndpoint when the pid dies underneath (unblocks a wedged sender).
+-}
+{-# NOINLINE pendingReply #-}
+pendingReply :: Ref (Map.Map Pid (MVar (Either IpcError Message)))
+pendingReply = unsafePerformH (newRef Map.empty)
 
 pfW :: Word32
 pfW = 2
@@ -293,14 +316,19 @@ waitPid :: Pid -> H Int
 waitPid pid@(Pid pidInt) = do
   mVar <- withQSem userSem (Map.lookup pid <$> readRef procExitMap)
   code <- maybe pollExit takeMVar mVar
-  mProc <- withQSem userSem $ do
+  (mProc, mStash) <- withQSem userSem $ do
     mp <- readRef procMap
     case Map.lookup pid mp of
-      Nothing -> return Nothing
+      Nothing -> return (Nothing, Nothing)
       Just pr -> do
         writeRef procMap (Map.delete pid mp)
         modifyRef procExitMap (Map.delete pid)
-        return (Just pr)
+        m <- readRef pendingReply
+        writeRef pendingReply (Map.delete pid m)
+        return (Just pr, Map.lookup pid m)
+  case mStash of
+    Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
+    Nothing -> return ()
   Vfs.vfsReleasePid pidInt
   case mProc of
     Nothing -> return code
@@ -311,14 +339,19 @@ waitPid pid@(Pid pidInt) = do
 
 killPid :: Pid -> H ()
 killPid pid@(Pid pidInt) = do
-  mProc <- withQSem userSem $ do
+  (mProc, mStash) <- withQSem userSem $ do
     mp <- readRef procMap
     case Map.lookup pid mp of
-      Nothing -> return Nothing
+      Nothing -> return (Nothing, Nothing)
       Just pr -> do
         writeRef procMap (Map.delete pid mp)
         modifyRef procExitMap (Map.delete pid)
-        return (Just pr)
+        m <- readRef pendingReply
+        writeRef pendingReply (Map.delete pid m)
+        return (Just pr, Map.lookup pid m)
+  case mStash of
+    Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
+    Nothing -> return ()
   Vfs.vfsReleasePid pidInt
   case mProc of
     Nothing -> return ()
@@ -328,9 +361,17 @@ killPid pid@(Pid pidInt) = do
 
 {- | Park loop: the EL0 session returned from FFI (exit or park), so no RTS
 capability is pinned while this thread polls. EXIT wins over PARK; yield
-resumes immediately with x0 = 0; unknown requests resume with ENOSYS so a
-hostile guest can never wedge the loop. Exits silently when the pid is
-reaped underneath (killPid) without touching the freed exit MVar.
+resumes immediately with x0 = 0; IPC 0x10..0x13 pair through the EL1
+Endpoint rendezvous (same blocking semantics as the shell path, bounded by
+a 5s timeout so a reaped pid never wedges a peer); unknown requests resume
+with ENOSYS so a hostile guest can never wedge the loop. Exits silently
+when the pid is reaped underneath (killPid) without touching freed tables:
+user copies run under 'userSem' (which 'freePDir' also holds) and resume on
+an unregistered pdir is a harmless -22.
+Return convention: SEND/CALL resume x0 = 0 with reply words in the user
+buffer; RECV resumes x0 = sender tag with received words in the buffer;
+REPLY resumes x0 = 0. Errors resume negative errnos: -2 NoSuchEndpoint,
+-11 EAGAIN (QueueFull or 5s pair timeout), -14 EFAULT, -22 EINVAL.
 -}
 parkLoop :: Pid -> Ptr Word64 -> Word64 -> MVar Int -> H ()
 parkLoop pid pdir asid exitVar = loop
@@ -347,8 +388,133 @@ parkLoop pid pdir asid exitVar = loop
               mReq <- tryTakeParkedOnce pdir
               case mReq of
                 Nothing -> do threadDelay 1000; loop
-                Just ReqYield -> do _ <- liftIO (c_resume_el0 pdir asid 0); loop
-                Just (ReqUnknown _) -> do _ <- liftIO (c_resume_el0 pdir asid (fromIntegral (-38 :: Int))); loop
+                Just ReqYield -> do resumeWith 0; loop
+                Just (ReqIpcSend ep va nw tag) -> do handleSend ep va nw tag; loop
+                Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
+                Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
+                Just (ReqIpcReply ep va nw tag) -> do handleReply ep va nw tag; loop
+                Just (ReqUnknown _) -> do resumeWith negENOSYS; loop
+    resumeWith res = void (liftIO (c_resume_el0 pdir asid res))
+    negENOSYS = fromIntegral (-38 :: Int) :: Word64
+    negENOENT = fromIntegral (-2 :: Int) :: Word64
+    negAGAIN = fromIntegral (-11 :: Int) :: Word64
+    negINVAL = fromIntegral (-22 :: Int) :: Word64
+    sendErrno QueueFull = negAGAIN
+    sendErrno WouldBlock = negAGAIN
+    sendErrno NoSuchEndpoint = negENOENT
+    sendErrno _ = negINVAL
+    handleSend ep va nw tag = do
+      mIn <- readUser pid pdir va nw
+      case mIn of
+        Nothing -> return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right ws) -> do
+          mep <- IPC.lookupEndpoint ep
+          case mep of
+            Nothing -> resumeWith negENOENT
+            Just h -> case mkMessage tag ws Nothing of
+              Left _ -> resumeWith negINVAL
+              Right msg -> do
+                res <- IPC.callTimeout 5000000 h msg
+                case res of
+                  Left e -> resumeWith (sendErrno e)
+                  Right reply -> do
+                    mRc <- writeUser pid pdir va (take (fromIntegral nw) (msgWords reply))
+                    case mRc of
+                      Just 0 -> resumeWith 0
+                      Just rc -> resumeWith (fromIntegral rc)
+                      Nothing -> return ()
+    handleRecv ep va nw = do
+      mep <- IPC.lookupEndpoint ep
+      case mep of
+        Nothing -> resumeWith negENOENT
+        Just h -> do
+          mRv <- liftIO (T.timeout 5000000 (runH (IPC.recv h)))
+          case mRv of
+            Nothing -> resumeWith negAGAIN
+            Just (msg, hReply) -> do
+              mRc <- withQSem userSem $ do
+                mp <- readRef procMap
+                case Map.lookup pid mp of
+                  Nothing -> return Nothing
+                  Just _ -> do
+                    modifyRef pendingReply (Map.insert pid hReply)
+                    let ws = take (min 8 (fromIntegral nw)) (msgWords msg)
+                    if null ws
+                      then return (Just 0)
+                      else allocaArray 8 $ \buf -> do
+                        mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
+                        rc <- liftIO (c_user_write pdir va buf (fromIntegral (length ws)))
+                        if rc /= 0
+                          then do modifyRef pendingReply (Map.delete pid); return (Just rc)
+                          else return (Just 0)
+              case mRc of
+                Nothing -> do
+                  _ <- liftIO (tryPutMVar hReply (Left NoSuchEndpoint))
+                  return ()
+                Just 0 -> resumeWith (msgTag msg)
+                Just rc -> resumeWith (fromIntegral rc)
+    handleReply _ep va nw tag = do
+      mIn <- readUser pid pdir va nw
+      case mIn of
+        Nothing -> do
+          mh <- withQSem userSem (takeStash pid)
+          case mh of
+            Nothing -> return ()
+            Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right ws) -> do
+          mh <- withQSem userSem (takeStash pid)
+          case mh of
+            Nothing -> resumeWith negINVAL
+            Just h -> case mkMessage tag ws Nothing of
+              Left _ -> do withQSem userSem (modifyRef pendingReply (Map.insert pid h)); resumeWith negINVAL
+              Right msg -> do IPC.reply h (Right msg); resumeWith 0
+    takeStash p = do
+      m <- readRef pendingReply
+      case Map.lookup p m of
+        Nothing -> return Nothing
+        Just h -> do writeRef pendingReply (Map.delete p m); return (Just h)
+
+{- | Read nwords from a live pid's user VA under 'userSem' (so 'freePDir'
+cannot run concurrently). Nothing when reaped underfoot; 0-length reads
+skip the FFI; over-8 lengths fail EINVAL without touching the buffer.
+-}
+readUser :: Pid -> Ptr Word64 -> Word64 -> Word64 -> H (Maybe (Either CInt [Word64]))
+readUser p pd va nw = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup p mp of
+    Nothing -> return Nothing
+    Just _ ->
+      if nw > 8
+        then return (Just (Left (-22)))
+        else
+          if nw == 0
+            then return (Just (Right []))
+            else allocaArray 8 $ \buf -> do
+              rc <- liftIO (c_user_read pd va buf nw)
+              if rc /= 0
+                then return (Just (Left rc))
+                else do ws <- mapM (peekElemOff buf) [0 .. fromIntegral nw - 1]; return (Just (Right ws))
+
+{- | Write words to a live pid's user VA under 'userSem'. Nothing when reaped
+underfoot (caller must skip resume); over-8 payloads fail EINVAL.
+-}
+writeUser :: Pid -> Ptr Word64 -> Word64 -> [Word64] -> H (Maybe CInt)
+writeUser p pd va ws = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup p mp of
+    Nothing -> return Nothing
+    Just _ ->
+      if length ws > 8
+        then return (Just (-22))
+        else
+          if null ws
+            then return (Just 0)
+            else allocaArray 8 $ \buf -> do
+              mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
+              rc <- liftIO (c_user_write pd va buf (fromIntegral (length ws)))
+              return (Just rc)
 
 -- | Single per-pid exit poll (no loop; the park loop re-polls).
 tryReadExitOnce :: Ptr Word64 -> H (Maybe Int)
@@ -357,7 +523,8 @@ tryReadExitOnce pdir = allocaArray 1 $ \p -> do
   c <- peek p
   return (if r == 1 then Just (fromIntegral c) else Nothing)
 
-{- | Single parked-request poll: 0 maps to yield, anything else is unknown
+{- | Single parked-request poll: 0 maps to yield, 0x10..0x13 to IPC (with
+the trapped x0..x3 as ep/va/nwords/tag), anything else is unknown
 (resumed with ENOSYS by the park loop, never trusted).
 -}
 tryTakeParkedOnce :: Ptr Word64 -> H (Maybe ParkRequest)
@@ -371,7 +538,18 @@ tryTakeParkedOnce pdir = do
         then return Nothing
         else do
           w <- peek pr
-          return (Just (if w == 0 then ReqYield else ReqUnknown w))
+          a0 <- peekElemOff pa 0
+          a1 <- peekElemOff pa 1
+          a2 <- peekElemOff pa 2
+          a3 <- peekElemOff pa 3
+          return (Just (classify w a0 a1 a2 a3))
+  where
+    classify 0 _ _ _ _ = ReqYield
+    classify 0x10 ep va nw tag = ReqIpcSend ep va nw tag
+    classify 0x11 ep va nw _ = ReqIpcRecv ep va nw
+    classify 0x12 ep va nw tag = ReqIpcCall ep va nw tag
+    classify 0x13 ep va nw tag = ReqIpcReply ep va nw tag
+    classify w _ _ _ _ = ReqUnknown w
 
 pollExit :: H Int
 pollExit = loop

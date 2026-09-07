@@ -5,11 +5,13 @@ Module      : Kernel.Userspace.Syscall
 Description : SVC -> IPC shims docs.
 Stability   : experimental
 
- Syscalls 0x10..0x14 delegate to Kernel.IPC.Endpoint bounds via SVC
- dispatch in Rust (`ipc.rs` validates op, word count ≤ 8, user-VA window,
- grant alignment/perm with precise errno; the rendezvous queue itself stays
- EL1 Haskell and validated calls return ENOSYS until a trap-safe delegation
- ring lands). Haskell IPC remains QSem+MVar EL1; EL0 svc path uses
+ Syscalls 0x10..0x13 delegate to Kernel.IPC.Endpoint through the
+ park/resume ring: Rust (`ipc.rs` `house_ipc_should_park`) validates op,
+ word count ≤ 8, user-VA window and alignment trap-side and parks; Haskell
+ (`Kernel.Userspace.Process.parkLoop`) pairs via the EL1 rendezvous with
+ byte-identical blocking semantics (5s pair timeout) and resumes with the
+ result. GRANT_MAP 0x14 stays inline ENOSYS until the grant-transfer slice.
+ Haskell IPC remains QSem+MVar EL1; EL0 svc path uses
  non-blocking try semantics at the trap boundary.
  For slice, syscalls are handled in Rust (uart/exit) with IPC args validated.
 +Errno mapping once the delegation ring lands: unknown/freed endpoint id ->
@@ -17,6 +19,12 @@ Stability   : experimental
 +dmesg); capability mismatch -> `NotOwner` (~EPERM -1, log-only in this slice:
 +allowed + dmesg via `checkCap`); full queue -> `QueueFull` (~EAGAIN);
 +`callTimeout` expiry -> `WouldBlock`.
++EL0 return convention (resume x0): SEND/CALL 0 with reply words in the user
++buffer (truncated to the sender nwords); RECV the sender tag with received
++words in the buffer (truncated to the receiver nwords); REPLY 0. Negative
++x0 is the errno above plus -14 EFAULT (user copy fault) and -22 EINVAL
++(no pending RECV for REPLY). REPLY consumes the pid's pending RECV slot;
++a reaped pid's slot wakes its sender with NoSuchEndpoint.
  This module documents the contract and re-exports minimal helpers.
 -}
 module Kernel.Userspace.Syscall (

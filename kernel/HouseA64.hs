@@ -45,7 +45,7 @@ import qualified Kernel.FileSystem.Vfs as FS
 import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
 import qualified Kernel.IPC.Nameservice as NS
-import Kernel.IPC.Types (Message (..))
+import Kernel.IPC.Types (EndpointId (..), Message (..))
 import qualified Kernel.LineEditor as LE
 import qualified Kernel.SMP as SMP
 import Kernel.Shell.Foreign (c_uart_puts, conMirror)
@@ -2689,6 +2689,13 @@ argenvBytes =
 yieldBytes :: [Word8]
 yieldBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 57, 0, 0, 0, 0, 0, 0, 0, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 233, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 19, 0, 128, 210, 1, 0, 0, 212, 115, 6, 0, 145, 127, 14, 0, 241, 171, 255, 255, 84, 1, 0, 0, 144, 33, 192, 0, 145, 34, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 224, 3, 19, 170, 65, 0, 0, 212, 121, 105, 101, 108, 100, 32, 111, 107, 10, 0, 0, 0, 0, 0, 0, 0, 0]
 
+-- Embedded EL0 IPC ping-pong probe (static aarch64, RECV+REPLY server + CALL
+-- client, payload verified both ways). Built from build-probe/ipc_pp.s
+-- (assembled + repacked to a hello-style minimal ELF); if ramfs missing,
+-- write on boot next to /bin/yield.
+ipcPpBytes :: [Word8]
+ipcPpBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 110, 1, 0, 0, 0, 0, 0, 0, 110, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 30, 2, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 224, 3, 64, 249, 31, 12, 0, 241, 139, 9, 0, 84, 233, 35, 0, 145, 42, 5, 64, 249, 43, 9, 64, 249, 76, 1, 64, 57, 19, 0, 128, 210, 109, 21, 64, 56, 13, 1, 0, 52, 173, 193, 0, 81, 191, 37, 0, 113, 72, 8, 0, 84, 110, 242, 125, 211, 211, 5, 19, 139, 115, 2, 13, 139, 248, 255, 255, 23, 159, 141, 1, 113, 64, 0, 0, 84, 26, 0, 0, 20, 1, 0, 0, 176, 33, 0, 0, 145, 34, 34, 130, 210, 66, 68, 164, 242, 34, 0, 0, 249, 98, 102, 134, 210, 130, 136, 168, 242, 34, 4, 0, 249, 224, 3, 19, 170, 66, 0, 128, 210, 3, 14, 128, 210, 65, 2, 0, 212, 192, 5, 0, 181, 34, 0, 64, 249, 195, 221, 151, 210, 67, 75, 171, 242, 95, 0, 3, 235, 33, 5, 0, 84, 1, 0, 0, 144, 33, 80, 5, 145, 2, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 176, 33, 0, 0, 145, 224, 3, 19, 170, 2, 1, 128, 210, 3, 0, 128, 210, 33, 2, 0, 212, 31, 192, 1, 241, 65, 3, 0, 84, 34, 0, 64, 249, 35, 34, 130, 210, 67, 68, 164, 242, 95, 0, 3, 235, 161, 2, 0, 84, 34, 4, 64, 249, 99, 102, 134, 210, 131, 136, 168, 242, 95, 0, 3, 235, 1, 2, 0, 84, 194, 221, 151, 210, 66, 75, 171, 242, 34, 0, 0, 249, 224, 3, 19, 170, 34, 0, 128, 210, 35, 14, 128, 210, 97, 2, 0, 212, 0, 1, 0, 181, 1, 0, 0, 144, 33, 112, 5, 145, 66, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 152, 5, 145, 2, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 112, 111, 110, 103, 32, 111, 107, 10, 115, 101, 114, 118, 101, 100, 32, 111, 107, 10, 112, 112, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
 foreign export ccall house_main :: IO ()
 
 house_main :: IO ()
@@ -2703,7 +2710,7 @@ house_main = do
   editor <- runH (LE.newEditor kbd console)
   _ <- runH (FS.vfsMount FS.defaultNamespace "/" RamFs.ramfsOps)
   _ <- runH (FS.vfsInit FS.defaultNamespace)
-  -- bootstrap /bin/hello + /bin/argenv + /bin/yield from embedded bytes if missing
+  -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp from embedded bytes if missing
   _ <- runH $ do
     r <- FS.vfsStat FS.defaultNamespace "/bin/hello"
     case r of
@@ -2728,6 +2735,14 @@ house_main = do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
         let txt3 = map (chr . fromIntegral) yieldBytes
         _ <- FS.vfsWrite FS.defaultNamespace "/bin/yield" txt3
+        return ()
+    r4 <- FS.vfsStat FS.defaultNamespace "/bin/ipc_pp"
+    case r4 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
+        let txt4 = map (chr . fromIntegral) ipcPpBytes
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/ipc_pp" txt4
         return ()
   _ <- runH Dmesg.dmesgInit
   _ <- runH (Dmesg.dmesgLog "House driver framework online")
@@ -2782,7 +2797,8 @@ house_main = do
       ["ipc", "ping", name] -> handleIpcPing name
       ["ipc", "ping"] -> withCString "usage: ipc ping <nsName>\n" c_uart_puts
       ["ipc", "grant"] -> handleIpcGrant
-      ["ipc"] -> withCString "usage: ipc ping <nsName> | ipc grant\n" c_uart_puts
+      ["ipc", "el0pp", name] -> handleIpcEl0pp name
+      ["ipc"] -> withCString "usage: ipc ping <nsName> | ipc grant | ipc el0pp <nsName>\n" c_uart_puts
       ["lsdev"] -> handleLsdev
       ["dmesg"] -> handleDmesg
       ["dmesg", "clear"] -> handleDmesgClear
@@ -2955,6 +2971,33 @@ house_main = do
       case r of
         Left e -> withCString ("grant failed: " ++ e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
+    handleIpcEl0pp name = do
+      r <- runH $ do
+        mep <- NS.nsLookupChecked name Nothing
+        case mep of
+          Left _ -> return (Left ("not found: " ++ name))
+          Right ep -> do
+            let (EndpointId w) = IPC.endpointId ep
+            mBytes <- FS.vfsReadBytes FS.defaultNamespace "/bin/ipc_pp"
+            case mBytes of
+              Left e -> return (Left (showFsError e))
+              Right bytes -> case ULdr.loadElf bytes of
+                Left le -> return (Left (toExecError le))
+                Right elf -> do
+                  sRes <- U.runElf elf ("/bin/ipc_pp" : ["server", show w]) defaultEnv
+                  case sRes of
+                    Left le2 -> return (Left (toExecError le2))
+                    Right sPid -> do
+                      cRes <- U.runElf elf ("/bin/ipc_pp" : ["client", show w]) defaultEnv
+                      case cRes of
+                        Left le2 -> return (Left (toExecError le2))
+                        Right cPid -> do
+                          sCode <- U.waitPid sPid
+                          cCode <- U.waitPid cPid
+                          return (Right (sCode, cCode))
+      case r of
+        Left e -> withCString ("ipc el0pp failed: " ++ e ++ "\n") c_uart_puts
+        Right (sv, cl) -> withCString ("ipc el0pp ok server=" ++ show sv ++ " client=" ++ show cl ++ "\n") c_uart_puts
     handleLsdev = do
       ds <- runH DrvReg.listDrivers
       if null ds
@@ -3344,6 +3387,7 @@ house_main = do
         , "       ns reg <name> -- register name (pl011 launches server)"
         , "       ipc ping <nsName> -- sync call to endpoint"
         , "       ipc grant -- alloc one page and send to pl011"
+        , "       ipc el0pp <nsName> -- EL0 ping-pong: server RECV+REPLY + client CALL via the park ring"
         , "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)"
         , "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)"
         , "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; ramfs volatile, sync persists HFS1, mount restores)"

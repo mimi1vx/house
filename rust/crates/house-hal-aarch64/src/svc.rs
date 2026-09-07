@@ -32,8 +32,14 @@ static mut HOUSE_USER_EXIT_CODE: i32 = 0;
 const EL0_N: usize = 64;
 
 // Park request codes (svc #imm that parks instead of completing inline).
-// Only YIELD is wired yet; IPC/fd/brk/fork ride this ring next.
+// YIELD + IPC 0x10..0x13 ride the delegation ring (validate-then-park in
+// `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS until the
+// grant-transfer slice.
 const EL0_REQ_YIELD: u32 = 0x00;
+const EL0_REQ_IPC_SEND: u32 = 0x10;
+const EL0_REQ_IPC_RECV: u32 = 0x11;
+const EL0_REQ_IPC_CALL: u32 = 0x12;
+const EL0_REQ_IPC_REPLY: u32 = 0x13;
 
 #[derive(Clone, Copy)]
 struct El0Slot {
@@ -71,8 +77,14 @@ unsafe extern "C" {
 
 unsafe fn translate_va(va: u64) -> usize {
     // SAFETY: walks recorded TTBR0; caller guarantees EL1 and SpinLock not needed for svc read.
+    unsafe { translate_va_pdir(current_pdir(), va) }
+}
+
+// SAFETY: EL1 page-table reads against the given pdir only; caller guarantees
+// EL1, the pdir outlives the call (Haskell holds `userSem` across the copy so
+// `freePDir` cannot run concurrently), and no lock is needed for the read.
+unsafe fn translate_va_pdir(pdir: *mut u8, va: u64) -> usize {
     unsafe {
-        let pdir = current_pdir();
         if pdir.is_null() || (pdir as usize & 4095) != 0 {
             return 0;
         }
@@ -97,6 +109,87 @@ unsafe fn translate_va(va: u64) -> usize {
             return 0;
         }
         ((d3 & !0xFFF) | (va & 0xFFF)) as usize
+    }
+}
+
+// Word-granular user copy against an explicit pdir for the IPC ring. While a
+// pid is parked the recorded `current_pdir` is the kernel root, so Haskell
+// passes the pid slot's pdir and these helpers never consult the recorded
+// root. Bounds: nwords <= 8 (one IPC message), 8-byte aligned VA inside the
+// user window, no wrapping; every word re-translated (per-page walk).
+// Returns 0 ok, -14 EFAULT, -22 EINVAL.
+fn check_user_words(pdir: *mut u8, va: u64, io: *const u64, nwords: u64) -> i64 {
+    if pdir.is_null() || io.is_null() {
+        return -14;
+    }
+    if nwords > 8 {
+        return -22;
+    }
+    if va & 7 != 0 {
+        return -22;
+    }
+    let len = nwords * 8;
+    let end = match va.checked_add(len) {
+        Some(e) => e,
+        None => return -14,
+    };
+    if va < 0x01000000 || end > 0x100000000 {
+        return -14;
+    }
+    0
+}
+
+// SAFETY: EL1 thread context (Haskell park loop, capability free); `out` must
+// hold `nwords` u64. Page-table reads + PA loads only, no locks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_user_read(
+    pdir: *mut u8,
+    va: u64,
+    out: *mut u64,
+    nwords: u64,
+) -> i32 {
+    unsafe {
+        let rc = check_user_words(pdir, va, out, nwords);
+        if rc != 0 {
+            return rc as i32;
+        }
+        for i in 0..nwords {
+            let wva = va + i * 8;
+            let pa = translate_va_pdir(pdir, wva);
+            if pa == 0 {
+                return -14;
+            }
+            // SAFETY: `pa` is an identity-mapped RAM byte; `out` holds nwords.
+            *out.add(i as usize) = *(pa as *const u64);
+        }
+        0
+    }
+}
+
+// SAFETY: EL1 thread context (Haskell park loop, capability free); `inp` must
+// hold `nwords` u64. Page-table reads + PA stores only, no locks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_user_write(
+    pdir: *mut u8,
+    va: u64,
+    inp: *const u64,
+    nwords: u64,
+) -> i32 {
+    unsafe {
+        let rc = check_user_words(pdir, va, inp as *const u64, nwords);
+        if rc != 0 {
+            return rc as i32;
+        }
+        for i in 0..nwords {
+            let wva = va + i * 8;
+            let pa = translate_va_pdir(pdir, wva);
+            if pa == 0 {
+                return -14;
+            }
+            // SAFETY: `pa` is an identity-mapped RAM byte; `inp` holds nwords.
+            *(pa as *mut u64) = *inp.add(i as usize);
+        }
+        0
     }
 }
 

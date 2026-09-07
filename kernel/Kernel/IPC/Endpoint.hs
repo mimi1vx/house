@@ -14,6 +14,7 @@ module Kernel.IPC.Endpoint (
   callTimeout,
   trySend,
   endpointId,
+  lookupEndpoint,
   CapToken (..),
   endpointToken,
   checkCap,
@@ -255,3 +256,15 @@ callTimeout us ep msg = do
 -- | Project endpoint id.
 endpointId :: Endpoint -> EndpointId
 endpointId = epId
+
+{- | Lookup by numeric id for the EL0 trap path (guest passes the raw id).
+EL0 carries no capability token in this slice (same log-only trust as the
+EL1 path); token-checked lookup rides a later slice.
+-}
+lookupEndpoint :: Word64 -> H (Maybe Endpoint)
+lookupEndpoint w = withQSem endpointSem $ do
+  tbl <- readRef endpointTable
+  let eid = EndpointId w
+  case Map.lookup eid tbl of
+    Nothing -> return Nothing
+    Just _ -> return (Just (Endpoint eid))
