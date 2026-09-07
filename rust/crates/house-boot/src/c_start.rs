@@ -93,6 +93,7 @@ unsafe extern "C" {
     fn house_handle_user_fault(far: u64) -> i32;
     fn house_is_ro_page(va: u64) -> i32;
     fn house_svc_dispatch(imm: u32, x0: u64, x1: u64, x2: u64, x3: u64, gpr: *mut u64) -> i64;
+    fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *const u64) -> i32;
     fn house_set_recorded_pdir(pdir: *mut u8);
     fn hs_init(argc: *mut i32, argv: *mut *mut *mut u8);
     fn getenv(name: *const u8) -> *mut u8;
@@ -211,6 +212,34 @@ pub unsafe extern "C" fn c_handle_sync(
         let is_el0 = (spsr & 0xF) == 0;
         if is_el0 {
             let svc_imm = (esr & 0xFFFF) as u32;
+            if svc_imm == 0x00 {
+                // YIELD park: save the 896B frame + ELR (as-delivered, already
+                // the next pc — never +4) + SP_EL0 into the pid slot, then
+                // return to EL1 through the exit trampoline so the Haskell FFI
+                // call returns and the RTS capability is freed while parked.
+                // Unregistered sessions fall through to ENOSYS below.
+                let sp_el0: u64;
+                // SAFETY: mrs sp_el0 at EL1 handler.
+                unsafe {
+                    core::arch::asm!("mrs {0}, sp_el0", out(reg) sp_el0, options(nostack, preserves_flags))
+                };
+                // SAFETY: gpr is the 896B vec_sync frame; park copies it with
+                // a bounded lock-free table scan, no allocation.
+                let parked = unsafe { house_el0_park(elr, sp_el0, svc_imm, gpr as *const u64) };
+                if parked != 0 {
+                    // SAFETY: ttbr0_l0 is kernel L0, EL1 only.
+                    unsafe {
+                        house_set_recorded_pdir(ttbr0_l0.as_mut_ptr() as *mut u8);
+                        core::arch::asm!("msr ttbr0_el1, {0}", in(reg) ttbr0_l0.as_ptr() as u64, options(nostack, preserves_flags));
+                        core::arch::asm!(
+                            "dsb ish; tlbi vmalle1is; dsb ish; isb",
+                            options(nostack, preserves_flags)
+                        );
+                        core::arch::asm!("msr spsr_el1, {0}", in(reg) 0x3c5u64, options(nostack, preserves_flags));
+                    }
+                    return svc_exit_trampoline as *const () as u64;
+                }
+            }
             // SAFETY: gpr valid 32*8, house_svc_dispatch reads x0..x3 and may write gpr[0].
             let _r = unsafe {
                 let x0 = if gpr.is_null() { 0 } else { *gpr.add(0) };

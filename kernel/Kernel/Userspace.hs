@@ -28,6 +28,7 @@ module Kernel.Userspace (
   Kernel.Userspace.Process.waitPid,
   Kernel.Userspace.Process.killPid,
   Kernel.Userspace.Process.procBrkGrow,
+  Kernel.Userspace.Process.ParkRequest (..),
 
   -- * Fd table (Track O FS slice, EL1; EL0 trap wiring pending ring)
   Kernel.Userspace.Fd.Fd (..),
@@ -41,6 +42,7 @@ module Kernel.Userspace (
   Kernel.Userspace.Fd.fdSeek,
 
   -- * Syscall numbers
+  Kernel.Userspace.Syscall.syscallYield,
   Kernel.Userspace.Syscall.syscallWrite,
   Kernel.Userspace.Syscall.syscallExit,
   Kernel.Userspace.Syscall.syscallBrk,

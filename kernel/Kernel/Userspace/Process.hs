@@ -13,6 +13,7 @@ module Kernel.Userspace.Process (
   killPid,
   procBrkGrow,
   stackTop,
+  ParkRequest (..),
 )
 where
 
@@ -26,7 +27,7 @@ import Foreign.C.String (withCString)
 import Foreign.C.Types (CChar, CInt (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import H.AdHocMem (allocaArray, peek, peekElemOff, poke)
-import H.Concurrency (forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
+import H.Concurrency (MVar, forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
 import H.Monad (H, liftIO)
 import H.Mutable (modifyRef, readRef, writeRef)
 import qualified H.Pages as HPages
@@ -53,6 +54,12 @@ foreign import ccall unsafe "house_el0_unregister" c_el0_unregister :: Ptr Word6
 
 foreign import ccall unsafe "house_el0_exit_status" c_el0_status :: Ptr Word64 -> Ptr CInt -> IO CInt
 
+foreign import ccall unsafe "house_el0_parked" c_el0_parked :: Ptr Word64 -> IO CInt
+
+foreign import ccall unsafe "house_el0_take_request" c_el0_take :: Ptr Word64 -> Ptr Word32 -> Ptr Word64 -> IO CInt
+
+foreign import ccall unsafe "house_resume_el0" c_resume_el0 :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
+
 foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
@@ -61,6 +68,12 @@ foreign import ccall unsafe "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 
 stackTop :: Word64
 stackTop = 0x3FFFE000
+
+{- | Request parked by an EL0 trap (svc #imm). Only yield exists yet;
+IPC/fd/brk/fork ride the same ring next.
+-}
+data ParkRequest = ReqYield | ReqUnknown Word32
+  deriving (Eq, Show)
 
 pfW :: Word32
 pfW = 2
@@ -115,8 +128,7 @@ runElf elf argv envp = withQSem userSem $ do
                             liftIO (c_set_pdir pdirPtr)
                             liftIO (c_enter_el0 (elfEntry elf) sp pdirPtr asid)
                             _ <- liftIO (withCString "[run] fork after enter\n" c_uart_puts)
-                            code <- readExitStatus pdirPtr
-                            putMVar exitVar code
+                            parkLoop pid pdirPtr asid exitVar
                             return ()
                           _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
                           return (Right pid)
@@ -314,22 +326,52 @@ killPid pid@(Pid pidInt) = do
       freePDir (procPdir pr)
       liftIO (c_el0_unregister (VM.fromPageMap (procPdir pr)))
 
-{- | Per-pid exit poll: the EXIT trap latches status before the trampoline
-returns, so this is ready on first read; loop defensively like pollExit.
+{- | Park loop: the EL0 session returned from FFI (exit or park), so no RTS
+capability is pinned while this thread polls. EXIT wins over PARK; yield
+resumes immediately with x0 = 0; unknown requests resume with ENOSYS so a
+hostile guest can never wedge the loop. Exits silently when the pid is
+reaped underneath (killPid) without touching the freed exit MVar.
 -}
-readExitStatus :: Ptr Word64 -> H Int
-readExitStatus pdir = loop
+parkLoop :: Pid -> Ptr Word64 -> Word64 -> MVar Int -> H ()
+parkLoop pid pdir asid exitVar = loop
   where
     loop = do
-      (ready, code) <- allocaArray 1 $ \p -> do
-        r <- liftIO (c_el0_status pdir p)
-        c <- peek p
-        return (r, c)
-      if ready == 1
-        then return (fromIntegral code)
+      alive <- withQSem userSem (Map.member pid <$> readRef procMap)
+      if not alive
+        then return ()
         else do
-          threadDelay 1000
-          loop
+          mCode <- tryReadExitOnce pdir
+          case mCode of
+            Just c -> putMVar exitVar c
+            Nothing -> do
+              mReq <- tryTakeParkedOnce pdir
+              case mReq of
+                Nothing -> do threadDelay 1000; loop
+                Just ReqYield -> do _ <- liftIO (c_resume_el0 pdir asid 0); loop
+                Just (ReqUnknown _) -> do _ <- liftIO (c_resume_el0 pdir asid (fromIntegral (-38 :: Int))); loop
+
+-- | Single per-pid exit poll (no loop; the park loop re-polls).
+tryReadExitOnce :: Ptr Word64 -> H (Maybe Int)
+tryReadExitOnce pdir = allocaArray 1 $ \p -> do
+  r <- liftIO (c_el0_status pdir p)
+  c <- peek p
+  return (if r == 1 then Just (fromIntegral c) else Nothing)
+
+{- | Single parked-request poll: 0 maps to yield, anything else is unknown
+(resumed with ENOSYS by the park loop, never trusted).
+-}
+tryTakeParkedOnce :: Ptr Word64 -> H (Maybe ParkRequest)
+tryTakeParkedOnce pdir = do
+  parked <- liftIO (c_el0_parked pdir)
+  if parked /= 1
+    then return Nothing
+    else allocaArray 1 $ \pr -> allocaArray 4 $ \pa -> do
+      r <- liftIO (c_el0_take pdir pr pa)
+      if r /= 1
+        then return Nothing
+        else do
+          w <- peek pr
+          return (Just (if w == 0 then ReqYield else ReqUnknown w))
 
 pollExit :: H Int
 pollExit = loop

@@ -278,3 +278,73 @@ vec_fatal:
     b       7b
     "#
 );
+
+// SAFETY: resume entry for parked EL0 sessions (`house_resume_el0` in
+// `house-hal-aarch64/src/svc.rs` passes save/elr/sp_el0/pdir/asid in
+// x0-x4). The callee-saved prologue matches `house_enter_el0` (96 B) so the
+// shared `svc_exit_trampoline` pops it on the next park/exit trap and `ret`s
+// to the Rust wrapper's caller. `elr` is the ELR as parked (already the next
+// pc — no +4, per the trap-resume audit); x0 is pre-staged to the resume
+// result in `save[0]` and loaded last via base-overwrite `ldr x0, [x0]`.
+core::arch::global_asm!(
+    r#"
+    .global house_resume_asm
+    .type house_resume_asm, %function
+house_resume_asm:
+    // x0=save_ptr, x1=elr, x2=sp_el0, x3=pdir, x4=asid
+    stp     x29, x30, [sp, #-16]!
+    stp     x19, x20, [sp, #-16]!
+    stp     x21, x22, [sp, #-16]!
+    stp     x23, x24, [sp, #-16]!
+    stp     x25, x26, [sp, #-16]!
+    stp     x27, x28, [sp, #-16]!
+    // TTBR0 = pdir | (asid << 48), full TLB flush (migration-safe)
+    mov     x9, x3
+    bfi     x9, x4, #48, #16
+    msr     ttbr0_el1, x9
+    dsb     ish
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+    // ELR/SP_EL0/SPSR (EL0t) before the restores clobber x1/x2/x9
+    msr     elr_el1, x1
+    msr     sp_el0, x2
+    mov     x9, #0
+    msr     spsr_el1, x9
+    // q0-q31 from save+256
+    ldp     q0, q1, [x0, #256]
+    ldp     q2, q3, [x0, #288]
+    ldp     q4, q5, [x0, #320]
+    ldp     q6, q7, [x0, #352]
+    ldp     q8, q9, [x0, #384]
+    ldp     q10, q11, [x0, #416]
+    ldp     q12, q13, [x0, #448]
+    ldp     q14, q15, [x0, #480]
+    ldp     q16, q17, [x0, #512]
+    ldp     q18, q19, [x0, #544]
+    ldp     q20, q21, [x0, #576]
+    ldp     q22, q23, [x0, #608]
+    ldp     q24, q25, [x0, #640]
+    ldp     q26, q27, [x0, #672]
+    ldp     q28, q29, [x0, #704]
+    ldp     q30, q31, [x0, #736]
+    // x1-x30 from save+8..240 (x0 last: base-overwrite load)
+    ldp     x1, x2, [x0, #8]
+    ldp     x3, x4, [x0, #24]
+    ldp     x5, x6, [x0, #40]
+    ldp     x7, x8, [x0, #56]
+    ldp     x9, x10, [x0, #72]
+    ldp     x11, x12, [x0, #88]
+    ldp     x13, x14, [x0, #104]
+    ldp     x15, x16, [x0, #120]
+    ldp     x17, x18, [x0, #136]
+    ldp     x19, x20, [x0, #152]
+    ldp     x21, x22, [x0, #168]
+    ldp     x23, x24, [x0, #184]
+    ldp     x25, x26, [x0, #200]
+    ldp     x27, x28, [x0, #216]
+    ldp     x29, x30, [x0, #232]
+    ldr     x0, [x0, #0]
+    eret
+    "#
+);

@@ -53,7 +53,7 @@ Future symbol additions that touch these paths get bounds review first
   (`10.0.2.0/24` user-mode NAT); there is no DNSSEC/TLS in this slice
   (accepted risk — Track S). The guest still expires ARP entries after 60 s
   and logs DHCP xid mismatches to `dmesg` instead of accepting them.
-- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`, Track O fd/fork `0x04..0x0A` fail-closed ENOSYS until the trap delegation ring lands) and
+- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`, `YIELD 0x00` parks via `house_el0_park` in `c_handle_sync` before dispatch with an ENOSYS fallback for unregistered sessions, Track O fd/fork `0x04..0x0A` fail-closed ENOSYS until the trap delegation ring lands) and
   `house_ipc_svc_dispatch` (`IPC 0x10..0x14`) take raw `imm`/`x0..x3` from EL0;
   unknown `imm` returns an error, user pointers are validated before
   copy (`house_ipc_copy_msg` is length-bounded).
@@ -218,6 +218,10 @@ Endpoint). Unknown `imm` is rejected; user pointers are validated before copy.
 | `house-hal-aarch64` | `house_el0_register` | `int house_el0_register(void *pdir)` | `svc.rs` (new: claim per-pid exit slot, `0` ok / `-ENOSPC` full) |
 | `house-hal-aarch64` | `house_el0_unregister` | `void house_el0_unregister(void *pdir)` | `svc.rs` (new: release per-pid exit slot) |
 | `house-hal-aarch64` | `house_el0_exit_status` | `int house_el0_exit_status(void *pdir, int *code_out)` | `svc.rs` (new: `1` exited / `0` live or unknown) |
+| `house-hal-aarch64` | `house_el0_park` | `int house_el0_park(uint64_t elr, uint64_t sp_el0, uint32_t imm, const uint64_t *gpr)` | `svc.rs` (park: copy 896B frame + ELR as-delivered + SP_EL0 into the pid slot, `1` parked / `0` unknown slot) |
+| `house-hal-aarch64` | `house_el0_parked` | `int house_el0_parked(void *pdir)` | `svc.rs` (`1` parked / `0` live, exited, or unknown) |
+| `house-hal-aarch64` | `house_el0_take_request` | `int house_el0_take_request(void *pdir, uint32_t *req_out, uint64_t *args_out)` | `svc.rs` (`1` with request + parked x0..x3 in `args_out[4]` / `0` not parked / negative errno) |
+| `house-hal-aarch64` | `house_resume_el0` | `int house_resume_el0(void *pdir, uint64_t asid, uint64_t res)` | `svc.rs` (stage `res` as x0, re-enter EL0 via `house_resume_asm`; `0` on next park/exit, negative errno without entering) |
 | `house-hal-aarch64` | `house_get_exit_code` | `int house_get_exit_code(void)` | `svc.c` |
 | `house-hal-aarch64` | `house_clear_exit` | `void house_clear_exit(void)` | `svc.c` |
 | `house-hal-aarch64` | `house_is_exited` | `int house_is_exited(void)` | `svc.c` |
@@ -343,6 +347,7 @@ at `ld -T build/aarch64.ld` exactly like the old `start.S` labels.
 | `house-boot` | `_start` | `ENTRY _start` | `start.S` + `aarch64.ld` → `entry.rs` `global_asm!` |
 | `house-boot` | `secondary_entry` | `secondary_entry` (4K-aligned) | `start.S` → `entry.rs` `global_asm!` |
 | `house-boot` | `house_enter_el0` | `void house_enter_el0(uint64_t entry, uint64_t sp, void *pdir, uint64_t asid)` | `start.S` → `exception.rs` `global_asm!` |
+| `house-boot` | `house_resume_asm` | `void house_resume_asm(const uint64_t *save, uint64_t elr, uint64_t sp_el0, void *pdir, uint64_t asid)` | `exception.rs` `global_asm!` (park resume: callee-saved prologue matches `house_enter_el0` so `svc_exit_trampoline` pops it; restores x0-x30 + q0-q31, ELR as-parked, SP_EL0, SPSR EL0t, erets) |
 | `house-boot` | `svc_exit_trampoline` | `void svc_exit_trampoline(void)` | `start.S` → `exception.rs` `global_asm!` |
 | `house-boot` | `__boot_dtb` | `uint64_t __boot_dtb` | `start.S` → `entry.rs` `global_asm!` |
 | `house-boot` | `__rela_start` / `__rela_end` | `__rela_start`, `__rela_end` | `aarch64.ld` |

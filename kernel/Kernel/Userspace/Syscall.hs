@@ -20,6 +20,7 @@ Stability   : experimental
  This module documents the contract and re-exports minimal helpers.
 -}
 module Kernel.Userspace.Syscall (
+  syscallYield,
   syscallWrite,
   syscallExit,
   syscallBrk,
@@ -39,7 +40,8 @@ module Kernel.Userspace.Syscall (
 where
 
 -- | Syscall numbers (svc #imm)
-syscallWrite, syscallExit, syscallBrk :: Int
+syscallYield, syscallWrite, syscallExit, syscallBrk :: Int
+syscallYield = 0x00
 syscallWrite = 0x01
 syscallExit = 0x02
 syscallBrk = 0x03

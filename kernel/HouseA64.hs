@@ -2680,6 +2680,15 @@ argenvBytes =
   , 0
   ]
 
+-- Embedded EL0 yield probe (static aarch64, svc #0 park x3 + write/exit).
+-- Parks 3x via YIELD with the counter in x19, then prints `yield ok` and
+-- exits with the counter as the code (`run /bin/yield` must show `ok exit
+-- 3`). Built from build-probe/yield.s (assembled + repacked to a
+-- hello-style minimal ELF: R+E text plus RW data page); if ramfs missing,
+-- write on boot next to /bin/hello.
+yieldBytes :: [Word8]
+yieldBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 57, 0, 0, 0, 0, 0, 0, 0, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 233, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 19, 0, 128, 210, 1, 0, 0, 212, 115, 6, 0, 145, 127, 14, 0, 241, 171, 255, 255, 84, 1, 0, 0, 144, 33, 192, 0, 145, 34, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 224, 3, 19, 170, 65, 0, 0, 212, 121, 105, 101, 108, 100, 32, 111, 107, 10, 0, 0, 0, 0, 0, 0, 0, 0]
+
 foreign export ccall house_main :: IO ()
 
 house_main :: IO ()
@@ -2694,7 +2703,7 @@ house_main = do
   editor <- runH (LE.newEditor kbd console)
   _ <- runH (FS.vfsMount FS.defaultNamespace "/" RamFs.ramfsOps)
   _ <- runH (FS.vfsInit FS.defaultNamespace)
-  -- bootstrap /bin/hello + /bin/argenv from embedded bytes if missing
+  -- bootstrap /bin/hello + /bin/argenv + /bin/yield from embedded bytes if missing
   _ <- runH $ do
     r <- FS.vfsStat FS.defaultNamespace "/bin/hello"
     case r of
@@ -2711,6 +2720,14 @@ house_main = do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
         let txt2 = map (chr . fromIntegral) argenvBytes
         _ <- FS.vfsWrite FS.defaultNamespace "/bin/argenv" txt2
+        return ()
+    r3 <- FS.vfsStat FS.defaultNamespace "/bin/yield"
+    case r3 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
+        let txt3 = map (chr . fromIntegral) yieldBytes
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/yield" txt3
         return ()
   _ <- runH Dmesg.dmesgInit
   _ <- runH (Dmesg.dmesgLog "House driver framework online")
