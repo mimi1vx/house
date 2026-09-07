@@ -12,7 +12,9 @@
 //   `mmu.c:house_mmu_set_ttbr0` and `start.S:house_enter_el0`.
 // - `vec_sync`/`vec_irq` save/restore `x0-x30`, `sp` (`x17` scratch), `q0-q31` in
 //   same offsets (`0..240`, `248`, `256..736`) and call `c_handle_sync`/`c_handle_irq`
-//   with identical args (`esr/far/elr/gpr/fpi`); `eret` restores `elr_el1` from handler.
+//   with identical args (`esr/far/elr/gpr/fpi`); `eret` resumes the handler's
+//   returned ELR (`msr elr_el1, x0` — the interrupted ELR, or the exit
+//   trampoline after a PREEMPT park).
 // - `house_enter_el0` sets `TTBR0|ASID<<48` (`bfi #48,#16`), `dsb ish; tlbi vmalle1is;
 //   dsb ish; isb` before `eret` to EL0t (`spsr 0`, `sp_el0`, `elr_el1=entry`); `ASID 0`
 //   reserved, 8-bit ASID.
@@ -161,6 +163,10 @@ vec_irq:
     mov     x0, sp
     add     x1, sp, #256
     bl      c_handle_irq
+    // Step-11 preemption: the handler returns the ELR to resume (the
+    // interrupted ELR, or the exit trampoline after a PREEMPT park with
+    // kernel TTBR0/spsr already switched).
+    msr     elr_el1, x0
     ldp     q0, q1, [sp, #256]
     ldp     q2, q3, [sp, #288]
     ldp     q4, q5, [sp, #320]

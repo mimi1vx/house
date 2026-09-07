@@ -13,6 +13,8 @@ module Kernel.Userspace.Process (
   killPid,
   procBrkGrow,
   stackTop,
+  breakCow,
+  cowLiveCount,
   ParkRequest (..),
 )
 where
@@ -21,6 +23,7 @@ import Control.Concurrent (tryPutMVar, tryTakeMVar)
 import Control.Monad (forM_, void, when)
 import Data.Bits (complement, shiftR, (.&.))
 import Data.Char (chr, ord)
+import Data.IORef (atomicModifyIORef')
 import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word32, Word64, Word8)
@@ -34,13 +37,14 @@ import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import qualified H.Pages as HPages
 import H.PhysicalMemory (fromPhysPage, toPhysPage)
 import H.Unsafe (unsafePerformH)
-import H.Utils (ptrFromWord64)
+import H.Utils (ptrFromWord64, ptrToWord64)
 import qualified H.VirtualMemory as VM
 import qualified Kernel.FileSystem.Vfs as Vfs
 import qualified Kernel.IPC.Endpoint as IPC
 import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
 import qualified Kernel.Userspace.Fd as Fd
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf)
+import qualified Kernel.Userspace.Sched as Sched
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
 import qualified System.Timeout as T
 
@@ -68,6 +72,8 @@ foreign import ccall unsafe "house_el0_clone_slot" c_el0_clone :: Ptr Word64 -> 
 
 foreign import ccall unsafe "house_el0_set_entry" c_el0_set_entry :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
 
+foreign import ccall unsafe "house_el0_fault_addr" c_el0_fault_addr :: Ptr Word64 -> IO Word64
+
 foreign import ccall unsafe "house_resume_el0" c_resume_el0 :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
 
 foreign import ccall unsafe "house_user_read" c_user_read :: Ptr Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO CInt
@@ -94,7 +100,10 @@ stackTop = 0x3FFFE000
 the ring; GRANT_MAP 0x14 stays inline ENOSYS. Each IPC request carries the
 trapped x0..x3 (ep, va, nwords, tag); fd requests carry their trapped
 x0..x2 (see 'classify' below); WAIT carries the child pid in x0, EXEC the
-path VA in x0, FORK takes no args.
+path VA in x0, FORK takes no args. ReqFault carries the trapped x0 plus the
+fault VA (an RO write to a COW page parks 0x1F via the RO perm guard).
+ReqPreempt carries the trapped x0 (an over-quantum EL0 frame parks 0x1E via
+the timer IRQ; resume retries the interrupted insn).
 -}
 data ParkRequest
   = ReqYield
@@ -111,6 +120,8 @@ data ParkRequest
   | ReqIpcRecv Word64 Word64 Word64
   | ReqIpcCall Word64 Word64 Word64 Word64
   | ReqIpcReply Word64 Word64 Word64 Word64
+  | ReqFault Word64 Word64
+  | ReqPreempt Word64
   | ReqUnknown Word32
   deriving (Eq, Show)
 
@@ -121,6 +132,51 @@ NoSuchEndpoint when the pid dies underneath (unblocks a wedged sender).
 {-# NOINLINE pendingReply #-}
 pendingReply :: Ref (Map.Map Pid (MVar (Either IpcError Message)))
 pendingReply = unsafePerformH (newRef Map.empty)
+
+{- | COW sharer counts keyed by host phys address ('ptrToWord64' of the
+backing page). A page is listed while two or more pdirs map it, or while a
+sole mapper still carries the cow mark (cleared on break/free). Updates are
+single 'atomicModifyIORef'' ops (the map itself is never held across
+operations): share/break run under 'userSem', while 'freePDir'/'freeUserPages'
+drop refs without the lock, so plain 'modifyRef' would lose concurrent
+updates. Every op is a pure function of the current map, so concurrent
+share/drop pairs stay exact.
+-}
+{-# NOINLINE cowRefs #-}
+cowRefs :: Ref (Map.Map Word64 Int)
+cowRefs = unsafePerformH (newRef Map.empty)
+
+-- | Fork-share bump: absent (parent was private) counts both mappings.
+shareBump :: Word64 -> H ()
+shareBump key = liftIO (atomicModifyIORef' cowRefs bump)
+  where
+    bump m = case Map.lookup key m of
+      Nothing -> (Map.insert key 2 m, ())
+      Just n -> (Map.insert key (n + 1) m, ())
+
+-- | Rollback-only decrement: never frees (the restoring pdir keeps the page).
+unshareBump :: Word64 -> H ()
+unshareBump key = liftIO (atomicModifyIORef' cowRefs unshare)
+  where
+    unshare m = case Map.lookup key m of
+      Nothing -> (m, ())
+      Just n | n <= 1 -> (Map.delete key m, ())
+      Just n -> (Map.insert key (n - 1) m, ())
+
+{- | Release one mapping: True when the caller must free the host page (the
+page was never shared, or this was the last sharer). Atomic single op.
+-}
+dropShare :: Word64 -> H Bool
+dropShare key = liftIO (atomicModifyIORef' cowRefs release)
+  where
+    release m = case Map.lookup key m of
+      Nothing -> (m, True)
+      Just n | n <= 1 -> (Map.delete key m, True)
+      Just n -> (Map.insert key (n - 1) m, False)
+
+-- | Live COW ref entries (forktest leak check: 0 when nothing is shared).
+cowLiveCount :: H Int
+cowLiveCount = Map.size <$> readRef cowRefs
 
 pfW :: Word32
 pfW = 2
@@ -156,7 +212,7 @@ runElf elf argv envp = withQSem userSem $ do
                 Left err -> do HPages.freePage stk; freePDir pdir; return (Left err)
                 Right sp -> do
                   let stackBase = stackTop - 4096
-                  okStk <- VM.setPage pdir stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False}))
+                  okStk <- VM.setPage pdir stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
                   if not okStk
                     then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
                     else do
@@ -169,6 +225,7 @@ runElf elf argv envp = withQSem userSem $ do
                           exitVar <- newEmptyMVar
                           modifyRef procExitMap (Map.insert pid exitVar)
                           modifyRef procMap (Map.insert pid (Process pid pdir (elfEntry elf) initBrk))
+                          Sched.schedRegister pid
                           _ <- liftIO (withCString "[run] before fork\n" c_uart_puts)
                           _ <- forkH $ do
                             _ <- liftIO (withCString "[run] fork enter\n" c_uart_puts)
@@ -180,15 +237,17 @@ runElf elf argv envp = withQSem userSem $ do
                           _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
                           return (Right pid)
 
-{- | Fork slice (Track O, no COW, no signals): dormant copy of the
-parent address space into a fresh PageMap + Pid. Segments, brk-grown
-pages and the stack page are deep-copied page by page (capped at 8192
-pages); tables are freshly allocated by 'setPage'. The child shares
-nothing writable with the parent. EL1-only entry point for 'forktest';
-EL0 fork (svc 0x08) goes through 'forkChildEl0', which additionally wires
-the trap frame + EL0 session so the child starts runnable (x0 = 0, parent
-resumes with the child pid). Exit codes keep flowing through the existing
-'waitPid' path. Runs under 'userSem'.
+{- | Fork slice (Track O + COW, no signals): share the parent address space
+into a fresh PageMap + Pid. Every present user page maps into the child with
+the same host page, both sides flipped to RO with the cow mark set iff the
+page was writable (loader text stays plain shared RO); 'cowRefs' counts the
+live mappings so 'freePDir' frees the host page only for the last sharer. A
+write to a cow page faults, parks FAULT, and 'breakCow' copies/remaps RW.
+Tables are freshly allocated by 'setPage'. EL1-only entry point for
+'forktest'; EL0 fork (svc 0x08) goes through 'forkChildEl0', which
+additionally wires the trap frame + EL0 session so the child starts runnable
+(x0 = 0, parent resumes with the child pid). Exit codes keep flowing through
+the existing 'waitPid' path. Runs under 'userSem'.
 -}
 forkProc :: Pid -> H (Either LoadError Pid)
 forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
@@ -200,11 +259,9 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
       case mChild of
         Nothing -> return (Left NoSpace)
         Just childPdir -> do
-          r <- copyAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
+          r <- shareAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
           case r of
-            Left e -> do
-              freePDir childPdir
-              return (Left e)
+            Left e -> return (Left e)
             Right () -> do
               pidInt <- readRef pidNext
               writeRef pidNext (pidInt + 1)
@@ -214,19 +271,24 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
               Fd.fdFork parentPid child
               return (Right child)
 
-{- | Deep-copy [minVAddr, hi) page by page (capped at 8192 pages), descending
+{- | Share [minVAddr, hi) page by page (capped at 8192 pages), descending
 only into user tables: the fresh 'allocPageMap' L1 carries cloned kernel
 entries, and 'getPage' treats any valid desc as a table -- following a
 kernel block desc faults (EL1 data abort). A desc is ours iff Valid+Table
 (0x3, the 'descFromTable' shape) and its pointer passes 'validPage' (buddy
 / user pool, never kernel RAM). Anything else skips its whole range.
+Each present page maps into the child with the shared shape (RO, cow set
+iff the parent page was writable) after the child mapping succeeds; the
+parent flips to the same shape so a later write faults on either side.
+On failure the child pdir is freed, flipped parents are restored, and the
+bumped counts are unwound, so the caller must not free anything.
 -}
-copyAddrSpace :: VM.PageMap -> VM.PageMap -> Word64 -> H (Either LoadError ())
-copyAddrSpace src dst hi = do
+shareAddrSpace :: VM.PageMap -> VM.PageMap -> Word64 -> H (Either LoadError ())
+shareAddrSpace src dst hi = do
   d0 <- peekElemOff (VM.fromPageMap src) 0
   case userTable d0 of
     Nothing -> return (Right ())
-    Just l1 -> go l1 VM.minVAddr 0
+    Just l1 -> go l1 VM.minVAddr 0 []
   where
     userTable d
       | d .&. 3 == 3
@@ -235,33 +297,90 @@ copyAddrSpace src dst hi = do
       | otherwise = Nothing
     l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
     l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
-    go l1 va n
+    keyOf info = ptrToWord64 (fromPhysPage (VM.physPage info))
+    go l1 va n flipped
       | va >= hi = return (Right ())
-      | n > (8192 :: Int) = return (Left NoSpace)
+      | n > (8192 :: Int) = rollback flipped
       | otherwise = do
           d1 <- peekElemOff l1 (l1i va)
           case userTable d1 of
-            Nothing -> go l1 (nextL1 va) n
+            Nothing -> go l1 (nextL1 va) n flipped
             Just l2 -> do
               d2 <- peekElemOff l2 (l2i va)
               case userTable d2 of
-                Nothing -> go l1 (nextL2 va) n
+                Nothing -> go l1 (nextL2 va) n flipped
                 Just _ -> do
                   mInfo <- VM.getPage src va
                   case mInfo of
-                    Nothing -> go l1 (va + 4096) n
+                    Nothing -> go l1 (va + 4096) n flipped
                     Just info -> do
-                      mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
-                      case mp2 of
-                        Nothing -> return (Left NoSpace)
-                        Just raw -> do
-                          copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
-                          ok <- VM.setPage dst va (Just (info {VM.physPage = toPhysPage (castPtr raw)}))
-                          if not ok
-                            then do HPages.freePage raw; return (Left NoSpace)
-                            else go l1 (va + 4096) (n + 1)
+                      let shared = info {VM.writable = False, VM.cow = VM.writable info}
+                      okC <- VM.setPage dst va (Just shared)
+                      if not okC
+                        then rollback flipped
+                        else do
+                          okP <- VM.setPage src va (Just shared)
+                          if not okP
+                            then do
+                              _ <- VM.setPage dst va Nothing
+                              rollback flipped
+                            else do
+                              shareBump (keyOf info)
+                              go l1 (va + 4096) (n + 1) ((va, info) : flipped)
+    rollback flipped = do
+      freePDir dst
+      forM_ flipped $ \(fva, orig) -> do
+        mCur <- VM.getPage src fva
+        case mCur of
+          Nothing -> return ()
+          Just cur -> do
+            _ <- VM.setPage src fva (Just orig)
+            unshareBump (keyOf cur)
+      return (Left NoSpace)
     nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
     nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
+
+{- | Break a COW page for a live pid (the FAULT-park handler and forktest
+share this): a sole-mapped page remaps RW in place, a shared page copies
+to a fresh host page (other sharers keep the RO+cow mapping). True when
+the page is writable afterwards (resume retries the faulting store).
+Runs under 'userSem' as one region so a reaper's map delete cannot slip
+between the lookup and the remap.
+-}
+breakCow :: Pid -> Word64 -> H Bool
+breakCow pid pdirVa = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup pid mp of
+    Nothing -> return False
+    Just pr -> do
+      let pdir = procPdir pr
+          va = pdirVa .&. complement 4095
+      mInfo <- VM.getPage pdir va
+      case mInfo of
+        Nothing -> return False
+        Just info
+          | not (VM.cow info) -> return False
+          | otherwise -> do
+              let key = ptrToWord64 (fromPhysPage (VM.physPage info))
+              n <- Map.findWithDefault 0 key <$> readRef cowRefs
+              if n <= 1
+                then do
+                  ok <- VM.setPage pdir va (Just (info {VM.writable = True, VM.cow = False}))
+                  when ok (liftIO (atomicModifyIORef' cowRefs (\m -> (Map.delete key m, ()))))
+                  return ok
+                else do
+                  mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                  case mp2 of
+                    Nothing -> return False
+                    Just raw -> do
+                      copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
+                      let mine = info {VM.physPage = toPhysPage (castPtr raw), VM.writable = True, VM.cow = False}
+                      ok <- VM.setPage pdir va (Just mine)
+                      if not ok
+                        then do HPages.freePage raw; return False
+                        else do
+                          liftIO (atomicModifyIORef' cowRefs (\m -> (Map.insert key (n - 1) m, ())))
+                          return True
 
 copyPageBytes :: Ptr Word8 -> Ptr Word8 -> H ()
 copyPageBytes src dst =
@@ -269,13 +388,15 @@ copyPageBytes src dst =
     b <- peek (src `plusPtr` i) :: H Word8
     poke (dst `plusPtr` i) b
 
-{- | EL0 fork (svc 0x08): deep-copy the parent address space like 'forkProc',
+{- | EL0 fork (svc 0x08): share the parent address space like 'forkProc',
 then wire the trap frame + EL0 session so the child starts runnable. The
 parent must be parked (its slot holds the trap frame); the child slot is
 cloned with x0 = 0 via 'house_el0_clone_slot', then a fresh Haskell thread
 resumes the child and enters its 'parkLoop'. Returns the child pid for the
 parent to resume with. Cleanup on failure removes the half-built child and
-returns the 'LoadError' for the parent to resume as an errno.
+returns the 'LoadError' for the parent to resume as an errno (a share
+failure already freed the child pdir and restored the parent, so only
+post-share failures free here).
 -}
 forkChildEl0 :: Pid -> Ptr Word64 -> H (Either LoadError Pid)
 forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
@@ -287,9 +408,9 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
       case mChild of
         Nothing -> return (Left NoSpace)
         Just childPdir -> do
-          r <- copyAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
+          r <- shareAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
           case r of
-            Left e -> do freePDir childPdir; return (Left e)
+            Left e -> return (Left e)
             Right () -> do
               pidInt <- readRef pidNext
               writeRef pidNext (pidInt + 1)
@@ -302,6 +423,7 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                   exitVar <- newEmptyMVar
                   modifyRef procExitMap (Map.insert child exitVar)
                   modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent)))
+                  Sched.schedRegister child
                   Vfs.vfsForkPid parentInt pidInt
                   Fd.fdFork parentPid child
                   asid <- liftIO (c_asid_for childPtr)
@@ -323,10 +445,12 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                         return ()
                       return (Right child)
 
-{- | Unmap every user page in [minVAddr, hi), freeing the backing host pages.
-Tables are kept (L2/L1 husks leak at most a page each per exec -- negligible
-at this scale); the pdir pointer stays valid so the parked EL0 slot keeps its
-key. Runs under 'userSem'.
+{- | Unmap every user page in [minVAddr, hi), releasing the backing host
+pages. Shared pages only drop their 'cowRefs' count (the host page frees
+for the last sharer); private pages free directly. Tables are kept (L2/L1
+husks leak at most a page each per exec -- negligible at this scale); the
+pdir pointer stays valid so the parked EL0 slot keeps its key. Runs under
+'userSem'.
 -}
 freeUserPages :: VM.PageMap -> Word64 -> H ()
 freeUserPages pdir hi = do
@@ -358,10 +482,16 @@ freeUserPages pdir hi = do
                     Nothing -> go l1 (va + 4096)
                     Just info -> do
                       _ <- VM.setPage pdir va Nothing
-                      HPages.freePage (fromPhysPage (VM.physPage info))
+                      releaseBacking (fromPhysPage (VM.physPage info))
                       go l1 (va + 4096)
     nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
     nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
+
+-- | Free a backing host page iff it is private or the last COW sharer.
+releaseBacking :: Ptr Word8 -> H ()
+releaseBacking raw = do
+  shouldFree <- dropShare (ptrToWord64 raw)
+  when shouldFree (HPages.freePage raw)
 
 {- | EL0 exec (svc 0x0B): replace the image under the same pid. Reads + parses
 the path (VFS, then 'loadElf') before touching the old image; only then frees
@@ -402,7 +532,7 @@ execReplace pid@(Pid pidInt) pdir path = do
                       Left err -> do HPages.freePage stk; return (Left err)
                       Right sp -> do
                         let stackBase = stackTop - 4096
-                        okStk <- VM.setPage (procPdir pr) stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False}))
+                        okStk <- VM.setPage (procPdir pr) stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
                         if not okStk
                           then do HPages.freePage stk; return (Left NoSpace)
                           else do
@@ -503,6 +633,8 @@ waitPid pid@(Pid pidInt) = do
     Nothing -> return ()
   Vfs.vfsReleasePid pidInt
   Fd.fdRelease pid
+  Sched.schedUnregister pid
+  Sched.schedWakeAll
   case mProc of
     Nothing -> return code
     Just pr -> do
@@ -527,6 +659,8 @@ killPid pid@(Pid pidInt) = do
     Nothing -> return ()
   Vfs.vfsReleasePid pidInt
   Fd.fdRelease pid
+  Sched.schedUnregister pid
+  Sched.schedWakeAll
   case mProc of
     Nothing -> return ()
     Just pr -> do
@@ -537,10 +671,14 @@ killPid pid@(Pid pidInt) = do
 capability is pinned while this thread polls. EXIT wins over PARK; yield
 resumes immediately with x0 = 0; brk grows via 'procBrkGrow' (resumes the
 new break); fd 0x04..0x07/0x0A run against the pid's 'Fd' table (per-pid,
-so cross-pid use fails EBADF); fork 0x08 deep-copies via 'forkChildEl0'
+so cross-pid use fails EBADF); fork 0x08 shares via 'shareAddrSpace'
 (child x0 = 0, parent resumes the child pid); wait 0x09 blocks in 'waitPid'
 until the child exits (reaps, resumes the exit code); exec 0x0B replaces
-the image via 'execReplace' (resumes 0 in the new image); IPC 0x10..0x13
+the image via 'execReplace' (resumes 0 in the new image); a write to a cow
+page parks FAULT and 'breakCow' copies/remaps RW (resumes the trapped x0
+so the faulting store retries); an over-quantum frame parks PREEMPT and the
+baton passes to the next runnable pid ('Sched.schedElectNext', resume x0);
+IPC 0x10..0x13
 pair through the EL1 Endpoint rendezvous (same blocking semantics as the
 shell path, bounded by a 5s timeout so a reaped pid never wedges a peer);
 unknown requests resume with ENOSYS so a hostile guest can never wedge the
@@ -566,7 +704,11 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
         else do
           mCode <- tryReadExitOnce pdir
           case mCode of
-            Just c -> putMVar exitVar c
+            Just c -> do
+              mq <- Sched.schedSuccessor pid
+              forM_ mq Sched.schedWake
+              Sched.schedUnregister pid
+              putMVar exitVar c
             Nothing -> do
               mReq <- tryTakeParkedOnce pdir
               case mReq of
@@ -585,6 +727,8 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
                 Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
                 Just (ReqIpcReply ep va nw tag) -> do handleReply ep va nw tag; loop
+                Just (ReqFault x0 va) -> do handleCowFault x0 va; loop
+                Just (ReqPreempt x0) -> do handlePreempt x0; loop
                 Just (ReqUnknown _) -> do resumeWith negENOSYS; loop
     resumeWith res = void (liftIO (c_resume_el0 pdir asid res))
     negENOSYS = fromIntegral (-38 :: Int) :: Word64
@@ -682,6 +826,29 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
             Left NoSpace -> resumeWith negNOMEM
             Left _ -> resumeWith negINVAL
             Right _ -> resumeWith 0
+    handleCowFault x0 va = do
+      alive <- withQSem userSem (Map.member pid <$> readRef procMap)
+      when alive $ do
+        _ <- breakCow pid va
+        resumeWith x0
+    handlePreempt x0 = do
+      qs <- Sched.schedRunQueue
+      let (pre, post) = break (== pid) qs
+      tryNext (drop 1 post ++ pre)
+      where
+        -- Alone (or all successors deaf): lend the capability to EL1 work
+        -- briefly and keep the slice. Without the delay a solo spinner
+        -- re-pins the cap in microseconds and the shell starves despite
+        -- preemption.
+        tryNext [] = do threadDelay 2000; resumeWith x0
+        tryNext (q : rest) = do
+          Sched.schedWake q
+          woken <- Sched.schedWaitTimeout pid 500000
+          if woken
+            then do
+              alive <- withQSem userSem (Map.member pid <$> readRef procMap)
+              when alive (resumeWith x0)
+            else tryNext rest
     handleSend ep va nw tag = do
       mIn <- readUser pid pdir va nw
       case mIn of
@@ -873,7 +1040,9 @@ tryReadExitOnce pdir = allocaArray 1 $ \p -> do
 break), 0x04..0x07/0x0A to fd (OPEN pathVa/flags, READ/WRITE fd/buf/len,
 CLOSE fd, SEEK fd/off/whence), 0x08 to fork (no args), 0x09 to wait
 (x0 = child pid), 0x0B to exec (x0 = path VA), 0x10..0x13 to IPC (with the
-trapped x0..x3 as ep/va/nwords/tag), anything else is unknown (resumed with
+trapped x0..x3 as ep/va/nwords/tag), 0x1F to a COW fault (trapped x0 plus
+the fault VA from the slot), 0x1E to a timer preemption (trapped x0),
+anything else is unknown (resumed with
 ENOSYS by the park loop, never trusted).
 -}
 tryTakeParkedOnce :: Ptr Word64 -> H (Maybe ParkRequest)
@@ -891,7 +1060,11 @@ tryTakeParkedOnce pdir = do
           a1 <- peekElemOff pa 1
           a2 <- peekElemOff pa 2
           a3 <- peekElemOff pa 3
-          return (Just (classify w a0 a1 a2 a3))
+          if w == 0x1F
+            then do
+              va <- liftIO (c_el0_fault_addr pdir)
+              return (Just (ReqFault a0 va))
+            else return (Just (classify w a0 a1 a2 a3))
   where
     classify 0 _ _ _ _ = ReqYield
     classify 0x03 nb _ _ _ = ReqBrk nb
@@ -904,6 +1077,7 @@ tryTakeParkedOnce pdir = do
     classify 0x0B va _ _ _ = ReqExec va
     classify 0x0A fd off wh _ = ReqSeek fd off wh
     classify 0x10 ep va nw tag = ReqIpcSend ep va nw tag
+    classify 0x1E x0 _ _ _ = ReqPreempt x0
     classify 0x11 ep va nw _ = ReqIpcRecv ep va nw
     classify 0x12 ep va nw tag = ReqIpcCall ep va nw tag
     classify 0x13 ep va nw tag = ReqIpcReply ep va nw tag
@@ -960,7 +1134,7 @@ procBrkGrow pid newBrk = withQSem userSem $ do
             Nothing -> return (Left NoSpace)
             Just pg -> do
               HPages.zeroPage pg
-              ok <- VM.setPage pdir lo (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False}))
+              ok <- VM.setPage pdir lo (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
               if not ok
                 then do HPages.freePage pg; return (Left NoSpace)
                 else growPages pdir (lo + 4096) hi
@@ -1010,7 +1184,7 @@ mapOneSegment pdir bytes seg =
                 let remainingFile = fsz - pageFileStart
                 let copyLen = if remainingFile <= 0 then 0 else min 4096 remainingFile
                 mapM_ (\i -> let srcIdx = foff + pageFileStart + i; b = indexBytes bytes srcIdx in poke (pg `plusPtr` i) b) [0 .. copyLen - 1]
-                ok <- VM.setPage pdir curVa (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = writable, VM.dirty = False, VM.accessed = False}))
+                ok <- VM.setPage pdir curVa (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = writable, VM.dirty = False, VM.accessed = False, VM.cow = False}))
                 if not ok
                   then do
                     HPages.freePage pg
@@ -1061,7 +1235,7 @@ freePDir pdir = do
                             else do
                               forM_ [0 .. 511] $ \i3 -> do
                                 d3 <- peekElemOff l3 i3
-                                when ((d3 .&. 1) /= 0) $ HPages.freePage (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000) :: Ptr Word8)
+                                when ((d3 .&. 1) /= 0) $ releaseBacking (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000))
                               HPages.freePage l3
                     HPages.freePage l2
           HPages.freePage l1

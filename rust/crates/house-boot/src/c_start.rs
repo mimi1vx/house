@@ -85,6 +85,7 @@ unsafe extern "C" {
     fn house_irq_push(intid: u32);
     fn house_sched_ipi_handler();
     fn house_sched_maybe_preempt_from_isr();
+    fn house_sched_tick_preempt(gpr: *mut u64, elr: u64, sp_el0: u64, is_el0: i32) -> i32;
     fn house_sched_yield();
     fn psci_cpu_on(mpidr: u64, entry: u64, ctx: u64) -> i64;
     fn psci_affinity_info(mpidr: u64, lowest: u64) -> i64;
@@ -92,6 +93,8 @@ unsafe extern "C" {
     fn house_smp_should_off(core: u32) -> i32;
     fn house_handle_user_fault(far: u64) -> i32;
     fn house_is_ro_page(va: u64) -> i32;
+    fn house_is_cow_page(va: u64) -> i32;
+    fn house_el0_park_fault(elr: u64, sp_el0: u64, gpr: *const u64, far: u64) -> i32;
     fn house_svc_dispatch(imm: u32, x0: u64, x1: u64, x2: u64, x3: u64, gpr: *mut u64) -> i64;
     fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *const u64) -> i32;
     fn house_ipc_should_park(op: u32, x1: u64, x2: u64) -> i32;
@@ -185,6 +188,36 @@ pub unsafe extern "C" fn c_handle_sync(
                 // SAFETY: checks PTE AP bits.
                 let is_ro = unsafe { house_is_ro_page(far) } != 0;
                 if is_ro {
+                    // COW sharer: park FAULT for the Haskell copy/remap so the
+                    // faulting store retries after resume (ELR as-delivered,
+                    // never +4). Same trampoline path as the svc parks, so the
+                    // RTS capability is freed while Haskell handles the fault.
+                    // SAFETY: PTE SW-bit read only, no locks or allocation.
+                    let is_cow = unsafe { house_is_cow_page(far) } != 0;
+                    if is_cow && !gpr.is_null() {
+                        let sp_el0: u64;
+                        // SAFETY: mrs sp_el0 at EL1 handler.
+                        unsafe {
+                            core::arch::asm!("mrs {0}, sp_el0", out(reg) sp_el0, options(nostack, preserves_flags))
+                        };
+                        // SAFETY: gpr is the 896B vec_sync frame; park copies
+                        // it with a bounded lock-free table scan.
+                        let parked =
+                            unsafe { house_el0_park_fault(elr, sp_el0, gpr as *const u64, far) };
+                        if parked != 0 {
+                            // SAFETY: ttbr0_l0 is kernel L0, EL1 only.
+                            unsafe {
+                                house_set_recorded_pdir(ttbr0_l0.as_mut_ptr() as *mut u8);
+                                core::arch::asm!("msr ttbr0_el1, {0}", in(reg) ttbr0_l0.as_ptr() as u64, options(nostack, preserves_flags));
+                                core::arch::asm!(
+                                    "dsb ish; tlbi vmalle1is; dsb ish; isb",
+                                    options(nostack, preserves_flags)
+                                );
+                                core::arch::asm!("msr spsr_el1, {0}", in(reg) 0x3c5u64, options(nostack, preserves_flags));
+                            }
+                            return svc_exit_trampoline as *const () as u64;
+                        }
+                    }
                     unsafe {
                         uart_puts(b"[demand] perm fault RO far=\0".as_ptr());
                         puthex(far);
@@ -395,9 +428,20 @@ pub unsafe extern "C" fn c_handle_sync(
     }
 }
 
-// SAFETY: IRQ handler, reads ICC_IAR1_EL1, may push to irq ring or rearm timer.
+// SAFETY: IRQ handler, reads ICC_IAR1_EL1, may push to irq ring or rearm
+// timer. Returns the ELR to resume (`vec_irq` writes it back): the
+// interrupted ELR on every path except timer preemption of EL0, which parks
+// the frame and returns the exit trampoline (kernel TTBR0/spsr switched).
+// Non-EL0 behavior is unchanged.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
+pub unsafe extern "C" fn c_handle_irq(gpr: *mut u64, _fpi: *mut u8) -> u64 {
+    let elr: u64;
+    let spsr: u64;
+    // SAFETY: EL1 IRQ handler entry; elr/spsr hold the interrupted context.
+    unsafe {
+        core::arch::asm!("mrs {0}, elr_el1", out(reg) elr, options(nostack, preserves_flags));
+        core::arch::asm!("mrs {0}, spsr_el1", out(reg) spsr, options(nostack, preserves_flags));
+    }
     let iar: u64;
     // SAFETY: EL1 GIC SRE enabled, ICC_IAR1_EL1 valid.
     unsafe {
@@ -405,7 +449,7 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
     };
     let intid = (iar & 0xFFFFFF) as u32;
     if intid == 1023 {
-        return;
+        return elr;
     }
     if intid == 0 {
         // SGI IPI 0: scheduler kick
@@ -414,7 +458,7 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
             core::arch::asm!("msr ICC_EOIR1_EL1, {0}", in(reg) iar, options(nostack, preserves_flags));
             core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
         }
-        return;
+        return elr;
     }
     if intid == 1 {
         // SGI 1: TLB shootdown
@@ -426,7 +470,7 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
             core::arch::asm!("msr ICC_EOIR1_EL1, {0}", in(reg) iar, options(nostack, preserves_flags));
             core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
         }
-        return;
+        return elr;
     }
     if intid == 7 {
         // SGI 7: SMP-OFF remote handshake — self-off when flagged.
@@ -449,7 +493,7 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
                 }
             }
         }
-        return;
+        return elr;
     }
     if intid == 27 {
         // SAFETY: rearm virtual timer, tick via house_isr_pending
@@ -469,6 +513,40 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
             }
             house_sched_maybe_preempt_from_isr();
         }
+        // Timer preemption: only an EL0 interrupt (SPSR.M == 0) with an
+        // over-quantum session parks; EL1 ticks return the interrupted ELR
+        // untouched. A missed or spurious switch is benign (the parked frame
+        // resumes via the scheduler; an untracked session keeps its slice).
+        let is_el0 = if (spsr & 0xF) == 0 { 1 } else { 0 };
+        if is_el0 != 0 && !gpr.is_null() {
+            let sp_el0: u64;
+            // SAFETY: mrs sp_el0 at EL1 handler.
+            unsafe {
+                core::arch::asm!("mrs {0}, sp_el0", out(reg) sp_el0, options(nostack, preserves_flags))
+            };
+            // SAFETY: gpr is the 896B vec_irq frame; tick is lock-free.
+            let parked = unsafe { house_sched_tick_preempt(gpr, elr, sp_el0, is_el0) };
+            if parked != 0 {
+                // SAFETY: EL1 GIC SRE enabled; EOI must precede the
+                // trampoline return or the PPI stays active and no timer
+                // ticks fire on this core again.
+                unsafe {
+                    core::arch::asm!("msr ICC_EOIR1_EL1, {0}", in(reg) iar, options(nostack, preserves_flags));
+                    core::arch::asm!("isb", options(nostack, preserves_flags));
+                }
+                // SAFETY: ttbr0_l0 is kernel L0, EL1 only.
+                unsafe {
+                    house_set_recorded_pdir(ttbr0_l0.as_mut_ptr() as *mut u8);
+                    core::arch::asm!("msr ttbr0_el1, {0}", in(reg) ttbr0_l0.as_ptr() as u64, options(nostack, preserves_flags));
+                    core::arch::asm!(
+                        "dsb ish; tlbi vmalle1is; dsb ish; isb",
+                        options(nostack, preserves_flags)
+                    );
+                    core::arch::asm!("msr spsr_el1, {0}", in(reg) 0x3c5u64, options(nostack, preserves_flags));
+                }
+                return svc_exit_trampoline as *const () as u64;
+            }
+        }
     } else if intid == 29 || intid == 30 {
         unsafe {
             let iv = core::ptr::read_volatile(&raw const __c_house_timer_interval) as u64;
@@ -482,6 +560,7 @@ pub unsafe extern "C" fn c_handle_irq(_gpr: *mut u64, _fpi: *mut u8) {
         core::arch::asm!("msr ICC_EOIR1_EL1, {0}", in(reg) iar, options(nostack, preserves_flags));
         core::arch::asm!("isb", options(nostack, preserves_flags));
     }
+    elr
 }
 
 #[unsafe(no_mangle)]

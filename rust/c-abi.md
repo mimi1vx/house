@@ -186,6 +186,7 @@ demand pager + `mprotect` RO perm faults + `munmap` translation faults,
 | `house-hal-aarch64` | `house_set_recorded_pdir` | `void house_set_recorded_pdir(void *pdir)` | `userspace.c` |
 | `house-hal-aarch64` | `house_asid_for_pdir` | `uint64_t house_asid_for_pdir(void *pdir)` | `userspace.c` |
 | `house-hal-aarch64` | `house_is_ro_page` | `int house_is_ro_page(uint64_t va)` | `userspace.c` |
+| `house-hal-aarch64` | `house_is_cow_page` | `int house_is_cow_page(uint64_t va)` | `userspace.rs` (new: SW bit-57 COW mark on an RO L3 page, `1` COW / `0` otherwise; trap-safe PTE read for the FAULT park gate) |
 | `house-hal-aarch64` | `house_tlb_shootdown` | `void house_tlb_shootdown(uint64_t vaddr)` | `userspace.c` |
 | `house-hal-aarch64` | `house_handle_user_fault` | `int house_handle_user_fault(uint64_t far)` | `userspace.c` |
 | `house-hal-aarch64` | `min_user_addr` | `void *min_user_addr` | `userspace.c` |
@@ -237,6 +238,11 @@ Unknown `imm` is rejected; user pointers are validated before copy.
 | `house-hal-aarch64` | `house_exec_should_park` | `int house_exec_should_park(uint32_t op, uint64_t x0)` | `svc.rs` (new: trap-safe park gate, `1` validated-park / `0` errno-inline / `-22` unknown op; x0 = NUL-terminated path ≤256) |
 | `house-hal-aarch64` | `house_el0_clone_slot` | `int house_el0_clone_slot(void *parent, void *child)` | `svc.rs` (new: copy parked trap frame parent→child, child x0 = 0, child parked; `0` ok / `-22` unknown slot) |
 | `house-hal-aarch64` | `house_el0_set_entry` | `int house_el0_set_entry(void *pdir, uint64_t entry, uint64_t sp)` | `svc.rs` (new: redirect parked session at entry/sp for exec, regs cleared; `0` ok / `-22` unknown slot) |
+| `house-hal-aarch64` | `house_el0_park_fault` | `int house_el0_park_fault(uint64_t elr, uint64_t sp_el0, const uint64_t *gpr, uint64_t far)` | `svc.rs` (new: park an RO write to a COW page as request `0x1F` with the page-aligned fault VA; ELR as-delivered so resume retries; `1` parked / `0` unknown slot) |
+| `house-hal-aarch64` | `house_sched_set_runnable` | `void house_sched_set_runnable(uint64_t n)` | `svc.rs` (new: Haskell-advertised oversubscription for the timer-preempt gate; atomic store) |
+| `house-hal-aarch64` | `house_sched_set_quantum` | `void house_sched_set_quantum(uint64_t n)` | `svc.rs` (new: preempt quantum in ticks, `0` means 1; atomic store) |
+| `house-hal-aarch64` | `house_sched_tick_preempt` | `int house_sched_tick_preempt(uint64_t *gpr, uint64_t elr, uint64_t sp_el0, int is_el0)` | `svc.rs` (new: timer-IRQ quantum countdown, parks the EL0 frame as `0x1E` on expiry with oversubscription; `1` parked / `0` keep running; lock-free) |
+| `house-hal-aarch64` | `house_el0_fault_addr` | `uint64_t house_el0_fault_addr(void *pdir)` | `svc.rs` (new: parked fault VA for the pid, `0` when no FAULT request) |
 | `house-hal-aarch64` | `house_fd_should_park` | `int house_fd_should_park(uint32_t op, uint64_t x0, uint64_t x1, uint64_t x2)` | `svc.rs` (new: trap-safe park gate, `1` validated-park / `0` errno-inline / `-22` unknown op; OPEN validates NUL-terminated path ≤256, READ/WRITE validate buf ≤64K) |
 | `house-hal-aarch64` | `house_user_read` | `int house_user_read(void *pdir, uint64_t va, uint64_t *out, uint64_t nwords)` | `svc.rs` (new: EL1 thread-context word copy against an explicit pdir — the recorded root is kernel while parked; `0` ok / `-14` EFAULT / `-22` EINVAL) |
 | `house-hal-aarch64` | `house_user_write` | `int house_user_write(void *pdir, uint64_t va, const uint64_t *in, uint64_t nwords)` | `svc.rs` (new: same as read, opposite direction) |
@@ -356,7 +362,7 @@ at `ld -T build/aarch64.ld` exactly like the old `start.S` labels.
 | `house-boot` | `c_start` | `void c_start(void)` | `c_start.c` → `c_start.rs` |
 | `house-boot` | `c_start_secondary` | `void c_start_secondary(uint64_t core_id)` | `c_start.c` → `c_start.rs` |
 | `house-boot` | `c_handle_sync` | `uint64_t c_handle_sync(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *gpr, void *fpi)` | `c_start.c` → `c_start.rs` |
-| `house-boot` | `c_handle_irq` | `void c_handle_irq(uint64_t *gpr, void *fpi)` | `c_start.c` → `c_start.rs` |
+| `house-boot` | `c_handle_irq` | `uint64_t c_handle_irq(uint64_t *gpr, void *fpi)` | `c_start.c` → `c_start.rs` (returns the ELR to resume: interrupted ELR, or the exit trampoline after a PREEMPT park) |
 | `house-boot` | `fatal_exception` | `void fatal_exception(void)` | `c_start.c` → `c_start.rs` |
 | `house-boot` | `house_smp_n` | `volatile int house_smp_n` | `c_start.c` → `c_start.rs` |
 | `house-boot` | `house_smp_online_mask` | `volatile uint32_t house_smp_online_mask` | `c_start.c` → `c_start.rs` |

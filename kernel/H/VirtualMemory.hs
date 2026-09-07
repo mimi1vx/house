@@ -70,6 +70,11 @@ data PageInfo
   -- ^ indicates that the page has been written
   , accessed :: Bool
   -- ^ indicates that it has been read or written
+  , cow :: Bool
+  {- ^ copy-on-write sharer: HW sees RO (writable is False); an RO fault
+  on a cow page parks FAULT for a Haskell copy/remap, while a plain
+  RO page (loader text, mprotect) keeps the skip semantics
+  -}
   }
   deriving (Eq, Show)
 
@@ -99,9 +104,10 @@ bUXN = 54
 bPXN = 53
 
 -- SW bits for dirty/accessed structure-level round-trip (never walked by HW)
-bSwDirty, bSwAccessed :: Int
+bSwDirty, bSwAccessed, bSwCow :: Int
 bSwDirty = 55
 bSwAccessed = 56
+bSwCow = 57
 
 mAddress :: Word64
 mAddress = 0x0000FFFFFFFFF000 -- OA [47:12]
@@ -131,6 +137,7 @@ descToPageInfo d
             , writable = ((d `shiftR` 6) .&. 0x3) == 0x1
             , dirty = testBit' bSwDirty d
             , accessed = testBit' bSwAccessed d
+            , cow = testBit' bSwCow d
             }
         )
 
@@ -145,8 +152,9 @@ pageInfoToDesc pinfo =
           .|. attrNormal
       apBits = if writable pinfo then apRW else apRO
       sw =
-        condBit (dirty pinfo) bSwDirty $
-          condBit (accessed pinfo) bSwAccessed 0
+        condBit (dirty pinfo) bSwDirty
+          $ condBit (accessed pinfo) bSwAccessed
+          $ condBit (cow pinfo) bSwCow 0
    in base .|. apBits .|. sw
 
 -- Table helpers

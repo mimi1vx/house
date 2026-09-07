@@ -7,7 +7,7 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (forM_, void, when)
-import Data.Bits (complement, shiftL, shiftR, (.&.), (.|.))
+import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.Char (chr)
 import Data.List (isPrefixOf)
 import Data.Word (Word8)
@@ -2711,11 +2711,13 @@ brkBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1
 
 -- Embedded EL0 fork/wait probe (static aarch64, FORK then WAIT).
 -- Child prints `fork child` + exits 0; parent prints `fork parent`, waits
--- (resumes the reaped code), prints `fork wait ok` + exits 0. Built from
+-- (resumes the reaped code), prints `fork wait ok` + exits 0. Both sides
+-- also store a distinct halfword to the shared scratch word and read it
+-- back (COW share-then-diverge; a skipped store fails the probe). Built from
 -- build-probe/fork.s (assembled + repacked to a hello-style minimal ELF);
 -- if ramfs missing, write on boot next to /bin/brk.
 forkBytes :: [Word8]
-forkBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 174, 0, 0, 0, 0, 0, 0, 0, 174, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 94, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 212, 32, 2, 0, 180, 243, 3, 0, 170, 1, 0, 0, 144, 33, 0, 2, 145, 130, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 224, 3, 19, 170, 33, 1, 0, 212, 224, 1, 0, 181, 1, 0, 0, 144, 33, 92, 2, 145, 162, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 48, 2, 145, 98, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 144, 2, 145, 66, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 102, 111, 114, 107, 32, 112, 97, 114, 101, 110, 116, 10, 102, 111, 114, 107, 32, 99, 104, 105, 108, 100, 10, 102, 111, 114, 107, 32, 119, 97, 105, 116, 32, 111, 107, 10, 102, 111, 114, 107, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
+forkBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 242, 0, 0, 0, 0, 0, 0, 0, 242, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 162, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 176, 33, 0, 0, 145, 63, 0, 0, 249, 1, 1, 0, 212, 0, 3, 0, 180, 243, 3, 0, 170, 1, 0, 0, 144, 33, 16, 3, 145, 130, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 224, 3, 19, 170, 33, 1, 0, 212, 160, 3, 0, 181, 1, 0, 0, 176, 33, 0, 0, 145, 32, 34, 128, 210, 32, 0, 0, 249, 32, 0, 64, 249, 31, 68, 4, 241, 193, 2, 0, 84, 1, 0, 0, 144, 33, 108, 3, 145, 162, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 176, 33, 0, 0, 145, 64, 68, 128, 210, 32, 0, 0, 249, 32, 0, 64, 249, 31, 136, 8, 241, 1, 1, 0, 84, 1, 0, 0, 144, 33, 64, 3, 145, 98, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 160, 3, 145, 66, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 102, 111, 114, 107, 32, 112, 97, 114, 101, 110, 116, 10, 102, 111, 114, 107, 32, 99, 104, 105, 108, 100, 10, 102, 111, 114, 107, 32, 119, 97, 105, 116, 32, 111, 107, 10, 102, 111, 114, 107, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
 
 -- Embedded EL0 exec probe (static aarch64, EXEC /bin/hello).
 -- On success the image is replaced (hello prints + exits 0); a return
@@ -2724,6 +2726,14 @@ forkBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 
 -- next to /bin/fork.
 execBytes :: [Word8]
 execBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 61, 0, 0, 0, 0, 0, 0, 0, 61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 237, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 144, 0, 160, 0, 145, 97, 1, 0, 212, 1, 0, 0, 144, 33, 204, 0, 145, 66, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 47, 98, 105, 110, 47, 104, 101, 108, 108, 111, 0, 101, 120, 101, 99, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
+
+-- Embedded EL0 spin probe (static aarch64, argv[1][0] dot char + argv[2]
+-- decimal iterations). Burns the count with no yield svc, printing ".<char>"
+-- every count/20, then `spin done` + exit 0. Built from build-probe/spin.s
+-- (assembled + repacked to a hello-style minimal ELF); if ramfs missing,
+-- write on boot next to /bin/exec.
+spinBytes :: [Word8]
+spinBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 245, 0, 0, 0, 0, 0, 0, 0, 245, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 165, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 224, 3, 64, 249, 31, 12, 0, 241, 227, 5, 0, 84, 225, 11, 64, 249, 51, 0, 64, 57, 225, 15, 64, 249, 20, 0, 128, 210, 34, 20, 64, 56, 2, 1, 0, 52, 66, 192, 0, 81, 95, 36, 0, 113, 200, 4, 0, 84, 67, 1, 128, 210, 148, 126, 3, 155, 148, 2, 2, 139, 248, 255, 255, 23, 52, 4, 0, 180, 149, 2, 128, 210, 149, 10, 213, 154, 85, 0, 0, 181, 53, 0, 128, 210, 22, 0, 128, 210, 247, 3, 21, 170, 24, 0, 128, 210, 214, 6, 0, 145, 223, 2, 23, 235, 195, 1, 0, 84, 247, 2, 21, 139, 31, 83, 0, 241, 98, 1, 0, 84, 32, 0, 128, 210, 1, 0, 0, 144, 33, 128, 3, 145, 34, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 225, 11, 64, 249, 34, 0, 128, 210, 33, 0, 0, 212, 24, 7, 0, 145, 223, 2, 20, 235, 227, 253, 255, 84, 32, 0, 128, 210, 1, 0, 0, 144, 33, 132, 3, 145, 66, 1, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 32, 0, 128, 210, 1, 0, 0, 144, 33, 172, 3, 145, 66, 1, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 46, 115, 112, 105, 110, 32, 100, 111, 110, 101, 10, 115, 112, 105, 110, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
 
 foreign export ccall house_main :: IO ()
 
@@ -2739,7 +2749,7 @@ house_main = do
   editor <- runH (LE.newEditor kbd console)
   _ <- runH (FS.vfsMount FS.defaultNamespace "/" RamFs.ramfsOps)
   _ <- runH (FS.vfsInit FS.defaultNamespace)
-  -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp + /bin/cat + /bin/brk + /bin/fork + /bin/exec + /probe.txt from embedded bytes if missing
+  -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp + /bin/cat + /bin/brk + /bin/fork + /bin/exec + /bin/spin + /probe.txt from embedded bytes if missing
   _ <- runH $ do
     r <- FS.vfsStat FS.defaultNamespace "/bin/hello"
     case r of
@@ -2810,6 +2820,14 @@ house_main = do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
         let txt9 = map (chr . fromIntegral) execBytes
         _ <- FS.vfsWrite FS.defaultNamespace "/bin/exec" txt9
+        return ()
+    r10 <- FS.vfsStat FS.defaultNamespace "/bin/spin"
+    case r10 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
+        let txt10 = map (chr . fromIntegral) spinBytes
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/spin" txt10
         return ()
   _ <- runH Dmesg.dmesgInit
   _ <- runH (Dmesg.dmesgLog "House driver framework online")
@@ -2922,6 +2940,8 @@ house_main = do
       ["jobs"] -> handleJobs
       ["wait"] -> handleWaitAll
       ["wait", s] -> handleWaitOne s
+      ["quantum"] -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
+      ["quantum", s] -> handleQuantum s
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -3312,6 +3332,7 @@ house_main = do
     defaultEnv = ["HOUSE=1", "PATH=/bin"]
     handleForktest = do
       r <- runH $ do
+        refs0 <- U.cowLiveCount
         mBytes <- FS.vfsReadBytes FS.defaultNamespace "/bin/hello"
         case mBytes of
           Left e -> return (Left (showFsError e))
@@ -3326,14 +3347,18 @@ house_main = do
                   case rf of
                     Left le3 -> do _ <- U.killPid pidA; return (Left (toExecError le3))
                     Right pidB -> do
-                      ok <- forkIsolated pidA pidB
+                      okShare <- forkShared pidA pidB
+                      okDiverge <- if okShare then forkDiverge pidA pidB else return False
                       _ <- U.killPid pidA
                       _ <- U.killPid pidB
-                      if ok then return (Right ()) else return (Left "not isolated")
+                      refs1 <- U.cowLiveCount
+                      if okShare && okDiverge && refs1 == refs0
+                        then return (Right ())
+                        else return (Left ("cow share=" ++ show okShare ++ " diverge=" ++ show okDiverge ++ " refs=" ++ show refs0 ++ "->" ++ show refs1))
       case r of
         Left e -> withCString ("forktest fail " ++ e ++ "\n") c_uart_puts
         Right () -> withCString "forktest ok\n" c_uart_puts
-    forkIsolated pidA pidB = do
+    forkShared pidA pidB = do
       ma <- U.procInfo pidA
       mb <- U.procInfo pidB
       case (ma, mb) of
@@ -3341,13 +3366,27 @@ house_main = do
           | U.procPdir pa /= U.procPdir pb
           , U.procEntry pa == U.procEntry pb
           , U.procBrk pa == U.procBrk pb -> do
-              let va = U.procEntry pa .&. complement 4095
+              let va = U.stackTop - 4096
               ia <- VM.getPage (U.procPdir pa) va
               ib <- VM.getPage (U.procPdir pb) va
               case (ia, ib) of
                 (Just a, Just b) ->
-                  return (VM.physPage a /= VM.physPage b && VM.writable a == VM.writable b)
+                  return (VM.physPage a == VM.physPage b && not (VM.writable a) && not (VM.writable b) && VM.cow a && VM.cow b)
                 _ -> return False
+        _ -> return False
+    forkDiverge pidA pidB = do
+      ma <- U.procInfo pidA
+      mb <- U.procInfo pidB
+      case (ma, mb) of
+        (Just pa, Just pb) -> do
+          let va = U.stackTop - 4096
+          broke <- U.breakCow pidA va
+          ja <- VM.getPage (U.procPdir pa) va
+          jb <- VM.getPage (U.procPdir pb) va
+          case (ja, jb) of
+            (Just a, Just b) ->
+              return (broke && VM.physPage a /= VM.physPage b && VM.writable a && not (VM.cow a) && not (VM.writable b) && VM.cow b)
+            _ -> return False
         _ -> return False
     handleFdtest = do
       r <- runH $ do
@@ -3431,6 +3470,11 @@ house_main = do
             withCString ("reaped pid " ++ show n ++ " exit " ++ show code ++ "\n") c_uart_puts
         )
         pids
+    handleQuantum s = case reads s :: [(Integer, String)] of
+      [(n, "")] | n >= 0 && n <= 1000000 -> do
+        _ <- runH (U.schedSetQuantum (fromIntegral n))
+        withCString ("quantum ok " ++ show n ++ "\n") c_uart_puts
+      _ -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
     usage =
       unlines
         [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname [-asnrvmio] | uptime | shutdown [-h|-r] -- halt or reboot the machine"
@@ -3466,8 +3510,9 @@ house_main = do
         , "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3 console / multiport serial port0 + control q2/q3 DEVICE_READY/OPEN, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)"
         , "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/fd/ipc, EL0 eret (TTBR0/ASID/pager)"
         , "       spawn </path> [args...] -- run without waiting (prints pid) | jobs -- list live pids | wait [pid] -- reap (all when bare)"
+        , "       quantum <ticks> -- preempt quantum in timer ticks (0..1000000, 0 means 1; default 10)"
         , "       fdtest -- per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)"
-        , "       forktest -- EL1 forkProc page-map copy + isolation check (no COW/signals; EL0 spawn 0x08 pending ring)"
+        , "       forktest -- EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)"
         ]
     seqFib :: Int -> Int
     seqFib n

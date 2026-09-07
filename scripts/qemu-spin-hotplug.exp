@@ -1,0 +1,151 @@
+#!/usr/bin/expect -f
+# Spinner + SMP hotplug (multiprocess step 12): two CPU-bound EL0 spinners
+# (no yield svc) stay alive across `smp down 1`, and on tcg across `smp up 1`
+# (resume migrates cores via the global run queue; the full VMALLE1IS-class
+# flush on resume makes the migration correct). Two spinners matter: a solo
+# spinner never exceeds its quantum (no oversubscription, no preemption), so
+# the offlined core cannot quiesce and `smp down` only returns after it exits;
+# with two live sessions preemption is active, the core parks, and down
+# completes mid-burn. The shell stays responsive throughout via the same
+# preemption.
+#
+# Harness discipline (hard-won on -smp 2):
+#  - one command per roundtrip: burst sends overrun the 16-byte PL011 RX FIFO
+#    while the guest prints (lost input, zero evidence). Each step is
+#    confirmed before the next send.
+#  - completion/dots ride along in EVERY body via exp_continue branches (main
+#    matches consume, so progress is guaranteed). expect_before is NOT used:
+#    it hangs this expect build. No output is ever required twice or in
+#    order; a fast session's burst is counted, never discarded.
+#  - shell-print stalls (10-30s+, PL011Server path) are absorbed by generous
+#    timeouts; nothing is inferred from timing.
+#  - burn (~120s) covers the hotplug many times over; completion+reaps are
+#    strict regardless. No vacuous-guard by design: shell print stalls skew
+#    arrival order, so arrival order is not causal order.
+# Strict assertions: both `spin done` + both reaped exit 0.
+# hvf refuses PSCI re-CPU_ON after CPU_OFF, so up-after-down is tcg-only.
+# Usage: expect scripts/qemu-spin-hotplug.exp <kernel.bin> [marker] [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+if {$marker eq "" || $marker eq "hvf" || $marker eq "tcg"} {
+    set smp $mem
+    set mem $accel
+    set accel $marker
+    set marker "spin-hotplug-ok"
+}
+if {$marker eq ""} { set marker "spin-hotplug-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 420 } else { set timeout 300 }
+} else {
+    set timeout $timeout_arg
+}
+if {$accel eq "tcg"} { set iters "55000000000" } else { set iters "240000000000" }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# Ride-along counters, valid in every body below: dots (liveness) and dones
+# (completion) consume-and-continue, so burst output is counted in passing.
+set dones 0
+set dots 0
+send "spawn /bin/spin A $iters\r"
+expect {
+    -re {\.[AB]} { incr dots; exp_continue }
+    -re {spin done} { incr dones; exp_continue }
+    -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spin A pid $p1" }
+    timeout { puts "\nFAIL: spin A spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spin A spawn"; exit 1 }
+}
+send "spawn /bin/spin B $iters\r"
+expect {
+    -re {\.[AB]} { incr dots; exp_continue }
+    -re {spin done} { incr dones; exp_continue }
+    -re {spawned pid ([0-9]+)} { set p2 $expect_out(1,string); puts "\nPASS: spin B pid $p2" }
+    timeout { puts "\nFAIL: spin B spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spin B spawn"; exit 1 }
+}
+if {$p1 == $p2} { puts "\nFAIL: pids not distinct ($p1)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+puts "\nPASS: pids distinct ($p1 != $p2)"
+# down-ok proves the shell lived through the down with spinners registered
+# (the deadlock property: down must complete while EL0 sessions exist; it
+# does not wait for them to exit). No vacuous-guard on dones here by design:
+# shell print stalls skew arrival order, so a completion that ARRIVES before
+# down-ok may still have EXECUTED after it; completion+reaps below are the
+# strict assertions, and they only pass if both spinners ran correctly
+# across the hotplug (any migration corruption surfaces as missing/wrong
+# output or a bad exit).
+send "smp down 1\r"
+expect {
+    -re {\.[AB]} { incr dots; exp_continue }
+    -re {spin done} { incr dones; exp_continue }
+    -re "smp down ok" { puts "\nPASS: down ok (dots=$dots dones=$dones)" }
+    timeout { puts "\nFAIL: down timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before down"; exit 1 }
+}
+puts "\nPASS: down completed with spinners registered"
+send "jobs\r"
+expect {
+    -re {\.[AB]} { incr dots; exp_continue }
+    -re {spin done} { incr dones; exp_continue }
+    -re "jobs:" { puts "\nPASS: jobs listed on 1 core with spinners live" }
+    timeout { puts "\nFAIL: jobs timeout (shell stalled?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before jobs"; exit 1 }
+}
+    if {$accel eq "tcg"} {
+    send "smp up 1\r"
+    expect {
+        -re {\.[AB]} { incr dots; exp_continue }
+        -re {spin done} { incr dones; exp_continue }
+        -re "smp up ok" { puts "\nPASS: up ok with spinners live" }
+        timeout { puts "\nFAIL: up timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof before up"; exit 1 }
+    }
+    puts "\nPASS: up completed with spinners registered"
+}
+if {$dones < 2} {
+    expect {
+        -re {\.[AB]} { incr dots; exp_continue }
+        -re {spin done} {
+            incr dones
+            if {$dones < 2} { exp_continue }
+            puts "\nPASS: both spinners completed across hotplug (dots=$dots)"
+        }
+        timeout { puts "\nFAIL: spin done timeout (dones=$dones)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof before spin done"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+} else {
+    puts "\nPASS: both spinners completed across hotplug (observed early)"
+}
+send "wait\r"
+set reaps 0
+expect {
+    -re {\.[AB]} { incr dots; exp_continue }
+    -re {spin done} { incr dones; exp_continue }
+    -re {reaped pid ([0-9]+) exit 0} {
+        incr reaps
+        puts "\nNOTE: reaped pid $expect_out(1,string) exit 0 ($reaps)"
+        if {$reaps < 2} { exp_continue }
+        puts "\nPASS: both reaped exit 0"
+    }
+    timeout { puts "\nFAIL: reap timeout (reaps=$reaps)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before reap"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+puts "\nPASS: $marker"
+catch {exec kill -9 [exp_pid]}
+exit 0

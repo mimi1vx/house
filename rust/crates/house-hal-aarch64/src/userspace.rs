@@ -157,6 +157,56 @@ pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
     }
 }
 
+// SAFETY: EL1 fault context (RO perm guard in `c_handle_sync`); page-table
+// reads against the recorded pdir only, no locks. Reports whether the L3
+// page descriptor carries RO permission plus the SW COW mark (bit 57, set
+// by the Haskell fork-share path). Block descriptors never carry COW.
+// Returns 1 COW, 0 otherwise (unmapped, writable, or plain RO).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_is_cow_page(va: u64) -> i32 {
+    let va = va & !4095;
+    unsafe {
+        let pdir = RECORDED_PDIR;
+        if pdir.is_null() || (pdir as usize & 4095) != 0 {
+            return 0;
+        }
+        let l0 = pdir as *mut u64;
+        let d0 = *l0.add(((va >> 39) & 0x1FF) as usize);
+        if d0 & 1 == 0 {
+            return 0;
+        }
+        let l1 = (d0 & !0xFFF) as *mut u64;
+        let d1 = *l1.add(((va >> 30) & 0x1FF) as usize);
+        if d1 & 1 == 0 {
+            return 0;
+        }
+        // 1GB block: no deeper walk; blocks never carry COW.
+        if d1 & 2 == 0 {
+            return 0;
+        }
+        let l2 = (d1 & !0xFFF) as *mut u64;
+        let d2 = *l2.add(((va >> 21) & 0x1FF) as usize);
+        if d2 & 1 == 0 {
+            return 0;
+        }
+        // 2MB block: same, never COW.
+        if d2 & 2 == 0 {
+            return 0;
+        }
+        let l3 = (d2 & !0xFFF) as *mut u64;
+        let d3 = *l3.add(((va >> 12) & 0x1FF) as usize);
+        if d3 & 1 == 0 {
+            return 0;
+        }
+        let ap = (d3 >> 6) & 0x3;
+        if ap == 0x3 && (d3 >> 57) & 1 == 1 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
     unsafe {

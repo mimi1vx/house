@@ -28,7 +28,13 @@ module Kernel.Userspace (
   Kernel.Userspace.Process.waitPid,
   Kernel.Userspace.Process.killPid,
   Kernel.Userspace.Process.procBrkGrow,
+  Kernel.Userspace.Process.stackTop,
+  Kernel.Userspace.Process.breakCow,
+  Kernel.Userspace.Process.cowLiveCount,
   Kernel.Userspace.Process.ParkRequest (..),
+
+  -- * Scheduler (multiprocess preemption: global run queue, timer quantum)
+  Kernel.Userspace.Sched.schedSetQuantum,
 
   -- * Fd table (Track O FS slice, EL1 per-pid; EL0 traps ride the ring)
   Kernel.Userspace.Fd.Fd (..),
@@ -67,5 +73,6 @@ where
 import Kernel.Userspace.Fd
 import Kernel.Userspace.Loader
 import Kernel.Userspace.Process
+import Kernel.Userspace.Sched
 import Kernel.Userspace.Syscall
 import Kernel.Userspace.Types

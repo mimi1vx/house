@@ -58,9 +58,10 @@ syscallBrk = 0x03
 
 {- | Track O fd/fork numbers (svc #imm). The fd slice (0x04..0x07 + 0x0A)
 backs per-pid 'Kernel.Userspace.Fd' over ramfs; fork/wait (0x08/0x09) backs
-'Kernel.Userspace.Process.forkChildEl0' (deep copy + trap-frame clone,
-child x0 = 0, parent resumes the child pid; wait blocks in 'waitPid' and
-resumes the reaped exit code); exec (0x0B) backs
+'Kernel.Userspace.Process.forkChildEl0' (COW share + trap-frame clone,
+child x0 = 0, parent resumes the child pid; a write to a shared page parks
+FAULT and copies/remaps RW; wait blocks in 'waitPid' and resumes the reaped
+exit code); exec (0x0B) backs
 'Kernel.Userspace.Process.execReplace' (same pid, fds stay open).
 Numbering resolves the plan's overlap (fd 0x04-0x07 vs fork 0x05/0x06):
 fd takes 0x04-0x07, fork/wait move to 0x08/0x09, lseek takes 0x0A,
@@ -98,10 +99,11 @@ count; CLOSE resumes 0; SEEK resumes the new offset. Errors resume
 negative errnos: -2 ENOENT, -9 EBADF, -14 EFAULT (trap-side buffer/path
 fault, never parked), -22 EINVAL, -28 ENOSPC. Per-pid tables make
 cross-pid fd use fail EBADF.
-Fork contract: svc 0x08 parks; Haskell deep-copies the address space
-(no COW yet), clones the trap frame (child resumes at the post-svc pc
-with x0 = 0), and resumes the parent with the child pid; ENOMEM when the
-copy fails. Wait contract: svc 0x09 parks with x0 = child pid; Haskell
+Fork contract: svc 0x08 parks; Haskell shares the address space
+(copy-on-write: both sides RO with the SW cow mark, refcounted; a write
+fault parks FAULT, copies the page, and remaps RW), clones the trap frame
+(child resumes at the post-svc pc with x0 = 0), and resumes the parent with
+the child pid; ENOMEM when the share fails. Wait contract: svc 0x09 parks with x0 = child pid; Haskell
 blocks until the child exits, reaps, and resumes the exit code (low 8
 bits, like EXIT); unknown pid resumes ENOENT, self/zero pid resumes
 EINVAL. Exec contract: svc 0x0B parks with x0 = NUL-terminated path

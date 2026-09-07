@@ -123,8 +123,8 @@ vmIsolate = do
               HPages.zeroPage pa
               HPages.zeroPage pb
               let va = VM.minVAddr
-                  infoA = VM.PageInfo {VM.physPage = HPhys.toPhysPage pa, VM.writable = True, VM.dirty = False, VM.accessed = False}
-                  infoB = VM.PageInfo {VM.physPage = HPhys.toPhysPage pb, VM.writable = True, VM.dirty = False, VM.accessed = False}
+                  infoA = VM.PageInfo {VM.physPage = HPhys.toPhysPage pa, VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}
+                  infoB = VM.PageInfo {VM.physPage = HPhys.toPhysPage pb, VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}
               ok1 <- VM.setPage p1 va (Just infoA)
               ok2 <- VM.setPage p2 va (Just infoB)
               g1 <- VM.getPage p1 va

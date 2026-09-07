@@ -220,6 +220,21 @@ house-fork-check: house-build
 	expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
+# EL0 preemption via timer IRQ + baton run queue (multiprocess step 11):
+# 2 CPU-bound spinners interleave on -smp 1 (smp forced to 1: the switch is
+# proven by alternation, not core count), shell responsive throughout.
+house-preempt-check: house-build
+	expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 120 hvf $(SPIKE_MEM) 1
+	expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 300 tcg $(SPIKE_MEM) 1
+
+# Spinner + SMP hotplug (multiprocess step 12): one CPU-bound EL0 spinner
+# survives `smp down 1` (hvf: down-leg only, PSCI refuses re-CPU_ON) and the
+# full down/up cycle on tcg (resume migrates cores via the global run queue);
+# shell responsive throughout, spinner reaped exit 0.
+house-spin-hotplug-check: house-build
+	expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 300 hvf $(SPIKE_MEM) 2
+	expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 420 tcg $(SPIKE_MEM) 2
+
 # EL0 fd/brk via park ring (multiprocess step 7): per-pid OPEN/READ/CLOSE cat + brk grow-touch
 house-fd-el0-check: house-build
 	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
@@ -305,4 +320,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check

@@ -53,6 +53,14 @@ const EL0_REQ_IPC_SEND: u32 = 0x10;
 const EL0_REQ_IPC_RECV: u32 = 0x11;
 const EL0_REQ_IPC_CALL: u32 = 0x12;
 const EL0_REQ_IPC_REPLY: u32 = 0x13;
+// COW fault park (not an svc number: the RO perm guard parks a write to a
+// shared page so Haskell can copy/remap RW; resumed x0 is the trapped x0
+// so the faulting store retries).
+const EL0_REQ_FAULT: u32 = 0x1F;
+// Timer-preemption park (not an svc number: the IRQ handler parks an
+// over-quantum EL0 frame so Haskell can hand the CPU to the next runnable
+// pid; resumed x0 is the trapped x0 so the interrupted insn retries).
+const EL0_REQ_PREEMPT: u32 = 0x1E;
 
 #[derive(Clone, Copy)]
 struct El0Slot {
@@ -64,6 +72,7 @@ struct El0Slot {
     parked: i32,
     exit_code: i32,
     exited: i32,
+    fault_va: u64,
 }
 
 const EL0_FREE: El0Slot = El0Slot {
@@ -75,6 +84,7 @@ const EL0_FREE: El0Slot = El0Slot {
     parked: 0,
     exit_code: 0,
     exited: 0,
+    fault_va: 0,
 };
 
 static mut EL0_TABLE: [El0Slot; 64] = [EL0_FREE; 64];
@@ -601,6 +611,9 @@ pub unsafe extern "C" fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *c
         if gpr.is_null() {
             return 0;
         }
+        // Voluntary yield: the session leaves the CPU, so its next slice
+        // starts full.
+        sched_reset_quantum();
         let cur = current_pdir() as u64;
         if cur == 0 {
             return 0;
@@ -616,6 +629,68 @@ pub unsafe extern "C" fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *c
                 EL0_TABLE[i].parked = 1;
                 core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
                 return 1;
+            }
+        }
+        0
+    }
+}
+
+// SAFETY: fault context (`c_handle_sync` RO perm guard on a COW page);
+// bounded 112-word copy with no locks or allocation. `elr` is recorded
+// as-delivered (the faulting instruction — resume retries it, never +4).
+// `far` is the window-checked fault VA. Returns 1 when parked, 0 when the
+// pdir holds no slot (caller falls back to the legacy skip).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_park_fault(
+    elr: u64,
+    sp_el0: u64,
+    gpr: *const u64,
+    far: u64,
+) -> i32 {
+    unsafe {
+        if gpr.is_null() {
+            return 0;
+        }
+        // Faulting store leaves the CPU while Haskell copies: next slice full.
+        sched_reset_quantum();
+        let cur = current_pdir() as u64;
+        if cur == 0 {
+            return 0;
+        }
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == cur {
+                // SAFETY: gpr is the 896B vec_sync frame (112 u64), slot save
+                // is a static 112-word field; single bounded copy, no overlap.
+                core::ptr::copy_nonoverlapping(gpr, EL0_TABLE[i].save.as_mut_ptr(), 112);
+                EL0_TABLE[i].elr = elr;
+                EL0_TABLE[i].sp_el0 = sp_el0;
+                EL0_TABLE[i].req = EL0_REQ_FAULT;
+                EL0_TABLE[i].fault_va = far & !4095;
+                EL0_TABLE[i].parked = 1;
+                core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+                return 1;
+            }
+        }
+        0
+    }
+}
+
+// SAFETY: EL1 thread context (Haskell park loop); returns the parked fault
+// VA (page-aligned) for the pid, 0 when the pid holds no FAULT request.
+// VA 0 is never a parked fault (user window starts at 0x01000000).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_fault_addr(pdir: *mut u8) -> u64 {
+    unsafe {
+        if pdir.is_null() {
+            return 0;
+        }
+        let key = pdir as u64;
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == key {
+                if EL0_TABLE[i].parked != 0 && EL0_TABLE[i].req == EL0_REQ_FAULT {
+                    return EL0_TABLE[i].fault_va;
+                }
+                return 0;
             }
         }
         0
@@ -768,6 +843,8 @@ pub unsafe extern "C" fn house_resume_el0(pdir: *mut u8, asid: u64, res: u64) ->
                 let sp = EL0_TABLE[i].sp_el0;
                 let save_ptr = EL0_TABLE[i].save.as_ptr();
                 EL0_TABLE[i].parked = 0;
+                // Resumed session starts a full slice.
+                sched_reset_quantum();
                 core::arch::asm!("dsb sy", options(nostack, preserves_flags));
                 house_set_recorded_pdir(pdir);
                 // SAFETY: slot fields are static; asm restores the saved frame
@@ -777,6 +854,111 @@ pub unsafe extern "C" fn house_resume_el0(pdir: *mut u8, asid: u64, res: u64) ->
             }
         }
         -22
+    }
+}
+
+// Preemptive scheduling (multiprocess step 11): the virtual-timer IRQ
+// (`c_handle_irq`, intid 27) counts down a per-core quantum while EL0 runs;
+// on expiry with oversubscription advertised (Haskell
+// `house_sched_set_runnable`), the EL0 frame parks with EL0_REQ_PREEMPT and
+// Haskell round-robins the run queue. Trap/IRQ context throughout: lock-free
+// atomics and the fixed EL0 table only, never Haskell locks or allocation.
+const SCHED_QUANTUM_DEFAULT_TICKS: u64 = 10;
+
+static SCHED_QUANTUM: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(SCHED_QUANTUM_DEFAULT_TICKS);
+static SCHED_LEFT: [core::sync::atomic::AtomicU64; 32] =
+    [const { core::sync::atomic::AtomicU64::new(SCHED_QUANTUM_DEFAULT_TICKS) }; 32];
+static SCHED_RUNNABLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// SAFETY: callable from any EL1 context; a single atomic store.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_sched_set_runnable(n: u64) {
+    use core::sync::atomic::Ordering;
+    SCHED_RUNNABLE.store(n, Ordering::SeqCst);
+}
+
+// SAFETY: callable from any EL1 context; a single atomic store (0 means 1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_sched_set_quantum(n: u64) {
+    use core::sync::atomic::Ordering;
+    SCHED_QUANTUM.store(if n == 0 { 1 } else { n }, Ordering::SeqCst);
+}
+
+#[inline(always)]
+fn sched_core() -> usize {
+    let mpidr: u64;
+    // SAFETY: mrs mpidr_el1 is always valid at EL1.
+    unsafe {
+        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nostack, preserves_flags))
+    };
+    (mpidr & 31) as usize
+}
+
+#[inline(always)]
+fn sched_reset_quantum() {
+    use core::sync::atomic::Ordering;
+    let core = sched_core();
+    if core < 32 {
+        SCHED_LEFT[core].store(SCHED_QUANTUM.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+
+// SAFETY: timer-IRQ context (`c_handle_irq`, intid 27) after the caller
+// confirmed EL0 (`is_el0 != 0`, SPSR.M == 0) and passed the vec_irq frame;
+// integer, atomic, and table ops only, no locks or allocation. Decrements
+// the calling core's quantum; on expiry with oversubscription it parks the
+// interrupted frame as PREEMPT (ELR as-delivered: resume retries the
+// interrupted insn, never +4). Returns 1 when parked (caller must restore
+// kernel TTBR0/spsr and resume the exit trampoline), 0 to keep running.
+// Every path rearms the countdown, so an untracked EL0 session (no slot)
+// simply keeps its slice.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_sched_tick_preempt(
+    gpr: *mut u64,
+    elr: u64,
+    sp_el0: u64,
+    is_el0: i32,
+) -> i32 {
+    use core::sync::atomic::Ordering;
+    unsafe {
+        let core = sched_core();
+        if core >= 32 || is_el0 == 0 || gpr.is_null() {
+            return 0;
+        }
+        let left = SCHED_LEFT[core].load(Ordering::Relaxed);
+        if left > 1 {
+            SCHED_LEFT[core].store(left - 1, Ordering::Relaxed);
+            return 0;
+        }
+        let q = SCHED_QUANTUM.load(Ordering::Relaxed);
+        SCHED_LEFT[core].store(if q == 0 { 1 } else { q }, Ordering::Relaxed);
+        if SCHED_RUNNABLE.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+        let cur = current_pdir() as u64;
+        if cur == 0 {
+            return 0;
+        }
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == cur {
+                // SAFETY: gpr is the 896B vec_irq frame (same layout as the
+                // sync frame); slot save is a static 112-word field.
+                core::ptr::copy_nonoverlapping(
+                    gpr as *const u64,
+                    EL0_TABLE[i].save.as_mut_ptr(),
+                    112,
+                );
+                EL0_TABLE[i].elr = elr;
+                EL0_TABLE[i].sp_el0 = sp_el0;
+                EL0_TABLE[i].req = EL0_REQ_PREEMPT;
+                EL0_TABLE[i].fault_va = 0;
+                EL0_TABLE[i].parked = 1;
+                core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+                return 1;
+            }
+        }
+        0
     }
 }
 

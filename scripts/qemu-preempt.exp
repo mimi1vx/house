@@ -1,0 +1,150 @@
+#!/usr/bin/expect -f
+# EL0 preemption harness (multiprocess step 11): 2 CPU-bound spinners (no
+# yield svc anywhere) must interleave on -smp 1 with the shell responsive
+# throughout, then both complete exit 0.
+# Interleave proof: three dots alternating starters (A,B,A or B,A,B) means
+# the first proc ran again after the second stole the CPU — impossible
+# without timer preemption. Dots are ".<char>" (20 per proc); completion is
+# "spin done" x2 plus reaped exits.
+# Usage: expect scripts/qemu-preempt.exp <kernel.bin> [marker] [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+if {$marker eq "" || $marker eq "hvf" || $marker eq "tcg"} {
+    set smp $mem
+    set mem $accel
+    set accel $marker
+    set marker "preempt-ok"
+}
+if {$marker eq ""} { set marker "preempt-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 1 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 150 } else { set timeout 90 }
+} else {
+    set timeout $timeout_arg
+}
+if {$accel eq "tcg"} { set iters "200000000" } else { set iters "6000000000" }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "spawn /bin/spin A $iters\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spin1 pid $p1" }
+    timeout { puts "\nFAIL: spin1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spin1"; exit 1 }
+}
+# Spawn B back-to-back (no roundtrips between): every shell roundtrip burns
+# A's slice on -smp 1, so any latency here shrinks the overlap window and
+# risks a serial run. Single-spinner responsiveness is covered more strongly
+# below (jobs under 2-spinner load).
+send "spawn /bin/spin B $iters\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set p2 $expect_out(1,string); puts "\nPASS: spin2 pid $p2" }
+    timeout { puts "\nFAIL: spin2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spin2"; exit 1 }
+}
+if {$p1 == $p2} { puts "\nFAIL: pids not distinct ($p1)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+puts "\nPASS: pids distinct ($p1 != $p2)"
+# Sync past the idle prompt left by the second spawn: the shell is now
+# blocked on UART read and prints nothing until poked, so any later bare
+# "> " expect would either match this stale prompt (false responsive) or
+# (after a dot match discards it) hang forever (false stall).
+expect {
+    -re "> " { puts "\nPASS: prompt synced before stream" }
+    timeout { puts "\nFAIL: pre-stream prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before stream"; exit 1 }
+}
+# Interleave proof over the concurrent-phase stream: a single expect consumes
+# dots and completions (exp_continue) until both "spin done" arrive, so no
+# dot is eaten by an intervening roundtrip and UART buffering cannot forge
+# the verdict. Serial execution (all A then all B, or vice versa) has only
+# one of "AB"/"BA"; any true time-sharing has both. "jobs" is sent once both
+# directions are seen (or after 8 dots as a fallback so a truly serial run
+# still gets the shell probe and a clean serial verdict instead of a stream
+# timeout); a "jobs:" + fresh prompt under load proves the shell is
+# scheduled, not just the spinners.
+set seq ""
+set dones 0
+set sentJobs 0
+set jobsOk 0
+proc maybeJobs {} {
+    global seq sentJobs
+    if {$sentJobs == 0 && (([string match "*AB*" $seq] && [string match "*BA*" $seq]) || [string length $seq] >= 8)} {
+        send "jobs\r"
+        set sentJobs 1
+    }
+}
+expect {
+    -re {\.A} {
+        append seq "A"
+        maybeJobs
+        exp_continue
+    }
+    -re {\.B} {
+        append seq "B"
+        maybeJobs
+        exp_continue
+    }
+    -re {jobs:} {
+        puts "\nPASS: jobs listed under 2-spinner load"
+        set jobsOk 1
+        if {$dones < 2} { exp_continue }
+        puts "\nPASS: both spin done (shell answered under load)"
+    }
+    -re "> " {
+        if {$sentJobs && $jobsOk} {
+            puts "\nPASS: shell responsive under load"
+            if {$dones < 2} { exp_continue }
+            puts "\nPASS: both spin done (shell answered under load)"
+        } else {
+            puts "\nFAIL: stray prompt before jobs probe"; catch {exec kill -9 [exp_pid]}; exit 1
+        }
+    }
+    -re {spin done} {
+        incr dones
+        if {$dones < 2 || !$jobsOk} { exp_continue }
+        puts "\nPASS: both spin done (shell answered under load)"
+    }
+    timeout { puts "\nFAIL: stream timeout (dots=$seq dones=$dones jobs=$jobsOk)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof during stream"; exit 1 }
+}
+if {[string match "*AB*" $seq] && [string match "*BA*" $seq]} {
+    puts "\nPASS: interleave ($seq)"
+} else {
+    puts "\nFAIL: serial dots ($seq, no time-sharing)"; catch {exec kill -9 [exp_pid]}; exit 1
+}
+if {!$jobsOk} { puts "\nFAIL: shell never answered jobs under load"; catch {exec kill -9 [exp_pid]}; exit 1 }
+send "wait\r"
+expect {
+    -re "reaped pid $p1 exit 0" { puts "\nPASS: reaped $p1 exit 0" }
+    timeout { puts "\nFAIL: reap $p1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before reap $p1"; exit 1 }
+}
+expect {
+    -re "reaped pid $p2 exit 0" { puts "\nPASS: reaped $p2 exit 0 (both complete)" }
+    timeout { puts "\nFAIL: reap $p2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before reap $p2"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt at end" }
+    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof at end"; exit 1 }
+}
+puts "\nPASS: $marker"
+catch {exec kill -9 [exp_pid]}
+exit 0
