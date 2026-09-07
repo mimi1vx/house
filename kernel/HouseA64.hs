@@ -2817,6 +2817,11 @@ house_main = do
       ["forktest"] -> handleForktest
       ["run"] -> withCString "usage: run <path> [args...]\n" c_uart_puts
       ("run" : p : args) -> handleRun p args
+      ["spawn"] -> withCString "usage: spawn <path> [args...]\n" c_uart_puts
+      ("spawn" : p : args) -> handleSpawn p args
+      ["jobs"] -> handleJobs
+      ["wait"] -> handleWaitAll
+      ["wait", s] -> handleWaitOne s
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     handleEcho ws = case break (== ">") ws of
       (pre, []) -> withCString (unwords pre ++ "\n") c_uart_puts
@@ -3260,6 +3265,42 @@ house_main = do
       case r of
         Left e -> withCString (e ++ "\n") c_uart_puts
         Right code -> withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
+    handleSpawn path args = do
+      r <- runH $ do
+        mBytes <- FS.vfsReadBytes FS.defaultNamespace path
+        case mBytes of
+          Left e -> return (Left (showFsError e))
+          Right bytes -> do
+            case ULdr.loadElf bytes of
+              Left le -> return (Left (toExecError le))
+              Right elf -> do
+                res <- U.runElf elf (path : args) defaultEnv
+                case res of
+                  Left le2 -> return (Left (toExecError le2))
+                  Right (U.Pid n) -> return (Right n)
+      case r of
+        Left e -> withCString (e ++ "\n") c_uart_puts
+        Right n -> withCString ("spawned pid " ++ show n ++ "\n") c_uart_puts
+    handleJobs = do
+      pids <- runH U.listProcs
+      withCString ("jobs:" ++ concatMap (\(U.Pid n) -> " " ++ show n) pids ++ "\n") c_uart_puts
+    handleWaitOne s = case reads s :: [(Int, String)] of
+      [(n, "")] -> do
+        live <- runH U.listProcs
+        if any (\(U.Pid m) -> m == n) live
+          then do
+            code <- runH (U.waitPid (U.Pid n))
+            withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
+          else withCString ("no such job: " ++ s ++ "\n") c_uart_puts
+      _ -> withCString "usage: wait [pid]\n" c_uart_puts
+    handleWaitAll = do
+      pids <- runH U.listProcs
+      mapM_
+        ( \(U.Pid n) -> do
+            code <- runH (U.waitPid (U.Pid n))
+            withCString ("reaped pid " ++ show n ++ " exit " ++ show code ++ "\n") c_uart_puts
+        )
+        pids
     usage =
       unlines
         [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname [-asnrvmio] | uptime | shutdown [-h|-r] -- halt or reboot the machine"
@@ -3293,6 +3334,7 @@ house_main = do
         , "       dns <name> -- A-record lookup via 10.0.2.3 (UDP/53, no TCP; e.g. dns example.com)"
         , "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3 console / multiport serial port0 + control q2/q3 DEVICE_READY/OPEN, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)"
         , "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)"
+        , "       spawn </path> [args...] -- run without waiting (prints pid) | jobs -- list live pids | wait [pid] -- reap (all when bare)"
         , "       fdtest -- EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A pending ring)"
         , "       forktest -- EL1 forkProc page-map copy + isolation check (no COW/signals; EL0 spawn 0x08 pending ring)"
         ]

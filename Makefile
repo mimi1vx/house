@@ -209,6 +209,11 @@ house-virtio-con-check: house-build
 	expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 	expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 
+# EL0 process checks: per-pid exits + spawn/jobs/wait, 2 concurrent hellos
+house-proc-check: house-build
+	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
+
 # Userspace EL0 (Track 6): ELF loader 0x01000000 window, svc write/exit/brk + IPC 0x10..0x14 via Endpoint, TTBR0/ASID/pager
 house-userspace-check: house-build
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
@@ -284,4 +289,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check

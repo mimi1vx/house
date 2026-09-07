@@ -21,6 +21,30 @@ const HOUSE_SVC_IPC_GRANT_MAP: u32 = 0x14;
 static mut HOUSE_USER_EXITED: i32 = 0;
 static mut HOUSE_USER_EXIT_CODE: i32 = 0;
 
+// Per-pid EL0 exit table: fixed 64-slot array keyed by
+// pdir pointer, lock-free (single-copy 64-bit field accesses). Trap context
+// (`house_set_exit` from `c_handle_sync`) must never take locks, so all
+// lookup/update paths are bounded linear scans with no allocation.
+// `save` reserves the 896B resume frame for future parked-syscall resume.
+const EL0_N: usize = 64;
+
+#[derive(Clone, Copy)]
+struct El0Slot {
+    pdir: u64,
+    save: [u64; 112],
+    exit_code: i32,
+    exited: i32,
+}
+
+const EL0_FREE: El0Slot = El0Slot {
+    pdir: 0,
+    save: [0; 112],
+    exit_code: 0,
+    exited: 0,
+};
+
+static mut EL0_TABLE: [El0Slot; 64] = [EL0_FREE; 64];
+
 unsafe extern "C" {
     fn uart_puts(s: *const u8);
     fn uart_putc(c: u8);
@@ -98,9 +122,95 @@ pub(crate) unsafe fn validate_user_buffer(va: u64, len: u64) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_set_exit(code: i32) {
     unsafe {
-        HOUSE_USER_EXIT_CODE = code;
-        HOUSE_USER_EXITED = 1;
+        // SAFETY: trap-safe lock-free routing; unregistered pdirs fall back
+        // to the legacy global so pre-per-pid sessions keep working.
+        let cur = current_pdir() as u64;
+        let mut routed = false;
+        if cur != 0 {
+            for i in 0..EL0_N {
+                if EL0_TABLE[i].pdir == cur {
+                    EL0_TABLE[i].exit_code = code;
+                    EL0_TABLE[i].exited = 1;
+                    routed = true;
+                    break;
+                }
+            }
+        }
+        if !routed {
+            HOUSE_USER_EXIT_CODE = code;
+            HOUSE_USER_EXITED = 1;
+        }
         core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+    }
+}
+
+// SAFETY: EL1 thread context (Haskell FFI); lock-free slot claim, `pdir`
+// published last so a concurrent trap scan never sees a half-claimed slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_register(pdir: *mut u8) -> i32 {
+    unsafe {
+        if pdir.is_null() {
+            return -22;
+        }
+        let key = pdir as u64;
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == key {
+                EL0_TABLE[i].exit_code = 0;
+                EL0_TABLE[i].exited = 0;
+                return 0;
+            }
+        }
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == 0 {
+                EL0_TABLE[i].exit_code = 0;
+                EL0_TABLE[i].exited = 0;
+                EL0_TABLE[i].pdir = key;
+                return 0;
+            }
+        }
+        -28
+    }
+}
+
+// SAFETY: EL1 thread context (Haskell FFI); `pdir` retracted first so a
+// concurrent trap scan stops routing to the freed slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_unregister(pdir: *mut u8) {
+    unsafe {
+        if pdir.is_null() {
+            return;
+        }
+        let key = pdir as u64;
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == key {
+                EL0_TABLE[i].pdir = 0;
+                EL0_TABLE[i].exited = 0;
+                EL0_TABLE[i].exit_code = 0;
+                return;
+            }
+        }
+    }
+}
+
+// SAFETY: EL1 thread context (Haskell FFI); returns 1 with `*code_out` set
+// when the pid exited, 0 when still live/unknown, negative errno on bad args.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_exit_status(pdir: *mut u8, code_out: *mut i32) -> i32 {
+    unsafe {
+        if pdir.is_null() || code_out.is_null() {
+            return -14;
+        }
+        let key = pdir as u64;
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == key {
+                if EL0_TABLE[i].exited != 0 {
+                    *code_out = EL0_TABLE[i].exit_code;
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        0
     }
 }
 

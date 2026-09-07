@@ -233,6 +233,11 @@ pub unsafe extern "C" fn c_handle_sync(
                 }
                 return svc_exit_trampoline as *const () as u64;
             }
+            // Measured (hvf+tcg, 2026-09): QEMU delivers ELR already past the
+            // trapped `svc` (ELR points at the next insn, insn-at-ELR decodes
+            // as the post-svc word), so resume is bare `elr`. An `elr+4` here
+            // skips one guest insn — observed as `mov x0,#0` skipped and exit
+            // code 15 (write's return in x0) instead of 0.
             return elr;
         }
         unsafe {

@@ -12,6 +12,7 @@ module Kernel.Userspace.Types (
   Process (..),
   pidNext,
   procMap,
+  procExitMap,
   userSem,
   processExitVar,
 )
@@ -43,6 +44,10 @@ pidNext = unsafePerformH (newRef 1)
 {-# NOINLINE procMap #-}
 procMap :: Ref (Map Pid Process)
 procMap = unsafePerformH (newRef Map.empty)
+
+{-# NOINLINE procExitMap #-}
+procExitMap :: Ref (Map Pid (MVar Int))
+procExitMap = unsafePerformH (newRef Map.empty)
 
 {-# NOINLINE userSem #-}
 userSem :: QSem

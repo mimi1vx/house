@@ -215,6 +215,9 @@ Endpoint). Unknown `imm` is rejected; user pointers are validated before copy.
 |-------|--------|-------------|--------|
 | `house-hal-aarch64` | `house_svc_dispatch` | `int64_t house_svc_dispatch(uint32_t imm, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t *gpr)` | `svc.c` |
 | `house-hal-aarch64` | `house_set_exit` | `void house_set_exit(int code)` | `svc.c` |
+| `house-hal-aarch64` | `house_el0_register` | `int house_el0_register(void *pdir)` | `svc.rs` (new: claim per-pid exit slot, `0` ok / `-ENOSPC` full) |
+| `house-hal-aarch64` | `house_el0_unregister` | `void house_el0_unregister(void *pdir)` | `svc.rs` (new: release per-pid exit slot) |
+| `house-hal-aarch64` | `house_el0_exit_status` | `int house_el0_exit_status(void *pdir, int *code_out)` | `svc.rs` (new: `1` exited / `0` live or unknown) |
 | `house-hal-aarch64` | `house_get_exit_code` | `int house_get_exit_code(void)` | `svc.c` |
 | `house-hal-aarch64` | `house_clear_exit` | `void house_clear_exit(void)` | `svc.c` |
 | `house-hal-aarch64` | `house_is_exited` | `int house_is_exited(void)` | `svc.c` |

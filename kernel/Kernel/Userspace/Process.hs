@@ -8,6 +8,7 @@ module Kernel.Userspace.Process (
   runElf,
   forkProc,
   procInfo,
+  listProcs,
   waitPid,
   killPid,
   procBrkGrow,
@@ -15,7 +16,7 @@ module Kernel.Userspace.Process (
 )
 where
 
-import Control.Concurrent (tryPutMVar, tryTakeMVar)
+import Control.Concurrent (tryTakeMVar)
 import Control.Monad (forM_, void, when)
 import Data.Bits (complement, shiftR, (.&.))
 import Data.Char (ord)
@@ -24,8 +25,8 @@ import Data.Word (Word32, Word64, Word8)
 import Foreign.C.String (withCString)
 import Foreign.C.Types (CChar, CInt (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import H.AdHocMem (peek, peekElemOff, poke)
-import H.Concurrency (forkH, threadDelay, withQSem)
+import H.AdHocMem (allocaArray, peek, peekElemOff, poke)
+import H.Concurrency (forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
 import H.Monad (H, liftIO)
 import H.Mutable (modifyRef, readRef, writeRef)
 import qualified H.Pages as HPages
@@ -34,7 +35,7 @@ import H.Utils (ptrFromWord64)
 import qualified H.VirtualMemory as VM
 import qualified Kernel.FileSystem.Vfs as Vfs
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..))
-import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procMap, processExitVar, userSem)
+import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
 
 foreign import ccall unsafe "house_enter_el0" c_enter_el0 :: Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO ()
 
@@ -45,6 +46,12 @@ foreign import ccall unsafe "house_get_exit_code" c_get_exit :: IO CInt
 foreign import ccall unsafe "house_clear_exit" c_clear_exit :: IO ()
 
 foreign import ccall unsafe "house_is_exited" c_is_exited :: IO CInt
+
+foreign import ccall unsafe "house_el0_register" c_el0_register :: Ptr Word64 -> IO CInt
+
+foreign import ccall unsafe "house_el0_unregister" c_el0_unregister :: Ptr Word64 -> IO ()
+
+foreign import ccall unsafe "house_el0_exit_status" c_el0_status :: Ptr Word64 -> Ptr CInt -> IO CInt
 
 foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
@@ -95,19 +102,24 @@ runElf elf argv envp = withQSem userSem $ do
                     else do
                       asid <- liftIO (c_asid_for pdirPtr)
                       _ <- liftIO (withCString "[run] got asid\n" c_uart_puts)
-                      modifyRef procMap (Map.insert pid (Process pid pdir (elfEntry elf) initBrk))
-                      _ <- liftIO (withCString "[run] before fork\n" c_uart_puts)
-                      _ <- forkH $ do
-                        _ <- liftIO (withCString "[run] fork enter\n" c_uart_puts)
-                        liftIO (c_set_pdir pdirPtr)
-                        liftIO (c_enter_el0 (elfEntry elf) sp pdirPtr asid)
-                        _ <- liftIO (withCString "[run] fork after enter\n" c_uart_puts)
-                        code <- liftIO c_get_exit
-                        _ <- liftIO c_clear_exit
-                        _ <- liftIO (void (tryPutMVar processExitVar (fromIntegral code)))
-                        return ()
-                      _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
-                      return (Right pid)
+                      reg <- liftIO (c_el0_register pdirPtr)
+                      if reg /= 0
+                        then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
+                        else do
+                          exitVar <- newEmptyMVar
+                          modifyRef procExitMap (Map.insert pid exitVar)
+                          modifyRef procMap (Map.insert pid (Process pid pdir (elfEntry elf) initBrk))
+                          _ <- liftIO (withCString "[run] before fork\n" c_uart_puts)
+                          _ <- forkH $ do
+                            _ <- liftIO (withCString "[run] fork enter\n" c_uart_puts)
+                            liftIO (c_set_pdir pdirPtr)
+                            liftIO (c_enter_el0 (elfEntry elf) sp pdirPtr asid)
+                            _ <- liftIO (withCString "[run] fork after enter\n" c_uart_puts)
+                            code <- readExitStatus pdirPtr
+                            putMVar exitVar code
+                            return ()
+                          _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
+                          return (Right pid)
 
 {- | Fork slice (Track O, no COW, no signals): dormant copy of the
 parent address space into a fresh PageMap + Pid. Segments, brk-grown
@@ -199,6 +211,10 @@ procInfo pid = withQSem userSem $ do
   mp <- readRef procMap
   return (Map.lookup pid mp)
 
+-- | Live pids for the shell `jobs` verb.
+listProcs :: H [Pid]
+listProcs = withQSem userSem (Map.keys <$> readRef procMap)
+
 -- | Initial break: end of highest loaded segment, 16-byte aligned.
 initBreak :: Elf -> Word64
 initBreak elf = case elfSegs elf of
@@ -263,31 +279,57 @@ pokeWord64LE p o w = do
 
 waitPid :: Pid -> H Int
 waitPid pid@(Pid pidInt) = do
-  code <- pollExit
+  mVar <- withQSem userSem (Map.lookup pid <$> readRef procExitMap)
+  code <- maybe pollExit takeMVar mVar
   mProc <- withQSem userSem $ do
     mp <- readRef procMap
     case Map.lookup pid mp of
       Nothing -> return Nothing
       Just pr -> do
         writeRef procMap (Map.delete pid mp)
+        modifyRef procExitMap (Map.delete pid)
         return (Just pr)
   Vfs.vfsReleasePid pidInt
   case mProc of
     Nothing -> return code
     Just pr -> do
       freePDir (procPdir pr)
+      liftIO (c_el0_unregister (VM.fromPageMap (procPdir pr)))
       return code
 
 killPid :: Pid -> H ()
 killPid pid@(Pid pidInt) = do
-  withQSem userSem $ do
+  mProc <- withQSem userSem $ do
     mp <- readRef procMap
     case Map.lookup pid mp of
-      Nothing -> return ()
+      Nothing -> return Nothing
       Just pr -> do
         writeRef procMap (Map.delete pid mp)
-        freePDir (procPdir pr)
+        modifyRef procExitMap (Map.delete pid)
+        return (Just pr)
   Vfs.vfsReleasePid pidInt
+  case mProc of
+    Nothing -> return ()
+    Just pr -> do
+      freePDir (procPdir pr)
+      liftIO (c_el0_unregister (VM.fromPageMap (procPdir pr)))
+
+{- | Per-pid exit poll: the EXIT trap latches status before the trampoline
+returns, so this is ready on first read; loop defensively like pollExit.
+-}
+readExitStatus :: Ptr Word64 -> H Int
+readExitStatus pdir = loop
+  where
+    loop = do
+      (ready, code) <- allocaArray 1 $ \p -> do
+        r <- liftIO (c_el0_status pdir p)
+        c <- peek p
+        return (r, c)
+      if ready == 1
+        then return (fromIntegral code)
+        else do
+          threadDelay 1000
+          loop
 
 pollExit :: H Int
 pollExit = loop

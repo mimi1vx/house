@@ -1,0 +1,105 @@
+#!/usr/bin/expect -f
+# EL0 process harness: per-pid exits + spawn/jobs/wait.
+# Spawns 2 concurrent hellos (distinct pids, no exit cross-talk), checks the
+# shell stays responsive between spawn and reap, reaps both via bare `wait`
+# (exit 0 each), then checks jobs is empty and re-wait reports no such job.
+# Usage: expect scripts/qemu-proc.exp <kernel.bin> [marker] [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+if {$marker eq "" || $marker eq "hvf" || $marker eq "tcg"} {
+    set smp $mem
+    set mem $accel
+    set accel $marker
+    set marker "proc-ok"
+}
+if {$marker eq ""} { set marker "proc-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 90 } else { set timeout 60 }
+} else {
+    set timeout $timeout_arg
+}
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "spawn /bin/hello\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spawn1 pid $p1" }
+    timeout { puts "\nFAIL: spawn1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spawn1"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after spawn1" }
+    timeout { puts "\nFAIL: prompt after spawn1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after spawn1"; exit 1 }
+}
+send "spawn /bin/hello\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set p2 $expect_out(1,string); puts "\nPASS: spawn2 pid $p2" }
+    timeout { puts "\nFAIL: spawn2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spawn2"; exit 1 }
+}
+if {$p1 == $p2} { puts "\nFAIL: pids not distinct ($p1)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+puts "\nPASS: pids distinct ($p1 != $p2)"
+expect {
+    -re "> " { puts "\nPASS: prompt after spawn2" }
+    timeout { puts "\nFAIL: prompt after spawn2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after spawn2"; exit 1 }
+}
+send "jobs\r"
+expect {
+    -re "jobs:" { puts "\nPASS: jobs listed" }
+    timeout { puts "\nFAIL: jobs timeout (shell stalled with 2 live EL0?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before jobs"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: shell responsive with spawned procs" }
+    timeout { puts "\nFAIL: prompt after jobs timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after jobs"; exit 1 }
+}
+send "wait\r"
+expect {
+    -re "reaped pid $p1 exit 0" { puts "\nPASS: reaped $p1 exit 0" }
+    timeout { puts "\nFAIL: reap $p1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before reap $p1"; exit 1 }
+}
+expect {
+    -re "reaped pid $p2 exit 0" { puts "\nPASS: reaped $p2 exit 0 (no cross-talk)" }
+    timeout { puts "\nFAIL: reap $p2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before reap $p2"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after wait" }
+    timeout { puts "\nFAIL: prompt after wait timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after wait"; exit 1 }
+}
+send "wait $p1\r"
+expect {
+    -re "no such job" { puts "\nPASS: re-wait reports no such job" }
+    timeout { puts "\nFAIL: no-such-job timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before no-such-job"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt at end" }
+    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof at end"; exit 1 }
+}
+puts "\nPASS: $marker"
+catch {exec kill -9 [exp_pid]}
+exit 0
