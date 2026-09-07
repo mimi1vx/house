@@ -214,6 +214,11 @@ house-proc-check: house-build
 	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
+# EL0 fd/brk via park ring (multiprocess step 7): per-pid OPEN/READ/CLOSE cat + brk grow-touch
+house-fd-el0-check: house-build
+	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
+
 # EL0 IPC ping-pong (multiprocess step 6): server RECV+REPLY + client CALL via the park ring
 house-ipc-el0-check: house-build
 	expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
@@ -294,4 +299,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check rust-check rust-clean haskell-check run check

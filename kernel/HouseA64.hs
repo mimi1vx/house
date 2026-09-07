@@ -2696,6 +2696,19 @@ yieldBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0,
 ipcPpBytes :: [Word8]
 ipcPpBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 110, 1, 0, 0, 0, 0, 0, 0, 110, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 30, 2, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 224, 3, 64, 249, 31, 12, 0, 241, 139, 9, 0, 84, 233, 35, 0, 145, 42, 5, 64, 249, 43, 9, 64, 249, 76, 1, 64, 57, 19, 0, 128, 210, 109, 21, 64, 56, 13, 1, 0, 52, 173, 193, 0, 81, 191, 37, 0, 113, 72, 8, 0, 84, 110, 242, 125, 211, 211, 5, 19, 139, 115, 2, 13, 139, 248, 255, 255, 23, 159, 141, 1, 113, 64, 0, 0, 84, 26, 0, 0, 20, 1, 0, 0, 176, 33, 0, 0, 145, 34, 34, 130, 210, 66, 68, 164, 242, 34, 0, 0, 249, 98, 102, 134, 210, 130, 136, 168, 242, 34, 4, 0, 249, 224, 3, 19, 170, 66, 0, 128, 210, 3, 14, 128, 210, 65, 2, 0, 212, 192, 5, 0, 181, 34, 0, 64, 249, 195, 221, 151, 210, 67, 75, 171, 242, 95, 0, 3, 235, 33, 5, 0, 84, 1, 0, 0, 144, 33, 80, 5, 145, 2, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 176, 33, 0, 0, 145, 224, 3, 19, 170, 2, 1, 128, 210, 3, 0, 128, 210, 33, 2, 0, 212, 31, 192, 1, 241, 65, 3, 0, 84, 34, 0, 64, 249, 35, 34, 130, 210, 67, 68, 164, 242, 95, 0, 3, 235, 161, 2, 0, 84, 34, 4, 64, 249, 99, 102, 134, 210, 131, 136, 168, 242, 95, 0, 3, 235, 1, 2, 0, 84, 194, 221, 151, 210, 66, 75, 171, 242, 34, 0, 0, 249, 224, 3, 19, 170, 34, 0, 128, 210, 35, 14, 128, 210, 97, 2, 0, 212, 0, 1, 0, 181, 1, 0, 0, 144, 33, 112, 5, 145, 66, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 152, 5, 145, 2, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 112, 111, 110, 103, 32, 111, 107, 10, 115, 101, 114, 118, 101, 100, 32, 111, 107, 10, 112, 112, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
+-- Embedded EL0 cat probe (static aarch64, OPEN/READ/CLOSE via the fd ring,
+-- echoes /probe.txt through svc WRITE). Built from build-probe/cat.s
+-- (assembled + repacked to a hello-style minimal ELF); if ramfs missing,
+-- write on boot next to /bin/ipc_pp.
+catBytes :: [Word8]
+catBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 175, 0, 0, 0, 0, 0, 0, 0, 175, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 95, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 144, 0, 80, 2, 145, 1, 0, 128, 210, 129, 0, 0, 212, 31, 136, 0, 241, 40, 3, 0, 84, 243, 3, 0, 170, 1, 0, 0, 176, 33, 0, 0, 145, 2, 8, 128, 210, 224, 3, 19, 170, 161, 0, 0, 212, 31, 0, 0, 241, 45, 2, 0, 84, 244, 3, 0, 170, 1, 0, 0, 176, 33, 0, 0, 145, 226, 3, 20, 170, 32, 0, 128, 210, 33, 0, 0, 212, 224, 3, 19, 170, 225, 0, 0, 212, 0, 1, 0, 181, 1, 0, 0, 144, 33, 124, 2, 145, 226, 0, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 152, 2, 145, 34, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 47, 112, 114, 111, 98, 101, 46, 116, 120, 116, 0, 99, 97, 116, 32, 111, 107, 10, 99, 97, 116, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+-- Embedded EL0 brk probe (static aarch64, BRK query + grow 2 pages + touch).
+-- Built from build-probe/brk.s (assembled + repacked to a hello-style
+-- minimal ELF); if ramfs missing, write on boot next to /bin/cat.
+brkBytes :: [Word8]
+brkBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 48, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 210, 97, 0, 0, 212, 243, 3, 0, 170, 116, 10, 64, 145, 224, 3, 20, 170, 97, 0, 0, 212, 31, 0, 20, 235, 193, 1, 0, 84, 127, 2, 0, 249, 127, 2, 8, 249, 97, 2, 64, 249, 65, 1, 0, 181, 97, 2, 72, 249, 1, 1, 0, 181, 1, 0, 0, 144, 33, 192, 1, 145, 226, 0, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 220, 1, 145, 34, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 98, 114, 107, 32, 111, 107, 10, 98, 114, 107, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
+
 foreign export ccall house_main :: IO ()
 
 house_main :: IO ()
@@ -2710,7 +2723,7 @@ house_main = do
   editor <- runH (LE.newEditor kbd console)
   _ <- runH (FS.vfsMount FS.defaultNamespace "/" RamFs.ramfsOps)
   _ <- runH (FS.vfsInit FS.defaultNamespace)
-  -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp from embedded bytes if missing
+  -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp + /bin/cat + /bin/brk + /probe.txt from embedded bytes if missing
   _ <- runH $ do
     r <- FS.vfsStat FS.defaultNamespace "/bin/hello"
     case r of
@@ -2743,6 +2756,28 @@ house_main = do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
         let txt4 = map (chr . fromIntegral) ipcPpBytes
         _ <- FS.vfsWrite FS.defaultNamespace "/bin/ipc_pp" txt4
+        return ()
+    r5 <- FS.vfsStat FS.defaultNamespace "/bin/cat"
+    case r5 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
+        let txt5 = map (chr . fromIntegral) catBytes
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/cat" txt5
+        return ()
+    r6 <- FS.vfsStat FS.defaultNamespace "/bin/brk"
+    case r6 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
+        let txt6 = map (chr . fromIntegral) brkBytes
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/brk" txt6
+        return ()
+    r7 <- FS.vfsStat FS.defaultNamespace "/probe.txt"
+    case r7 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsWrite FS.defaultNamespace "/probe.txt" "hello fd el0\n"
         return ()
   _ <- runH Dmesg.dmesgInit
   _ <- runH (Dmesg.dmesgLog "House driver framework online")
@@ -3284,26 +3319,29 @@ house_main = do
         _ -> return False
     handleFdtest = do
       r <- runH $ do
-        mFd <- U.fdOpen "/fdtest" 578 -- O_RDWR|O_CREAT|O_TRUNC
+        let shellPid = U.Pid 0
+        mFd <- U.fdOpen shellPid "/fdtest" 578 -- O_RDWR|O_CREAT|O_TRUNC
         case mFd of
           Left e -> return (Left (U.fdErrorToString e))
           Right fd -> do
-            w <- U.fdWrite fd "hello fd"
+            w <- U.fdWrite shellPid fd "hello fd"
             case w of
-              Left e -> do _ <- U.fdClose fd; return (Left (U.fdErrorToString e))
+              Left e -> do _ <- U.fdClose shellPid fd; return (Left (U.fdErrorToString e))
               Right _ -> do
-                s <- U.fdSeek fd 0 0 -- SEEK_SET
+                s <- U.fdSeek shellPid fd 0 0 -- SEEK_SET
                 case s of
-                  Left e -> do _ <- U.fdClose fd; return (Left (U.fdErrorToString e))
+                  Left e -> do _ <- U.fdClose shellPid fd; return (Left (U.fdErrorToString e))
                   Right _ -> do
-                    c <- U.fdRead fd 64
+                    c <- U.fdRead shellPid fd 64
                     case c of
-                      Left e -> do _ <- U.fdClose fd; return (Left (U.fdErrorToString e))
+                      Left e -> do _ <- U.fdClose shellPid fd; return (Left (U.fdErrorToString e))
                       Right txt -> do
-                        _ <- U.fdClose fd
-                        if txt == "hello fd"
-                          then return (Right ())
-                          else return (Left ("mismatch: " ++ txt))
+                        _ <- U.fdClose shellPid fd
+                        -- cross-pid isolation: shell pid 1 never owns fd 3
+                        x <- U.fdRead (U.Pid 1) fd 1
+                        case x of
+                          Left _ -> if txt == "hello fd" then return (Right ()) else return (Left ("mismatch: " ++ txt))
+                          Right _ -> return (Left "cross-pid fd leaked")
       case r of
         Left e -> withCString ("fdtest fail " ++ e ++ "\n") c_uart_puts
         Right () -> withCString "fdtest ok\n" c_uart_puts
@@ -3394,9 +3432,9 @@ house_main = do
         , "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)"
         , "       dns <name> -- A-record lookup via 10.0.2.3 (UDP/53, no TCP; e.g. dns example.com)"
         , "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3 console / multiport serial port0 + control q2/q3 DEVICE_READY/OPEN, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)"
-        , "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/ipc, EL0 eret (TTBR0/ASID/pager)"
+        , "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/fd/ipc, EL0 eret (TTBR0/ASID/pager)"
         , "       spawn </path> [args...] -- run without waiting (prints pid) | jobs -- list live pids | wait [pid] -- reap (all when bare)"
-        , "       fdtest -- EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A pending ring)"
+        , "       fdtest -- per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)"
         , "       forktest -- EL1 forkProc page-map copy + isolation check (no COW/signals; EL0 spawn 0x08 pending ring)"
         ]
     seqFib :: Int -> Int

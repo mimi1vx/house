@@ -32,10 +32,17 @@ static mut HOUSE_USER_EXIT_CODE: i32 = 0;
 const EL0_N: usize = 64;
 
 // Park request codes (svc #imm that parks instead of completing inline).
-// YIELD + IPC 0x10..0x13 ride the delegation ring (validate-then-park in
-// `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS until the
-// grant-transfer slice.
+// YIELD + BRK + fd 0x04..0x07/0x0A + IPC 0x10..0x13 ride the delegation ring
+// (validate-then-park in `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS
+// until the grant-transfer slice; FORK/WAIT 0x08/0x09 stay inline ENOSYS
+// until the fork slice.
 const EL0_REQ_YIELD: u32 = 0x00;
+const EL0_REQ_BRK: u32 = 0x03;
+const EL0_REQ_OPEN: u32 = 0x04;
+const EL0_REQ_READ: u32 = 0x05;
+const EL0_REQ_WRITE_FD: u32 = 0x06;
+const EL0_REQ_CLOSE: u32 = 0x07;
+const EL0_REQ_SEEK: u32 = 0x0A;
 const EL0_REQ_IPC_SEND: u32 = 0x10;
 const EL0_REQ_IPC_RECV: u32 = 0x11;
 const EL0_REQ_IPC_CALL: u32 = 0x12;
@@ -227,6 +234,218 @@ pub(crate) unsafe fn validate_user_buffer(va: u64, len: u64) -> i32 {
         }
     }
     0
+}
+
+// Validation outcome shared by dispatch (errno inline) and the park gates.
+const VALID_PARK: i64 = 1;
+const EFAULT: i64 = -14;
+const EINVAL: i64 = -22;
+const ENOSYS: i64 = -38;
+
+// Trap-side NUL-terminated path check against the trapping pdir
+// (page-table reads only, no locks). Scans at most `max` bytes for NUL:
+// 0 ok, -14 unmapped byte, -22 no NUL within `max`.
+unsafe fn validate_cstring_current(va: u64, max: u64) -> i64 {
+    unsafe {
+        if va < 0x01000000 {
+            return EFAULT;
+        }
+        let end = match va.checked_add(max) {
+            Some(e) => e,
+            None => return EFAULT,
+        };
+        if end > 0x100000000 {
+            return EFAULT;
+        }
+        for i in 0..max {
+            let wva = va + i;
+            let pa = translate_va(wva);
+            if pa == 0 {
+                return EFAULT;
+            }
+            // SAFETY: `pa` is an identity-mapped RAM byte.
+            if *(pa as *const u8) == 0 {
+                return 0;
+            }
+        }
+        EINVAL
+    }
+}
+
+// Shared fd validator: VALID_PARK when the call is well-formed and should
+// park for Haskell pairing, otherwise a precise errno (EFAULT/EINVAL).
+// Arg convention (svc x0..x2): OPEN(path_va, flags, _), READ/WRITE(fd, buf, len),
+// CLOSE(fd, _, _), SEEK(fd, off, whence). fd/flag/whence values stay
+// Haskell-checked; only user-memory shape is rejected trap-side.
+unsafe fn validate_fd(op: u32, x0: u64, x1: u64, x2: u64) -> i64 {
+    unsafe {
+        match op {
+            HOUSE_SVC_OPEN => {
+                let r = validate_cstring_current(x0, 256);
+                if r != 0 {
+                    return r;
+                }
+                VALID_PARK
+            }
+            HOUSE_SVC_READ | HOUSE_SVC_WRITE_FD => {
+                if x2 > 65536 {
+                    return EINVAL;
+                }
+                if validate_user_buffer(x1, x2) != 0 {
+                    return EFAULT;
+                }
+                VALID_PARK
+            }
+            HOUSE_SVC_CLOSE | HOUSE_SVC_SEEK => VALID_PARK,
+            _ => EINVAL,
+        }
+    }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); integer + page-table
+// validation only, no locks or allocation. Returns 1 when validated and the
+// caller should park, 0 when validation failed (caller falls through to
+// dispatch for the precise errno), -22 unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32 {
+    // SAFETY: delegates to the lock-free validator.
+    let r = unsafe { validate_fd(op, x0, x1, x2) };
+    if r == VALID_PARK {
+        1
+    } else if r == ENOSYS || r == EFAULT || r == EINVAL {
+        0
+    } else {
+        -22
+    }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); brk carries no user
+// memory (x0 = new break), so every op == 0x03 parks and Haskell decides
+// window/ENOMEM. Returns 1 park / -22 unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_brk_should_park(op: u32, _x0: u64) -> i32 {
+    if op == HOUSE_SVC_BRK { 1 } else { -22 }
+}
+
+// Byte-granular user copy against an explicit pdir for the fd ring. While a
+// pid is parked the recorded `current_pdir` is the kernel root, so Haskell
+// passes the pid slot's pdir. Bounds: len <= 65536, VA window, no wrapping;
+// every byte re-translated (per-byte walk, page faults impossible —
+// unmapped returns EFAULT). Returns 0 ok, -14 EFAULT, -22 EINVAL.
+// SAFETY: EL1 thread context (Haskell park loop, capability free); `out`
+// must hold `len` bytes. Page-table reads + PA loads only, no locks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_user_read_bytes(
+    pdir: *mut u8,
+    va: u64,
+    out: *mut u8,
+    len: u64,
+) -> i32 {
+    unsafe {
+        if pdir.is_null() || out.is_null() {
+            return -14;
+        }
+        if len > 65536 {
+            return -22;
+        }
+        if len == 0 {
+            return 0;
+        }
+        let end = match va.checked_add(len) {
+            Some(e) => e,
+            None => return -14,
+        };
+        if va < 0x01000000 || end > 0x100000000 {
+            return -14;
+        }
+        for i in 0..len {
+            let pa = translate_va_pdir(pdir, va + i);
+            if pa == 0 {
+                return -14;
+            }
+            // SAFETY: `pa` is identity-mapped RAM; `out` holds `len` bytes.
+            *out.add(i as usize) = *(pa as *const u8);
+        }
+        0
+    }
+}
+
+// SAFETY: EL1 thread context (Haskell park loop, capability free); `inp`
+// must hold `len` bytes. Page-table reads + PA stores only, no locks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_user_write_bytes(
+    pdir: *mut u8,
+    va: u64,
+    inp: *const u8,
+    len: u64,
+) -> i32 {
+    unsafe {
+        if pdir.is_null() || inp.is_null() {
+            return -14;
+        }
+        if len > 65536 {
+            return -22;
+        }
+        if len == 0 {
+            return 0;
+        }
+        let end = match va.checked_add(len) {
+            Some(e) => e,
+            None => return -14,
+        };
+        if va < 0x01000000 || end > 0x100000000 {
+            return -14;
+        }
+        for i in 0..len {
+            let pa = translate_va_pdir(pdir, va + i);
+            if pa == 0 {
+                return -14;
+            }
+            // SAFETY: `pa` is identity-mapped RAM; `inp` holds `len` bytes.
+            *(pa as *mut u8) = *inp.add(i as usize);
+        }
+        0
+    }
+}
+
+// NUL-terminated string length against an explicit pdir for OPEN path
+// resolution. Scans at most `max` bytes; on success `*out_len` holds the
+// length excluding NUL. Returns 0 ok, -14 fault, -22 no NUL within max.
+// SAFETY: EL1 thread context (Haskell park loop); `out_len` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_user_strlen(
+    pdir: *mut u8,
+    va: u64,
+    max: u64,
+    out_len: *mut u64,
+) -> i32 {
+    unsafe {
+        if pdir.is_null() || out_len.is_null() {
+            return -14;
+        }
+        if max == 0 || max > 4096 {
+            return -22;
+        }
+        let end = match va.checked_add(max) {
+            Some(e) => e,
+            None => return -14,
+        };
+        if va < 0x01000000 || end > 0x100000000 {
+            return -14;
+        }
+        for i in 0..max {
+            let pa = translate_va_pdir(pdir, va + i);
+            if pa == 0 {
+                return -14;
+            }
+            // SAFETY: `pa` is identity-mapped RAM.
+            if *(pa as *const u8) == 0 {
+                *out_len = i;
+                return 0;
+            }
+        }
+        -22
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -551,17 +770,37 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 0
             }
             HOUSE_SVC_BRK => {
-                uart_puts(b"[svc] ENOSYS brk\n\0".as_ptr());
+                // Registered sessions park in `c_handle_sync` before reaching
+                // dispatch (brk carries no user memory, always validated);
+                // this arm is the fail-closed fallback (no slot).
                 if !gpr.is_null() {
                     *gpr = -38i64 as u64;
                 }
                 -38
             }
             HOUSE_SVC_OPEN | HOUSE_SVC_READ | HOUSE_SVC_WRITE_FD | HOUSE_SVC_CLOSE
-            | HOUSE_SVC_FORK | HOUSE_SVC_WAIT | HOUSE_SVC_SEEK => {
-                // Track O: Haskell EL1 table lands first; the trap-safe
-                // delegation ring wires EL0 next. Fail closed, never touch memory.
-                uart_puts(b"[svc] ENOSYS fd/fork\n\0".as_ptr());
+            | HOUSE_SVC_SEEK => {
+                // Validate-then-park: well-formed calls parked in
+                // `c_handle_sync` before reaching dispatch; reaching here
+                // means unregistered slot (fail closed ENOSYS) or a precise
+                // trap-side errno (bad buffer/path, never parked).
+                let r = validate_fd(imm, x0, x1, x2);
+                if r == VALID_PARK {
+                    uart_puts(b"[svc] ENOSYS fd\n\0".as_ptr());
+                    if !gpr.is_null() {
+                        *gpr = -38i64 as u64;
+                    }
+                    -38
+                } else {
+                    if !gpr.is_null() {
+                        *gpr = r as u64;
+                    }
+                    r
+                }
+            }
+            HOUSE_SVC_FORK | HOUSE_SVC_WAIT => {
+                // Fork/wait stay inline ENOSYS until the fork slice lands.
+                uart_puts(b"[svc] ENOSYS fork\n\0".as_ptr());
                 if !gpr.is_null() {
                     *gpr = -38i64 as u64;
                 }

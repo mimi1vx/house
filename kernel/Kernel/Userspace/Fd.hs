@@ -2,37 +2,44 @@
 
 {- |
 Module      : Kernel.Userspace.Fd
-Description : EL0 fd table over the VFS default namespace.
+Description : Per-pid EL0 fd tables over the VFS namespaces.
 Stability   : experimental
 
-Per-fd offsets over 'Kernel.FileSystem.Vfs' for the Track O FS slice.
-Fds 3..34 (stdio 0-2 reserved: EL0 svc WRITE uses fd 1 for UART). All
-paths go through 'Vfs.splitPath' in the fd's namespace on every call;
-all lengths are capped at 64 KiB (matches the svc user-buffer bound);
-the 2 MiB ramfs cap is inherited -- backend writes return ENOSPC and
-no fd path grows it.
+Per-pid offsets over 'Kernel.FileSystem.Vfs'. Fds 3..34 per pid (stdio
+0-2 reserved: EL0 svc WRITE uses fd 1 for UART). All paths go through
+'Vfs.splitPath' in the opener's namespace on every call; all lengths are
+capped at 64 KiB (matches the svc user-buffer bound); the 2 MiB ramfs cap
+is inherited -- backend writes return ENOSPC and no fd path grows it.
+
+Isolation: tables are keyed by 'Pid', so a cross-pid fd use misses the
+caller's map and fails EBADF. 'fdFork' copies entries+offsets on fork;
+'fdRelease' drops the table on wait/kill (no leak over fork/exit cycles).
 
 Lock order: 'fdSem' is a leaf; it is never held across 'Vfs' calls
 (which take @registrySem@ then backend sems). Entries are snapshotted
 under the lock, VFS I/O runs unlocked, then offsets are committed
 under the lock. Each entry remembers the opener's namespace; 'fdOpen'
-uses the default namespace (boot\/shell\/fdtest), 'fdOpenIn' resolves
-through a pid's namespace for future EL0 trap wiring.
+resolves through the pid's namespace via 'vfsEnsurePid'.
 
-EL0 trap wiring waits on the delegation ring (same pattern as the IPC
-slice): 'Syscall' reserves 0x04..0x07 + 0x0A and svc returns ENOSYS
-until then. The shell 'fdtest' verb exercises this table from EL1.
+EL0 trap wiring rides the delegation ring ('Syscall' 0x04..0x07 + 0x0A):
+Rust ('svc.rs' 'house_fd_should_park') validates the path NUL-termination
+(256B) and buffer window (64K) trap-side and parks; Haskell
+('Kernel.Userspace.Process.parkLoop') performs the table op and resumes
+with the result in x0. The shell 'fdtest' verb exercises this table from
+EL1 under pid 0.
 -}
 module Kernel.Userspace.Fd (
   Fd (..),
   FdError (..),
   fdErrorToString,
+  fdErrorToErrno,
   fdOpen,
-  fdOpenIn,
   fdRead,
   fdWrite,
   fdClose,
   fdSeek,
+  fdFork,
+  fdRelease,
   maxFdCount,
   maxFdBytes,
   o_RDONLY,
@@ -49,14 +56,16 @@ where
 import Data.Bits (complement, (.&.))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Foreign.C.Types (CInt (..))
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import Kernel.FileSystem.Vfs (NamespaceId, defaultNamespace, vfsEnsurePid, vfsLookup)
+import Kernel.FileSystem.Vfs (NamespaceId, vfsEnsurePid, vfsLookup)
 import Kernel.FileSystem.Vfs qualified as Vfs
+import Kernel.Userspace.Types (Pid (..))
 
--- | File descriptor (3..34; 0-2 reserved for stdio convention).
+-- | File descriptor (3..34 per pid; 0-2 reserved for stdio convention).
 newtype Fd = Fd Int
   deriving (Eq, Ord, Show)
 
@@ -75,6 +84,18 @@ fdErrorToString (FdInval s) = "EINVAL: " ++ s
 fdErrorToString FdNoSpace = "ENOSPC"
 fdErrorToString (FdFs e) = show e
 
+-- | Negative errno for the EL0 resume path (x0).
+fdErrorToErrno :: FdError -> CInt
+fdErrorToErrno FdBadFd = -9
+fdErrorToErrno (FdInval _) = -22
+fdErrorToErrno FdNoSpace = -28
+fdErrorToErrno (FdFs Vfs.ENOENT) = -2
+fdErrorToErrno (FdFs Vfs.EEXIST) = -17
+fdErrorToErrno (FdFs Vfs.ENOTDIR) = -20
+fdErrorToErrno (FdFs Vfs.EISDIR) = -21
+fdErrorToErrno (FdFs Vfs.ENOSPC) = -28
+fdErrorToErrno (FdFs (Vfs.EINVAL _)) = -22
+
 -- | Open flags (POSIX subset).
 o_RDONLY, o_WRONLY, o_RDWR, o_CREAT, o_TRUNC :: Int
 o_RDONLY = 0
@@ -89,7 +110,7 @@ seek_SET = 0
 seek_CUR = 1
 seek_END = 2
 
--- | Bounds: 32 fds, 64 KiB per read/write (svc buffer cap).
+-- | Bounds: 32 fds per pid, 64 KiB per read/write (svc buffer cap).
 maxFdCount :: Int
 maxFdCount = 32
 
@@ -106,14 +127,14 @@ data Entry = Entry {
   deriving (Eq, Show)
 
 {-# NOINLINE fdTable #-}
-fdTable :: Ref (Map Fd Entry)
+fdTable :: Ref (Map Pid (Map Fd Entry))
 fdTable = unsafePerformH $ newRef Map.empty
 
 {-# NOINLINE fdSem #-}
 fdSem :: QSem
 fdSem = unsafePerformH $ newQSem 1
 
--- | Lowest free fd >=3, or Nothing when full.
+-- | Lowest free fd >=3 in the pid's map, or Nothing when full.
 allocFd :: Map Fd Entry -> Maybe Fd
 allocFd m = go 3
   where
@@ -129,31 +150,23 @@ validFlags f =
       rest = f .&. complement 0x243
    in acc <= 2 && rest == 0
 
-lookupEntry :: Fd -> H (Maybe Entry)
-lookupEntry fd = withQSem fdSem $ do
+lookupEntry :: Pid -> Fd -> H (Maybe Entry)
+lookupEntry pid fd = withQSem fdSem $ do
   m <- readRef fdTable
-  return (Map.lookup fd m)
+  return (Map.lookup pid m >>= Map.lookup fd)
 
-{- | Open a path in the default namespace. Creates (empty) on O_CREAT
-when missing; truncates on O_TRUNC. Directories reject with EISDIR.
+{- | Open a path through a pid's mount namespace (EL0 trap path and EL1
+shell under pid 0). Resolves via 'vfsEnsurePid' so a child mount is
+visible here. Creates (empty) on O_CREAT when missing; truncates on
+O_TRUNC. Directories reject with EISDIR.
 -}
-fdOpen :: FilePath -> Int -> H (Either FdError Fd)
-fdOpen = fdOpenInNs defaultNamespace
-
-{- | Open a path through a pid's mount namespace (EL0 trap path).
-Resolves via 'vfsLookupPid' so a child mount is visible here.
--}
-fdOpenIn :: Int -> FilePath -> Int -> H (Either FdError Fd)
-fdOpenIn pid path flags = do
-  ns <- vfsEnsurePid pid
-  fdOpenInNs ns path flags
-
-fdOpenInNs :: NamespaceId -> FilePath -> Int -> H (Either FdError Fd)
-fdOpenInNs ns path flags
+fdOpen :: Pid -> FilePath -> Int -> H (Either FdError Fd)
+fdOpen pid@(Pid pidInt) path flags
   | not (validFlags flags) = return (Left (FdInval "bad flags"))
   | otherwise = case Vfs.splitPath path of
       Left e -> return (Left (FdFs e))
       Right _ -> do
+        ns <- vfsEnsurePid pidInt
         rStat <- vfsLookup ns path
         case rStat of
           Left e -> return (Left (FdFs e))
@@ -162,7 +175,7 @@ fdOpenInNs ns path flags
             case st of
               Right s
                 | Vfs.fsIsDir s -> return (Left (FdFs Vfs.EISDIR))
-                | otherwise -> openExisting ops rel
+                | otherwise -> openExisting ns ops rel
               Left Vfs.ENOENT
                 | flags .&. o_CREAT /= 0 -> do
                     r <- vfsLookup ns path
@@ -172,33 +185,34 @@ fdOpenInNs ns path flags
                         cr <- Vfs.opsCreate ops2 rel2
                         case cr of
                           Left e -> return (Left (FdFs e))
-                          Right () -> insertEntry
+                          Right () -> insertEntry ns
                 | otherwise -> return (Left (FdFs Vfs.ENOENT))
               Left e -> return (Left (FdFs e))
   where
     acc = flags .&. 3
-    openExisting ops rel
+    openExisting ns ops rel
       | flags .&. o_TRUNC /= 0 && acc /= o_RDONLY = do
           r <- Vfs.opsWrite ops rel ""
           case r of
             Left Vfs.ENOSPC -> return (Left FdNoSpace)
             Left e -> return (Left (FdFs e))
-            Right () -> insertEntry
-      | otherwise = insertEntry
-    insertEntry = withQSem fdSem $ do
+            Right () -> insertEntry ns
+      | otherwise = insertEntry ns
+    insertEntry ns = withQSem fdSem $ do
       m <- readRef fdTable
-      case allocFd m of
+      let per = Map.findWithDefault Map.empty pid m
+      case allocFd per of
         Nothing -> return (Left (FdInval "fd table full"))
         Just fd -> do
-          writeRef fdTable (Map.insert fd (Entry path 0 acc ns) m)
+          writeRef fdTable (Map.insert pid (Map.insert fd (Entry path 0 acc ns) per) m)
           return (Right fd)
 
--- | Read up to n bytes from the fd offset. Advances the offset.
-fdRead :: Fd -> Int -> H (Either FdError String)
-fdRead fd n
+-- | Read up to n bytes from the pid's fd offset. Advances the offset.
+fdRead :: Pid -> Fd -> Int -> H (Either FdError String)
+fdRead pid fd n
   | n < 0 || n > maxFdBytes = return (Left (FdInval "bad length"))
   | otherwise = do
-      mEnt <- lookupEntry fd
+      mEnt <- lookupEntry pid fd
       case mEnt of
         Nothing -> return (Left FdBadFd)
         Just ent
@@ -218,18 +232,19 @@ fdRead fd n
                           off' = entOff ent + length chunk
                       withQSem fdSem $ do
                         m <- readRef fdTable
-                        case Map.lookup fd m of
+                        case Map.lookup pid m >>= Map.lookup fd of
                           Nothing -> return (Left FdBadFd)
                           Just e2 -> do
-                            writeRef fdTable (Map.insert fd e2 {entOff = off'} m)
+                            let per = Map.findWithDefault Map.empty pid m
+                            writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = off'} per) m)
                             return (Right chunk)
 
--- | Write bytes at the fd offset (read-modify-write). Advances the offset.
-fdWrite :: Fd -> String -> H (Either FdError Int)
-fdWrite fd content
+-- | Write bytes at the pid's fd offset (read-modify-write). Advances the offset.
+fdWrite :: Pid -> Fd -> String -> H (Either FdError Int)
+fdWrite pid fd content
   | length content > maxFdBytes = return (Left (FdInval "bad length"))
   | otherwise = do
-      mEnt <- lookupEntry fd
+      mEnt <- lookupEntry pid fd
       case mEnt of
         Nothing -> return (Left FdBadFd)
         Just ent
@@ -260,26 +275,29 @@ fdWrite fd content
                               let off' = entOff ent + length content
                               withQSem fdSem $ do
                                 m <- readRef fdTable
-                                case Map.lookup fd m of
+                                case Map.lookup pid m >>= Map.lookup fd of
                                   Nothing -> return (Left FdBadFd)
                                   Just e2 -> do
-                                    writeRef fdTable (Map.insert fd e2 {entOff = off'} m)
+                                    let per = Map.findWithDefault Map.empty pid m
+                                    writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = off'} per) m)
                                     return (Right (length content))
 
--- | Close an fd (idempotent miss is EBADF).
-fdClose :: Fd -> H (Either FdError ())
-fdClose fd = withQSem fdSem $ do
+-- | Close a pid's fd (miss is EBADF).
+fdClose :: Pid -> Fd -> H (Either FdError ())
+fdClose pid fd = withQSem fdSem $ do
   m <- readRef fdTable
-  case Map.lookup fd m of
+  case Map.lookup pid m >>= Map.lookup fd of
     Nothing -> return (Left FdBadFd)
     Just _ -> do
-      writeRef fdTable (Map.delete fd m)
+      let per = Map.findWithDefault Map.empty pid m
+          per' = Map.delete fd per
+      writeRef fdTable (if Map.null per' then Map.delete pid m else Map.insert pid per' m)
       return (Right ())
 
--- | Reposition the fd offset.
-fdSeek :: Fd -> Int -> Int -> H (Either FdError Int)
-fdSeek fd off whence = do
-  mEnt <- lookupEntry fd
+-- | Reposition the pid's fd offset.
+fdSeek :: Pid -> Fd -> Int -> Int -> H (Either FdError Int)
+fdSeek pid fd off whence = do
+  mEnt <- lookupEntry pid fd
   case mEnt of
     Nothing -> return (Left FdBadFd)
     Just ent -> do
@@ -306,8 +324,23 @@ fdSeek fd off whence = do
                 then return (Left (FdInval "negative offset"))
                 else withQSem fdSem $ do
                   m <- readRef fdTable
-                  case Map.lookup fd m of
+                  case Map.lookup pid m >>= Map.lookup fd of
                     Nothing -> return (Left FdBadFd)
                     Just e2 -> do
-                      writeRef fdTable (Map.insert fd e2 {entOff = newOff} m)
+                      let per = Map.findWithDefault Map.empty pid m
+                      writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = newOff} per) m)
                       return (Right newOff)
+
+-- | Inherit entries+offsets on fork (fresh map, shared nothing mutable).
+fdFork :: Pid -> Pid -> H ()
+fdFork parent child = withQSem fdSem $ do
+  m <- readRef fdTable
+  case Map.lookup parent m of
+    Nothing -> return ()
+    Just per -> writeRef fdTable (Map.insert child per m)
+
+-- | Drop the pid's table on wait/kill (no leak over fork/exit cycles).
+fdRelease :: Pid -> H ()
+fdRelease pid = withQSem fdSem $ do
+  m <- readRef fdTable
+  writeRef fdTable (Map.delete pid m)

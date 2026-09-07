@@ -30,16 +30,18 @@ module Kernel.Userspace (
   Kernel.Userspace.Process.procBrkGrow,
   Kernel.Userspace.Process.ParkRequest (..),
 
-  -- * Fd table (Track O FS slice, EL1; EL0 trap wiring pending ring)
+  -- * Fd table (Track O FS slice, EL1 per-pid; EL0 traps ride the ring)
   Kernel.Userspace.Fd.Fd (..),
   Kernel.Userspace.Fd.FdError (..),
   Kernel.Userspace.Fd.fdErrorToString,
+  Kernel.Userspace.Fd.fdErrorToErrno,
   Kernel.Userspace.Fd.fdOpen,
-  Kernel.Userspace.Fd.fdOpenIn,
   Kernel.Userspace.Fd.fdRead,
   Kernel.Userspace.Fd.fdWrite,
   Kernel.Userspace.Fd.fdClose,
   Kernel.Userspace.Fd.fdSeek,
+  Kernel.Userspace.Fd.fdFork,
+  Kernel.Userspace.Fd.fdRelease,
 
   -- * Syscall numbers
   Kernel.Userspace.Syscall.syscallYield,

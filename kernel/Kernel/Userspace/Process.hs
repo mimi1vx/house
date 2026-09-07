@@ -20,7 +20,8 @@ where
 import Control.Concurrent (tryPutMVar, tryTakeMVar)
 import Control.Monad (forM_, void, when)
 import Data.Bits (complement, shiftR, (.&.))
-import Data.Char (ord)
+import Data.Char (chr, ord)
+import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word32, Word64, Word8)
 import Foreign.C.String (withCString)
@@ -38,6 +39,7 @@ import qualified H.VirtualMemory as VM
 import qualified Kernel.FileSystem.Vfs as Vfs
 import qualified Kernel.IPC.Endpoint as IPC
 import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
+import qualified Kernel.Userspace.Fd as Fd
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..))
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
 import qualified System.Timeout as T
@@ -68,6 +70,12 @@ foreign import ccall unsafe "house_user_read" c_user_read :: Ptr Word64 -> Word6
 
 foreign import ccall unsafe "house_user_write" c_user_write :: Ptr Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO CInt
 
+foreign import ccall unsafe "house_user_read_bytes" c_user_read_bytes :: Ptr Word64 -> Word64 -> Ptr Word8 -> Word64 -> IO CInt
+
+foreign import ccall unsafe "house_user_write_bytes" c_user_write_bytes :: Ptr Word64 -> Word64 -> Ptr Word8 -> Word64 -> IO CInt
+
+foreign import ccall unsafe "house_user_strlen" c_user_strlen :: Ptr Word64 -> Word64 -> Word64 -> Ptr Word64 -> IO CInt
+
 foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
@@ -77,12 +85,20 @@ foreign import ccall unsafe "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
 stackTop :: Word64
 stackTop = 0x3FFFE000
 
-{- | Request parked by an EL0 trap (svc #imm). Yield plus IPC
-0x10..0x13 ride the ring; GRANT_MAP 0x14 stays inline ENOSYS.
-Each IPC request carries the trapped x0..x3 (ep, va, nwords, tag).
+{- | Request parked by an EL0 trap (svc #imm). Yield plus brk/fd
+0x03..0x07/0x0A plus IPC 0x10..0x13 ride the ring; GRANT_MAP 0x14 and
+fork/wait 0x08/0x09 stay inline ENOSYS. Each IPC request carries the
+trapped x0..x3 (ep, va, nwords, tag); fd requests carry their trapped
+x0..x2 (see 'classify' below).
 -}
 data ParkRequest
   = ReqYield
+  | ReqBrk Word64
+  | ReqOpen Word64 Word64
+  | ReqRead Word64 Word64 Word64
+  | ReqWriteFd Word64 Word64 Word64
+  | ReqClose Word64
+  | ReqSeek Word64 Word64 Word64
   | ReqIpcSend Word64 Word64 Word64 Word64
   | ReqIpcRecv Word64 Word64 Word64
   | ReqIpcCall Word64 Word64 Word64 Word64
@@ -186,6 +202,7 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
               let child = Pid pidInt
               modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent)))
               Vfs.vfsForkPid parentInt pidInt
+              Fd.fdFork parentPid child
               return (Right child)
   where
     copyHi brk = max brk stackTop
@@ -330,6 +347,7 @@ waitPid pid@(Pid pidInt) = do
     Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
     Nothing -> return ()
   Vfs.vfsReleasePid pidInt
+  Fd.fdRelease pid
   case mProc of
     Nothing -> return code
     Just pr -> do
@@ -353,6 +371,7 @@ killPid pid@(Pid pidInt) = do
     Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
     Nothing -> return ()
   Vfs.vfsReleasePid pidInt
+  Fd.fdRelease pid
   case mProc of
     Nothing -> return ()
     Just pr -> do
@@ -361,7 +380,9 @@ killPid pid@(Pid pidInt) = do
 
 {- | Park loop: the EL0 session returned from FFI (exit or park), so no RTS
 capability is pinned while this thread polls. EXIT wins over PARK; yield
-resumes immediately with x0 = 0; IPC 0x10..0x13 pair through the EL1
+resumes immediately with x0 = 0; brk grows via 'procBrkGrow' (resumes the
+new break); fd 0x04..0x07/0x0A run against the pid's 'Fd' table (per-pid,
+so cross-pid use fails EBADF); IPC 0x10..0x13 pair through the EL1
 Endpoint rendezvous (same blocking semantics as the shell path, bounded by
 a 5s timeout so a reaped pid never wedges a peer); unknown requests resume
 with ENOSYS so a hostile guest can never wedge the loop. Exits silently
@@ -370,8 +391,11 @@ user copies run under 'userSem' (which 'freePDir' also holds) and resume on
 an unregistered pdir is a harmless -22.
 Return convention: SEND/CALL resume x0 = 0 with reply words in the user
 buffer; RECV resumes x0 = sender tag with received words in the buffer;
-REPLY resumes x0 = 0. Errors resume negative errnos: -2 NoSuchEndpoint,
--11 EAGAIN (QueueFull or 5s pair timeout), -14 EFAULT, -22 EINVAL.
+REPLY resumes x0 = 0; BRK resumes the new break; OPEN resumes the fd
+number; READ/WRITE resume the byte count; CLOSE resumes 0; SEEK resumes
+the new offset. Errors resume negative errnos: -2 ENOENT, -9 EBADF, -11
+EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM, -14 EFAULT, -21 EISDIR,
+-22 EINVAL, -28 ENOSPC.
 -}
 parkLoop :: Pid -> Ptr Word64 -> Word64 -> MVar Int -> H ()
 parkLoop pid pdir asid exitVar = loop
@@ -389,6 +413,12 @@ parkLoop pid pdir asid exitVar = loop
               case mReq of
                 Nothing -> do threadDelay 1000; loop
                 Just ReqYield -> do resumeWith 0; loop
+                Just (ReqBrk nb) -> do handleBrk nb; loop
+                Just (ReqOpen va fl) -> do handleOpen va fl; loop
+                Just (ReqRead fd va ln) -> do handleRead fd va ln; loop
+                Just (ReqWriteFd fd va ln) -> do handleWriteFd fd va ln; loop
+                Just (ReqClose fd) -> do handleClose fd; loop
+                Just (ReqSeek fd off wh) -> do handleSeek fd off wh; loop
                 Just (ReqIpcSend ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
@@ -399,10 +429,67 @@ parkLoop pid pdir asid exitVar = loop
     negENOENT = fromIntegral (-2 :: Int) :: Word64
     negAGAIN = fromIntegral (-11 :: Int) :: Word64
     negINVAL = fromIntegral (-22 :: Int) :: Word64
+    negNOMEM = fromIntegral (-12 :: Int) :: Word64
     sendErrno QueueFull = negAGAIN
     sendErrno WouldBlock = negAGAIN
     sendErrno NoSuchEndpoint = negENOENT
     sendErrno _ = negINVAL
+    brkErrno NoSpace = negNOMEM
+    brkErrno _ = negINVAL
+    handleBrk nb = do
+      r <- procBrkGrow pid nb
+      case r of
+        Left e -> resumeWith (brkErrno e)
+        Right v -> resumeWith v
+    handleOpen va fl = do
+      mPath <- readUserCString pid pdir va 256
+      case mPath of
+        Nothing -> return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right path) -> do
+          r <- Fd.fdOpen pid path (fromIntegral fl)
+          case r of
+            Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
+            Right (Fd.Fd n) -> resumeWith (fromIntegral n)
+    handleRead fdNum va ln = do
+      let n = fromIntegral ln :: Int
+      if ln > 65536
+        then resumeWith negINVAL
+        else do
+          r <- Fd.fdRead pid (Fd.Fd (fromIntegral fdNum)) n
+          case r of
+            Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
+            Right chunk -> do
+              mRc <- writeUserBytes pid pdir va (map (\c -> fromIntegral (ord c `mod` 256) :: Word8) chunk)
+              case mRc of
+                Nothing -> return ()
+                Just 0 -> resumeWith (fromIntegral (length chunk))
+                Just rc -> resumeWith (fromIntegral rc)
+    handleWriteFd fdNum va ln =
+      if ln > 65536
+        then resumeWith negINVAL
+        else do
+          mIn <- readUserBytes pid pdir va ln
+          case mIn of
+            Nothing -> return ()
+            Just (Left rc) -> resumeWith (fromIntegral rc)
+            Just (Right bytes) -> do
+              r <- Fd.fdWrite pid (Fd.Fd (fromIntegral fdNum)) (map (chr . fromIntegral) bytes)
+              case r of
+                Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
+                Right k -> resumeWith (fromIntegral k)
+    handleClose fdNum = do
+      r <- Fd.fdClose pid (Fd.Fd (fromIntegral fdNum))
+      case r of
+        Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
+        Right () -> resumeWith 0
+    handleSeek fdNum off wh = do
+      let offI = fromIntegral (fromIntegral off :: Int64) :: Int
+          whI = fromIntegral wh :: Int
+      r <- Fd.fdSeek pid (Fd.Fd (fromIntegral fdNum)) offI whI
+      case r of
+        Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
+        Right v -> resumeWith (fromIntegral v)
     handleSend ep va nw tag = do
       mIn <- readUser pid pdir va nw
       case mIn of
@@ -516,6 +603,73 @@ writeUser p pd va ws = withQSem userSem $ do
               rc <- liftIO (c_user_write pd va buf (fromIntegral (length ws)))
               return (Just rc)
 
+{- | Read bytes from a live pid's user VA under 'userSem'. Nothing when
+reaped underfoot; 0-length reads skip the FFI; over-64K lengths fail
+EINVAL without touching the buffer.
+-}
+readUserBytes :: Pid -> Ptr Word64 -> Word64 -> Word64 -> H (Maybe (Either CInt [Word8]))
+readUserBytes p pd va ln = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup p mp of
+    Nothing -> return Nothing
+    Just _ ->
+      if ln > 65536
+        then return (Just (Left (-22)))
+        else
+          if ln == 0
+            then return (Just (Right []))
+            else allocaArray (fromIntegral ln) $ \buf -> do
+              rc <- liftIO (c_user_read_bytes pd va buf ln)
+              if rc /= 0
+                then return (Just (Left rc))
+                else do ws <- mapM (peekElemOff buf) [0 .. fromIntegral ln - 1]; return (Just (Right ws))
+
+{- | Write bytes to a live pid's user VA under 'userSem'. Nothing when
+reaped underfoot (caller must skip resume); over-64K payloads fail EINVAL.
+-}
+writeUserBytes :: Pid -> Ptr Word64 -> Word64 -> [Word8] -> H (Maybe CInt)
+writeUserBytes p pd va ws = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup p mp of
+    Nothing -> return Nothing
+    Just _ ->
+      if length ws > 65536
+        then return (Just (-22))
+        else
+          if null ws
+            then return (Just 0)
+            else allocaArray (length ws) $ \buf -> do
+              mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
+              rc <- liftIO (c_user_write_bytes pd va buf (fromIntegral (length ws)))
+              return (Just rc)
+
+{- | Read a NUL-terminated path (at most @max@ bytes) from a live pid's
+user VA under 'userSem'. Nothing when reaped underfoot.
+-}
+readUserCString :: Pid -> Ptr Word64 -> Word64 -> Word64 -> H (Maybe (Either CInt String))
+readUserCString p pd va mx = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup p mp of
+    Nothing -> return Nothing
+    Just _ ->
+      if mx == 0 || mx > 4096
+        then return (Just (Left (-22)))
+        else allocaArray 1 $ \lp -> do
+          rc <- liftIO (c_user_strlen pd va mx lp)
+          if rc /= 0
+            then return (Just (Left rc))
+            else do
+              ln <- peek lp
+              if ln > mx
+                then return (Just (Left (-22)))
+                else allocaArray (fromIntegral ln) $ \buf -> do
+                  rc2 <- liftIO (c_user_read_bytes pd va buf ln)
+                  if rc2 /= 0
+                    then return (Just (Left rc2))
+                    else do
+                      ws <- mapM (peekElemOff buf) [0 .. fromIntegral ln - 1]
+                      return (Just (Right (map (\b -> chr (fromIntegral (b :: Word8))) ws)))
+
 -- | Single per-pid exit poll (no loop; the park loop re-polls).
 tryReadExitOnce :: Ptr Word64 -> H (Maybe Int)
 tryReadExitOnce pdir = allocaArray 1 $ \p -> do
@@ -523,9 +677,11 @@ tryReadExitOnce pdir = allocaArray 1 $ \p -> do
   c <- peek p
   return (if r == 1 then Just (fromIntegral c) else Nothing)
 
-{- | Single parked-request poll: 0 maps to yield, 0x10..0x13 to IPC (with
-the trapped x0..x3 as ep/va/nwords/tag), anything else is unknown
-(resumed with ENOSYS by the park loop, never trusted).
+{- | Single parked-request poll: 0 maps to yield, 0x03 to brk (x0 = new
+break), 0x04..0x07/0x0A to fd (OPEN pathVa/flags, READ/WRITE fd/buf/len,
+CLOSE fd, SEEK fd/off/whence), 0x10..0x13 to IPC (with the trapped
+x0..x3 as ep/va/nwords/tag), anything else is unknown (resumed with
+ENOSYS by the park loop, never trusted).
 -}
 tryTakeParkedOnce :: Ptr Word64 -> H (Maybe ParkRequest)
 tryTakeParkedOnce pdir = do
@@ -545,6 +701,12 @@ tryTakeParkedOnce pdir = do
           return (Just (classify w a0 a1 a2 a3))
   where
     classify 0 _ _ _ _ = ReqYield
+    classify 0x03 nb _ _ _ = ReqBrk nb
+    classify 0x04 va fl _ _ = ReqOpen va fl
+    classify 0x05 fd va ln _ = ReqRead fd va ln
+    classify 0x06 fd va ln _ = ReqWriteFd fd va ln
+    classify 0x07 fd _ _ _ = ReqClose fd
+    classify 0x0A fd off wh _ = ReqSeek fd off wh
     classify 0x10 ep va nw tag = ReqIpcSend ep va nw tag
     classify 0x11 ep va nw _ = ReqIpcRecv ep va nw
     classify 0x12 ep va nw tag = ReqIpcCall ep va nw tag
