@@ -2709,6 +2709,22 @@ catBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1
 brkBytes :: [Word8]
 brkBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 48, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 210, 97, 0, 0, 212, 243, 3, 0, 170, 116, 10, 64, 145, 224, 3, 20, 170, 97, 0, 0, 212, 31, 0, 20, 235, 193, 1, 0, 84, 127, 2, 0, 249, 127, 2, 8, 249, 97, 2, 64, 249, 65, 1, 0, 181, 97, 2, 72, 249, 1, 1, 0, 181, 1, 0, 0, 144, 33, 192, 1, 145, 226, 0, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 220, 1, 145, 34, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 98, 114, 107, 32, 111, 107, 10, 98, 114, 107, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
 
+-- Embedded EL0 fork/wait probe (static aarch64, FORK then WAIT).
+-- Child prints `fork child` + exits 0; parent prints `fork parent`, waits
+-- (resumes the reaped code), prints `fork wait ok` + exits 0. Built from
+-- build-probe/fork.s (assembled + repacked to a hello-style minimal ELF);
+-- if ramfs missing, write on boot next to /bin/brk.
+forkBytes :: [Word8]
+forkBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 174, 0, 0, 0, 0, 0, 0, 0, 174, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 94, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 212, 32, 2, 0, 180, 243, 3, 0, 170, 1, 0, 0, 144, 33, 0, 2, 145, 130, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 224, 3, 19, 170, 33, 1, 0, 212, 224, 1, 0, 181, 1, 0, 0, 144, 33, 92, 2, 145, 162, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 48, 2, 145, 98, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 0, 0, 128, 210, 65, 0, 0, 212, 1, 0, 0, 144, 33, 144, 2, 145, 66, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 102, 111, 114, 107, 32, 112, 97, 114, 101, 110, 116, 10, 102, 111, 114, 107, 32, 99, 104, 105, 108, 100, 10, 102, 111, 114, 107, 32, 119, 97, 105, 116, 32, 111, 107, 10, 102, 111, 114, 107, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
+
+-- Embedded EL0 exec probe (static aarch64, EXEC /bin/hello).
+-- On success the image is replaced (hello prints + exits 0); a return
+-- prints `exec fail` + exits 1. Built from build-probe/exec.s (assembled +
+-- repacked to a hello-style minimal ELF); if ramfs missing, write on boot
+-- next to /bin/fork.
+execBytes :: [Word8]
+execBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 56, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 61, 0, 0, 0, 0, 0, 0, 0, 61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 237, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 144, 0, 160, 0, 145, 97, 1, 0, 212, 1, 0, 0, 144, 33, 204, 0, 145, 66, 1, 128, 210, 32, 0, 128, 210, 33, 0, 0, 212, 32, 0, 128, 210, 65, 0, 0, 212, 47, 98, 105, 110, 47, 104, 101, 108, 108, 111, 0, 101, 120, 101, 99, 32, 102, 97, 105, 108, 10, 0, 0, 0, 0, 0, 0, 0, 0]
+
 foreign export ccall house_main :: IO ()
 
 house_main :: IO ()
@@ -2723,7 +2739,7 @@ house_main = do
   editor <- runH (LE.newEditor kbd console)
   _ <- runH (FS.vfsMount FS.defaultNamespace "/" RamFs.ramfsOps)
   _ <- runH (FS.vfsInit FS.defaultNamespace)
-  -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp + /bin/cat + /bin/brk + /probe.txt from embedded bytes if missing
+  -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp + /bin/cat + /bin/brk + /bin/fork + /bin/exec + /probe.txt from embedded bytes if missing
   _ <- runH $ do
     r <- FS.vfsStat FS.defaultNamespace "/bin/hello"
     case r of
@@ -2778,6 +2794,22 @@ house_main = do
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsWrite FS.defaultNamespace "/probe.txt" "hello fd el0\n"
+        return ()
+    r8 <- FS.vfsStat FS.defaultNamespace "/bin/fork"
+    case r8 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
+        let txt8 = map (chr . fromIntegral) forkBytes
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/fork" txt8
+        return ()
+    r9 <- FS.vfsStat FS.defaultNamespace "/bin/exec"
+    case r9 of
+      Right _ -> return ()
+      Left _ -> do
+        _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
+        let txt9 = map (chr . fromIntegral) execBytes
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/exec" txt9
         return ()
   _ <- runH Dmesg.dmesgInit
   _ <- runH (Dmesg.dmesgLog "House driver framework online")

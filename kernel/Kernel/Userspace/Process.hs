@@ -40,7 +40,7 @@ import qualified Kernel.FileSystem.Vfs as Vfs
 import qualified Kernel.IPC.Endpoint as IPC
 import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
 import qualified Kernel.Userspace.Fd as Fd
-import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..))
+import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf)
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
 import qualified System.Timeout as T
 
@@ -64,6 +64,10 @@ foreign import ccall unsafe "house_el0_parked" c_el0_parked :: Ptr Word64 -> IO 
 
 foreign import ccall unsafe "house_el0_take_request" c_el0_take :: Ptr Word64 -> Ptr Word32 -> Ptr Word64 -> IO CInt
 
+foreign import ccall unsafe "house_el0_clone_slot" c_el0_clone :: Ptr Word64 -> Ptr Word64 -> IO CInt
+
+foreign import ccall unsafe "house_el0_set_entry" c_el0_set_entry :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
+
 foreign import ccall unsafe "house_resume_el0" c_resume_el0 :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
 
 foreign import ccall unsafe "house_user_read" c_user_read :: Ptr Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO CInt
@@ -86,10 +90,11 @@ stackTop :: Word64
 stackTop = 0x3FFFE000
 
 {- | Request parked by an EL0 trap (svc #imm). Yield plus brk/fd
-0x03..0x07/0x0A plus IPC 0x10..0x13 ride the ring; GRANT_MAP 0x14 and
-fork/wait 0x08/0x09 stay inline ENOSYS. Each IPC request carries the
+0x03..0x07/0x0A plus fork 0x08/wait 0x09/exec 0x0B plus IPC 0x10..0x13 ride
+the ring; GRANT_MAP 0x14 stays inline ENOSYS. Each IPC request carries the
 trapped x0..x3 (ep, va, nwords, tag); fd requests carry their trapped
-x0..x2 (see 'classify' below).
+x0..x2 (see 'classify' below); WAIT carries the child pid in x0, EXEC the
+path VA in x0, FORK takes no args.
 -}
 data ParkRequest
   = ReqYield
@@ -99,6 +104,9 @@ data ParkRequest
   | ReqWriteFd Word64 Word64 Word64
   | ReqClose Word64
   | ReqSeek Word64 Word64 Word64
+  | ReqFork
+  | ReqWait Word64
+  | ReqExec Word64
   | ReqIpcSend Word64 Word64 Word64 Word64
   | ReqIpcRecv Word64 Word64 Word64
   | ReqIpcCall Word64 Word64 Word64 Word64
@@ -176,10 +184,11 @@ runElf elf argv envp = withQSem userSem $ do
 parent address space into a fresh PageMap + Pid. Segments, brk-grown
 pages and the stack page are deep-copied page by page (capped at 8192
 pages); tables are freshly allocated by 'setPage'. The child shares
-nothing writable with the parent. Spawning the child on EL0 (register
-copy at the svc trap) waits on the delegation ring -- same pattern as
-the fd slice -- so svc 0x08 returns ENOSYS until then; exit codes keep
-flowing through the existing 'waitPid' path. Runs under 'userSem'.
+nothing writable with the parent. EL1-only entry point for 'forktest';
+EL0 fork (svc 0x08) goes through 'forkChildEl0', which additionally wires
+the trap frame + EL0 session so the child starts runnable (x0 = 0, parent
+resumes with the child pid). Exit codes keep flowing through the existing
+'waitPid' path. Runs under 'userSem'.
 -}
 forkProc :: Pid -> H (Either LoadError Pid)
 forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
@@ -191,7 +200,7 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
       case mChild of
         Nothing -> return (Left NoSpace)
         Just childPdir -> do
-          r <- copyAddrSpace (procPdir parent) childPdir (copyHi (procBrk parent))
+          r <- copyAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
           case r of
             Left e -> do
               freePDir childPdir
@@ -204,58 +213,204 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
               Vfs.vfsForkPid parentInt pidInt
               Fd.fdFork parentPid child
               return (Right child)
+
+{- | Deep-copy [minVAddr, hi) page by page (capped at 8192 pages), descending
+only into user tables: the fresh 'allocPageMap' L1 carries cloned kernel
+entries, and 'getPage' treats any valid desc as a table -- following a
+kernel block desc faults (EL1 data abort). A desc is ours iff Valid+Table
+(0x3, the 'descFromTable' shape) and its pointer passes 'validPage' (buddy
+/ user pool, never kernel RAM). Anything else skips its whole range.
+-}
+copyAddrSpace :: VM.PageMap -> VM.PageMap -> Word64 -> H (Either LoadError ())
+copyAddrSpace src dst hi = do
+  d0 <- peekElemOff (VM.fromPageMap src) 0
+  case userTable d0 of
+    Nothing -> return (Right ())
+    Just l1 -> go l1 VM.minVAddr 0
   where
-    copyHi brk = max brk stackTop
-    -- Walk [minVAddr, hi), descending only into user tables: the fresh
-    -- 'allocPageMap' L1 carries cloned kernel entries, and 'getPage'
-    -- treats any valid desc as a table -- following a kernel block desc
-    -- faults (EL1 data abort). A desc is ours iff Valid+Table (0x3, the
-    -- 'descFromTable' shape) and its pointer passes 'validPage' (buddy /
-    -- user pool, never kernel RAM). Anything else skips its whole range.
-    copyAddrSpace src dst hi = do
-      d0 <- peekElemOff (VM.fromPageMap src) 0
-      case userTable d0 of
-        Nothing -> return (Right ())
-        Just l1 -> go l1 VM.minVAddr 0
-      where
-        userTable d
-          | d .&. 3 == 3
-          , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
-              Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
-          | otherwise = Nothing
-        l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
-        l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
-        go l1 va n
-          | va >= hi = return (Right ())
-          | n > (8192 :: Int) = return (Left NoSpace)
-          | otherwise = do
-              d1 <- peekElemOff l1 (l1i va)
-              case userTable d1 of
-                Nothing -> go l1 (nextL1 va) n
-                Just l2 -> do
-                  d2 <- peekElemOff l2 (l2i va)
-                  case userTable d2 of
-                    Nothing -> go l1 (nextL2 va) n
-                    Just _ -> do
-                      mInfo <- VM.getPage src va
-                      case mInfo of
-                        Nothing -> go l1 (va + 4096) n
-                        Just info -> do
-                          mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
-                          case mp2 of
-                            Nothing -> return (Left NoSpace)
-                            Just raw -> do
-                              copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
-                              ok <- VM.setPage dst va (Just (info {VM.physPage = toPhysPage (castPtr raw)}))
-                              if not ok
-                                then do HPages.freePage raw; return (Left NoSpace)
-                                else go l1 (va + 4096) (n + 1)
-        nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
-        nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
-    copyPageBytes src dst =
-      forM_ [0 .. 4095] $ \i -> do
-        b <- peek (src `plusPtr` i) :: H Word8
-        poke (dst `plusPtr` i) b
+    userTable d
+      | d .&. 3 == 3
+      , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
+          Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
+      | otherwise = Nothing
+    l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
+    l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
+    go l1 va n
+      | va >= hi = return (Right ())
+      | n > (8192 :: Int) = return (Left NoSpace)
+      | otherwise = do
+          d1 <- peekElemOff l1 (l1i va)
+          case userTable d1 of
+            Nothing -> go l1 (nextL1 va) n
+            Just l2 -> do
+              d2 <- peekElemOff l2 (l2i va)
+              case userTable d2 of
+                Nothing -> go l1 (nextL2 va) n
+                Just _ -> do
+                  mInfo <- VM.getPage src va
+                  case mInfo of
+                    Nothing -> go l1 (va + 4096) n
+                    Just info -> do
+                      mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                      case mp2 of
+                        Nothing -> return (Left NoSpace)
+                        Just raw -> do
+                          copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
+                          ok <- VM.setPage dst va (Just (info {VM.physPage = toPhysPage (castPtr raw)}))
+                          if not ok
+                            then do HPages.freePage raw; return (Left NoSpace)
+                            else go l1 (va + 4096) (n + 1)
+    nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
+    nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
+
+copyPageBytes :: Ptr Word8 -> Ptr Word8 -> H ()
+copyPageBytes src dst =
+  forM_ [0 .. 4095] $ \i -> do
+    b <- peek (src `plusPtr` i) :: H Word8
+    poke (dst `plusPtr` i) b
+
+{- | EL0 fork (svc 0x08): deep-copy the parent address space like 'forkProc',
+then wire the trap frame + EL0 session so the child starts runnable. The
+parent must be parked (its slot holds the trap frame); the child slot is
+cloned with x0 = 0 via 'house_el0_clone_slot', then a fresh Haskell thread
+resumes the child and enters its 'parkLoop'. Returns the child pid for the
+parent to resume with. Cleanup on failure removes the half-built child and
+returns the 'LoadError' for the parent to resume as an errno.
+-}
+forkChildEl0 :: Pid -> Ptr Word64 -> H (Either LoadError Pid)
+forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup parentPid mp of
+    Nothing -> return (Left (BadSegment "no such pid"))
+    Just parent -> do
+      mChild <- VM.allocPageMap
+      case mChild of
+        Nothing -> return (Left NoSpace)
+        Just childPdir -> do
+          r <- copyAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
+          case r of
+            Left e -> do freePDir childPdir; return (Left e)
+            Right () -> do
+              pidInt <- readRef pidNext
+              writeRef pidNext (pidInt + 1)
+              let child = Pid pidInt
+                  childPtr = VM.fromPageMap childPdir
+              reg <- liftIO (c_el0_register childPtr)
+              if reg /= 0
+                then do freePDir childPdir; return (Left NoSpace)
+                else do
+                  exitVar <- newEmptyMVar
+                  modifyRef procExitMap (Map.insert child exitVar)
+                  modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent)))
+                  Vfs.vfsForkPid parentInt pidInt
+                  Fd.fdFork parentPid child
+                  asid <- liftIO (c_asid_for childPtr)
+                  cloned <- liftIO (c_el0_clone parentPtr childPtr)
+                  if cloned /= 0
+                    then do
+                      modifyRef procMap (Map.delete child)
+                      modifyRef procExitMap (Map.delete child)
+                      Vfs.vfsReleasePid pidInt
+                      Fd.fdRelease child
+                      liftIO (c_el0_unregister childPtr)
+                      freePDir childPdir
+                      return (Left (BadSegment "clone slot"))
+                    else do
+                      _ <- forkH $ do
+                        liftIO (c_set_pdir childPtr)
+                        _ <- liftIO (c_resume_el0 childPtr asid 0)
+                        parkLoop child childPtr asid exitVar
+                        return ()
+                      return (Right child)
+
+{- | Unmap every user page in [minVAddr, hi), freeing the backing host pages.
+Tables are kept (L2/L1 husks leak at most a page each per exec -- negligible
+at this scale); the pdir pointer stays valid so the parked EL0 slot keeps its
+key. Runs under 'userSem'.
+-}
+freeUserPages :: VM.PageMap -> Word64 -> H ()
+freeUserPages pdir hi = do
+  d0 <- peekElemOff (VM.fromPageMap pdir) 0
+  case userTable d0 of
+    Nothing -> return ()
+    Just l1 -> go l1 VM.minVAddr
+  where
+    userTable d
+      | d .&. 3 == 3
+      , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
+          Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
+      | otherwise = Nothing
+    l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
+    l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
+    go l1 va
+      | va >= hi = return ()
+      | otherwise = do
+          d1 <- peekElemOff l1 (l1i va)
+          case userTable d1 of
+            Nothing -> go l1 (nextL1 va)
+            Just l2 -> do
+              d2 <- peekElemOff l2 (l2i va)
+              case userTable d2 of
+                Nothing -> go l1 (nextL2 va)
+                Just _ -> do
+                  mInfo <- VM.getPage pdir va
+                  case mInfo of
+                    Nothing -> go l1 (va + 4096)
+                    Just info -> do
+                      _ <- VM.setPage pdir va Nothing
+                      HPages.freePage (fromPhysPage (VM.physPage info))
+                      go l1 (va + 4096)
+    nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
+    nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
+
+{- | EL0 exec (svc 0x0B): replace the image under the same pid. Reads + parses
+the path (VFS, then 'loadElf') before touching the old image; only then frees
+old user pages, maps the new segments, lays a fresh argv ([path]) + env
+stack, updates entry/brk, and redirects the parked slot via
+'house_el0_set_entry' (resume with x0 = 0 follows in the caller). Fds stay
+open across exec (Unix semantics); the pid/namespace/slot are unchanged.
+Errors before the point of no return resume errnos (ENOENT/EINVAL/ENOMEM);
+a mapping failure past it resumes ENOMEM on a half-built image.
+-}
+execReplace :: Pid -> Ptr Word64 -> String -> H (Either LoadError (Word64, Word64))
+execReplace pid@(Pid pidInt) pdir path = do
+  ns <- Vfs.vfsEnsurePid pidInt
+  mBytes <- Vfs.vfsReadBytes ns path
+  case mBytes of
+    Left _ -> return (Left (BadSegment "enoent"))
+    Right bytes -> case loadElf bytes of
+      Left le -> return (Left le)
+      Right elf -> withQSem userSem $ do
+        mp <- readRef procMap
+        case Map.lookup pid mp of
+          Nothing -> return (Left (BadSegment "no such pid"))
+          Just pr -> do
+            let oldHi = max (procBrk pr) stackTop
+            freeUserPages (procPdir pr) oldHi
+            mapped <- mapSegments (procPdir pr) elf
+            case mapped of
+              Left err -> return (Left err)
+              Right () -> do
+                let initBrk = initBreak elf
+                mStack <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                case mStack of
+                  Nothing -> return (Left NoSpace)
+                  Just stk -> do
+                    HPages.zeroPage stk
+                    eSp <- setupArgStack stk [path] ["HOUSE=1", "PATH=/bin"]
+                    case eSp of
+                      Left err -> do HPages.freePage stk; return (Left err)
+                      Right sp -> do
+                        let stackBase = stackTop - 4096
+                        okStk <- VM.setPage (procPdir pr) stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False}))
+                        if not okStk
+                          then do HPages.freePage stk; return (Left NoSpace)
+                          else do
+                            writeRef procMap (Map.insert pid pr {procEntry = elfEntry elf, procBrk = initBrk} mp)
+                            setRc <- liftIO (c_el0_set_entry pdir (elfEntry elf) sp)
+                            if setRc /= 0
+                              then return (Left (BadSegment "exec redirect"))
+                              else return (Right (elfEntry elf, sp))
 
 -- | EL1 lookup for the forktest isolation check (caller holds no locks).
 procInfo :: Pid -> H (Maybe Process)
@@ -382,23 +537,27 @@ killPid pid@(Pid pidInt) = do
 capability is pinned while this thread polls. EXIT wins over PARK; yield
 resumes immediately with x0 = 0; brk grows via 'procBrkGrow' (resumes the
 new break); fd 0x04..0x07/0x0A run against the pid's 'Fd' table (per-pid,
-so cross-pid use fails EBADF); IPC 0x10..0x13 pair through the EL1
-Endpoint rendezvous (same blocking semantics as the shell path, bounded by
-a 5s timeout so a reaped pid never wedges a peer); unknown requests resume
-with ENOSYS so a hostile guest can never wedge the loop. Exits silently
-when the pid is reaped underneath (killPid) without touching freed tables:
-user copies run under 'userSem' (which 'freePDir' also holds) and resume on
-an unregistered pdir is a harmless -22.
+so cross-pid use fails EBADF); fork 0x08 deep-copies via 'forkChildEl0'
+(child x0 = 0, parent resumes the child pid); wait 0x09 blocks in 'waitPid'
+until the child exits (reaps, resumes the exit code); exec 0x0B replaces
+the image via 'execReplace' (resumes 0 in the new image); IPC 0x10..0x13
+pair through the EL1 Endpoint rendezvous (same blocking semantics as the
+shell path, bounded by a 5s timeout so a reaped pid never wedges a peer);
+unknown requests resume with ENOSYS so a hostile guest can never wedge the
+loop. Exits silently when the pid is reaped underneath (killPid) without
+touching freed tables: user copies run under 'userSem' (which 'freePDir'
+also holds) and resume on an unregistered pdir is a harmless -22.
 Return convention: SEND/CALL resume x0 = 0 with reply words in the user
 buffer; RECV resumes x0 = sender tag with received words in the buffer;
 REPLY resumes x0 = 0; BRK resumes the new break; OPEN resumes the fd
 number; READ/WRITE resume the byte count; CLOSE resumes 0; SEEK resumes
-the new offset. Errors resume negative errnos: -2 ENOENT, -9 EBADF, -11
-EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM, -14 EFAULT, -21 EISDIR,
--22 EINVAL, -28 ENOSPC.
+the new offset; FORK resumes the child pid (0 in the child); WAIT resumes
+the reaped exit code; EXEC resumes 0. Errors resume negative errnos:
+-2 ENOENT, -9 EBADF, -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
+-14 EFAULT, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
 -}
 parkLoop :: Pid -> Ptr Word64 -> Word64 -> MVar Int -> H ()
-parkLoop pid pdir asid exitVar = loop
+parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
   where
     loop = do
       alive <- withQSem userSem (Map.member pid <$> readRef procMap)
@@ -419,6 +578,9 @@ parkLoop pid pdir asid exitVar = loop
                 Just (ReqWriteFd fd va ln) -> do handleWriteFd fd va ln; loop
                 Just (ReqClose fd) -> do handleClose fd; loop
                 Just (ReqSeek fd off wh) -> do handleSeek fd off wh; loop
+                Just ReqFork -> do handleFork; loop
+                Just (ReqWait c) -> do handleWait c; loop
+                Just (ReqExec va) -> do handleExec va; loop
                 Just (ReqIpcSend ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
@@ -490,6 +652,36 @@ parkLoop pid pdir asid exitVar = loop
       case r of
         Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
         Right v -> resumeWith (fromIntegral v)
+    handleFork = do
+      r <- forkChildEl0 pid pdir
+      case r of
+        Left NoSpace -> resumeWith negNOMEM
+        Left _ -> resumeWith negINVAL
+        Right (Pid c) -> resumeWith (fromIntegral c)
+    handleWait c = do
+      let childInt = fromIntegral c :: Int
+      if c == 0 || childInt <= 0 || childInt == selfInt
+        then resumeWith negINVAL
+        else do
+          live <- withQSem userSem (Map.member (Pid childInt) <$> readRef procMap)
+          if not live
+            then resumeWith negENOENT
+            else do
+              code <- waitPid (Pid childInt)
+              alive2 <- withQSem userSem (Map.member pid <$> readRef procMap)
+              when alive2 (resumeWith (fromIntegral (code .&. 0xFF)))
+    handleExec va = do
+      mPath <- readUserCString pid pdir va 256
+      case mPath of
+        Nothing -> return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right path) -> do
+          r <- execReplace pid pdir path
+          case r of
+            Left (BadSegment "enoent") -> resumeWith negENOENT
+            Left NoSpace -> resumeWith negNOMEM
+            Left _ -> resumeWith negINVAL
+            Right _ -> resumeWith 0
     handleSend ep va nw tag = do
       mIn <- readUser pid pdir va nw
       case mIn of
@@ -679,8 +871,9 @@ tryReadExitOnce pdir = allocaArray 1 $ \p -> do
 
 {- | Single parked-request poll: 0 maps to yield, 0x03 to brk (x0 = new
 break), 0x04..0x07/0x0A to fd (OPEN pathVa/flags, READ/WRITE fd/buf/len,
-CLOSE fd, SEEK fd/off/whence), 0x10..0x13 to IPC (with the trapped
-x0..x3 as ep/va/nwords/tag), anything else is unknown (resumed with
+CLOSE fd, SEEK fd/off/whence), 0x08 to fork (no args), 0x09 to wait
+(x0 = child pid), 0x0B to exec (x0 = path VA), 0x10..0x13 to IPC (with the
+trapped x0..x3 as ep/va/nwords/tag), anything else is unknown (resumed with
 ENOSYS by the park loop, never trusted).
 -}
 tryTakeParkedOnce :: Ptr Word64 -> H (Maybe ParkRequest)
@@ -706,6 +899,9 @@ tryTakeParkedOnce pdir = do
     classify 0x05 fd va ln _ = ReqRead fd va ln
     classify 0x06 fd va ln _ = ReqWriteFd fd va ln
     classify 0x07 fd _ _ _ = ReqClose fd
+    classify 0x08 _ _ _ _ = ReqFork
+    classify 0x09 c _ _ _ = ReqWait c
+    classify 0x0B va _ _ _ = ReqExec va
     classify 0x0A fd off wh _ = ReqSeek fd off wh
     classify 0x10 ep va nw tag = ReqIpcSend ep va nw tag
     classify 0x11 ep va nw _ = ReqIpcRecv ep va nw

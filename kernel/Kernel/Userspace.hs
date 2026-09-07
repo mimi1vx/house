@@ -54,6 +54,7 @@ module Kernel.Userspace (
   Kernel.Userspace.Syscall.syscallClose,
   Kernel.Userspace.Syscall.syscallFork,
   Kernel.Userspace.Syscall.syscallWait,
+  Kernel.Userspace.Syscall.syscallExec,
   Kernel.Userspace.Syscall.syscallSeek,
   Kernel.Userspace.Syscall.syscallIpcSend,
   Kernel.Userspace.Syscall.syscallIpcRecv,

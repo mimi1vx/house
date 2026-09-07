@@ -5,12 +5,13 @@ Module      : Kernel.Userspace.Syscall
 Description : SVC -> IPC/fd/brk shims docs.
 Stability   : experimental
 
- Syscalls 0x03..0x07/0x0A + 0x10..0x13 delegate through the park/resume
- ring: Rust ('svc.rs' 'house_brk_should_park' / 'house_fd_should_park',
- 'ipc.rs' 'house_ipc_should_park') validates trap-side and parks; Haskell
+ Syscalls 0x03..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B + 0x10..0x13
+ delegate through the park/resume ring: Rust ('svc.rs'
+ 'house_brk_should_park' / 'house_fd_should_park' / 'house_fork_should_park'
+ / 'house_wait_should_park' / 'house_exec_should_park', 'ipc.rs'
+ 'house_ipc_should_park') validates trap-side and parks; Haskell
  ('Kernel.Userspace.Process.parkLoop') completes the op and resumes with
- the result in x0. GRANT_MAP 0x14 and fork/wait 0x08/0x09 stay inline
- ENOSYS until their slices land.
+ the result in x0. GRANT_MAP 0x14 stays inline ENOSYS until its slice lands.
  Haskell IPC remains QSem+MVar EL1; EL0 svc path uses
  non-blocking try semantics at the trap boundary.
  For slice, syscalls are handled in Rust (uart/exit) with IPC args validated.
@@ -38,6 +39,7 @@ module Kernel.Userspace.Syscall (
   syscallClose,
   syscallFork,
   syscallWait,
+  syscallExec,
   syscallSeek,
   syscallIpcSend,
   syscallIpcRecv,
@@ -56,12 +58,16 @@ syscallBrk = 0x03
 
 {- | Track O fd/fork numbers (svc #imm). The fd slice (0x04..0x07 + 0x0A)
 backs per-pid 'Kernel.Userspace.Fd' over ramfs; fork/wait (0x08/0x09) backs
-'Kernel.Userspace.Process.forkProc'. Numbering resolves the plan's
-overlap (fd 0x04-0x07 vs fork 0x05/0x06): fd takes 0x04-0x07,
-fork/wait move to 0x08/0x09, lseek takes 0x0A. Fd/brk ride the delegation
-ring; fork/wait return ENOSYS (-38) until the fork slice lands.
+'Kernel.Userspace.Process.forkChildEl0' (deep copy + trap-frame clone,
+child x0 = 0, parent resumes the child pid; wait blocks in 'waitPid' and
+resumes the reaped exit code); exec (0x0B) backs
+'Kernel.Userspace.Process.execReplace' (same pid, fds stay open).
+Numbering resolves the plan's overlap (fd 0x04-0x07 vs fork 0x05/0x06):
+fd takes 0x04-0x07, fork/wait move to 0x08/0x09, lseek takes 0x0A,
+exec takes 0x0B. Fd/brk/fork/wait/exec ride the delegation ring.
 Arg convention (x0..x2): BRK(newBrk), OPEN(pathVa, flags),
-READ/WRITE(fd, buf, len), CLOSE(fd), SEEK(fd, off, whence).
+READ/WRITE(fd, buf, len), CLOSE(fd), SEEK(fd, off, whence), FORK(),
+WAIT(childPid), EXEC(pathVa).
 -}
 syscallOpen, syscallRead, syscallWriteFd, syscallClose :: Int
 syscallOpen = 0x04
@@ -69,10 +75,11 @@ syscallRead = 0x05
 syscallWriteFd = 0x06
 syscallClose = 0x07
 
-syscallFork, syscallWait, syscallSeek :: Int
+syscallFork, syscallWait, syscallSeek, syscallExec :: Int
 syscallFork = 0x08
 syscallWait = 0x09
 syscallSeek = 0x0A
+syscallExec = 0x0B
 
 -- | IPC ops (svc #imm), validated by `ipc.rs` before any queue touch.
 syscallIpcSend, syscallIpcRecv, syscallIpcCall, syscallIpcReply, syscallIpcGrantMap :: Int
@@ -91,6 +98,17 @@ count; CLOSE resumes 0; SEEK resumes the new offset. Errors resume
 negative errnos: -2 ENOENT, -9 EBADF, -14 EFAULT (trap-side buffer/path
 fault, never parked), -22 EINVAL, -28 ENOSPC. Per-pid tables make
 cross-pid fd use fail EBADF.
+Fork contract: svc 0x08 parks; Haskell deep-copies the address space
+(no COW yet), clones the trap frame (child resumes at the post-svc pc
+with x0 = 0), and resumes the parent with the child pid; ENOMEM when the
+copy fails. Wait contract: svc 0x09 parks with x0 = child pid; Haskell
+blocks until the child exits, reaps, and resumes the exit code (low 8
+bits, like EXIT); unknown pid resumes ENOENT, self/zero pid resumes
+EINVAL. Exec contract: svc 0x0B parks with x0 = NUL-terminated path
+(≤256, EFAULT trap-side when unfaultable); Haskell replaces the image
+under the same pid (fds stay open, argv = [path]) and resumes 0 in the
+new image; missing/unparseable path resumes ENOENT/EINVAL, OOM resumes
+ENOMEM.
 Stack contract (runElf): sp is 16-byte aligned; [sp]=argc,
 [sp+8]=argv[argc+1] NULL-terminated, then envp[envc+1] NULL-terminated,
 then NUL-terminated strings. Bounds: 64 entries and 1024 bytes per string.

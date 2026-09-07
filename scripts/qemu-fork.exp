@@ -1,0 +1,83 @@
+#!/usr/bin/expect -f
+# EL0 fork/wait/exec harness (multiprocess step 9): fork probe prints
+# parent/child distinctly + wait reaps (exit 0); exec probe replaces the
+# image with /bin/hello.
+# Usage: expect scripts/qemu-fork.exp <kernel.bin> [marker] [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+if {$marker eq "" || $marker eq "hvf" || $marker eq "tcg"} {
+    set smp $mem
+    set mem $accel
+    set accel $marker
+    set marker "fork-ok"
+}
+if {$marker eq ""} { set marker "fork-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 90 } else { set timeout 60 }
+} else {
+    set timeout $timeout_arg
+}
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "run /bin/fork\r"
+expect {
+    -re "fork parent" { puts "\nPASS: fork parent printed (parent x0 = child pid)" }
+    timeout { puts "\nFAIL: fork parent timeout (FORK ring wedged?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before fork parent"; exit 1 }
+}
+expect {
+    -re "fork child" { puts "\nPASS: fork child printed (child x0 = 0, distinct)" }
+    timeout { puts "\nFAIL: fork child timeout (clone_slot wedged?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before fork child"; exit 1 }
+}
+expect {
+    -re "fork wait ok" { puts "\nPASS: fork wait ok (WAIT reaped exit 0)" }
+    timeout { puts "\nFAIL: fork wait ok timeout (WAIT ring wedged?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before fork wait ok"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: fork ok exit 0" }
+    timeout { puts "\nFAIL: fork exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before fork exit"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after fork timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "run /bin/exec\r"
+expect {
+    -re "Hello from EL0" { puts "\nPASS: exec replaced image with /bin/hello" }
+    timeout { puts "\nFAIL: exec hello timeout (EXEC ring wedged?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before exec hello"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: exec ok exit 0" }
+    timeout { puts "\nFAIL: exec exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before exec exit"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt at end" }
+    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof at end"; exit 1 }
+}
+puts "\nPASS: $marker"
+catch {exec kill -9 [exp_pid]}
+exit 0

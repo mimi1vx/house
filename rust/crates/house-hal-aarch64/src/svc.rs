@@ -13,6 +13,9 @@ const HOUSE_SVC_CLOSE: u32 = 0x07;
 const HOUSE_SVC_FORK: u32 = 0x08;
 const HOUSE_SVC_WAIT: u32 = 0x09;
 const HOUSE_SVC_SEEK: u32 = 0x0A;
+// EL0 exec replaces the image under the same pid (path VA in x0,
+// NUL-terminated, like OPEN). Rides the delegation ring.
+const HOUSE_SVC_EXEC: u32 = 0x0B;
 const HOUSE_SVC_IPC_SEND: u32 = 0x10;
 const HOUSE_SVC_IPC_RECV: u32 = 0x11;
 const HOUSE_SVC_IPC_CALL: u32 = 0x12;
@@ -32,17 +35,20 @@ static mut HOUSE_USER_EXIT_CODE: i32 = 0;
 const EL0_N: usize = 64;
 
 // Park request codes (svc #imm that parks instead of completing inline).
-// YIELD + BRK + fd 0x04..0x07/0x0A + IPC 0x10..0x13 ride the delegation ring
-// (validate-then-park in `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS
-// until the grant-transfer slice; FORK/WAIT 0x08/0x09 stay inline ENOSYS
-// until the fork slice.
+// YIELD + BRK + fd 0x04..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B +
+// IPC 0x10..0x13 ride the delegation ring (validate-then-park in
+// `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS
+// until the grant-transfer slice.
 const EL0_REQ_YIELD: u32 = 0x00;
 const EL0_REQ_BRK: u32 = 0x03;
 const EL0_REQ_OPEN: u32 = 0x04;
 const EL0_REQ_READ: u32 = 0x05;
 const EL0_REQ_WRITE_FD: u32 = 0x06;
 const EL0_REQ_CLOSE: u32 = 0x07;
+const EL0_REQ_FORK: u32 = 0x08;
+const EL0_REQ_WAIT: u32 = 0x09;
 const EL0_REQ_SEEK: u32 = 0x0A;
+const EL0_REQ_EXEC: u32 = 0x0B;
 const EL0_REQ_IPC_SEND: u32 = 0x10;
 const EL0_REQ_IPC_RECV: u32 = 0x11;
 const EL0_REQ_IPC_CALL: u32 = 0x12;
@@ -325,6 +331,40 @@ pub unsafe extern "C" fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_brk_should_park(op: u32, _x0: u64) -> i32 {
     if op == HOUSE_SVC_BRK { 1 } else { -22 }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); fork carries no user
+// memory (child inherits the parent trap frame via `house_el0_clone_slot`,
+// x0 = 0 in the child, parent resumes with the child pid), so every
+// op == 0x08 parks and Haskell decides pid/ENOMEM. Returns 1 park / -22
+// unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_fork_should_park(op: u32, _x0: u64) -> i32 {
+    if op == HOUSE_SVC_FORK { 1 } else { -22 }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); wait carries only a pid
+// in x0 (Haskell validates membership, blocks until the child exits, reaps,
+// and resumes with the exit code), so every op == 0x09 parks and Haskell
+// decides ENOENT/EINVAL. Returns 1 park / -22 unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_wait_should_park(op: u32, _x0: u64) -> i32 {
+    if op == HOUSE_SVC_WAIT { 1 } else { -22 }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); exec carries a
+// NUL-terminated path in x0 (same 256B bound as OPEN, checked against the
+// trapping pdir with page-table reads only, no locks). Returns 1 when
+// validated and the caller should park, 0 when validation failed (caller
+// falls through to dispatch for the precise errno), -22 unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_exec_should_park(op: u32, x0: u64) -> i32 {
+    // SAFETY: delegates to the lock-free validator.
+    if op != HOUSE_SVC_EXEC {
+        return -22;
+    }
+    let r = unsafe { validate_cstring_current(x0, 256) };
+    if r == 0 { 1 } else { 0 }
 }
 
 // Byte-granular user copy against an explicit pdir for the fd ring. While a
@@ -629,6 +669,83 @@ pub unsafe extern "C" fn house_el0_take_request(
     }
 }
 
+// SAFETY: EL1 thread context (Haskell fork handler, capability free); both
+// pdirs must be registered slots. Copies the parent's parked trap frame
+// (896B save + ELR as-delivered + SP_EL0) into the child slot, stages the
+// child x0 = 0, and marks the child parked so `house_resume_el0` can start
+// it. Parent slot untouched. Returns 0 ok, -22 unknown slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_clone_slot(parent: *mut u8, child: *mut u8) -> i32 {
+    unsafe {
+        if parent.is_null() || child.is_null() {
+            return -22;
+        }
+        let pkey = parent as u64;
+        let ckey = child as u64;
+        let mut pi: Option<usize> = None;
+        let mut ci: Option<usize> = None;
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == pkey {
+                pi = Some(i);
+            }
+            if EL0_TABLE[i].pdir == ckey {
+                ci = Some(i);
+            }
+        }
+        match (pi, ci) {
+            (Some(p), Some(c)) => {
+                if EL0_TABLE[p].parked == 0 {
+                    return -22;
+                }
+                // SAFETY: both saves are static 112-word fields; bounded copy.
+                core::ptr::copy_nonoverlapping(
+                    EL0_TABLE[p].save.as_ptr(),
+                    EL0_TABLE[c].save.as_mut_ptr(),
+                    112,
+                );
+                EL0_TABLE[c].elr = EL0_TABLE[p].elr;
+                EL0_TABLE[c].sp_el0 = EL0_TABLE[p].sp_el0;
+                EL0_TABLE[c].save[0] = 0;
+                EL0_TABLE[c].req = 0;
+                EL0_TABLE[c].parked = 1;
+                EL0_TABLE[c].exit_code = 0;
+                EL0_TABLE[c].exited = 0;
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                0
+            }
+            _ => -22,
+        }
+    }
+}
+
+// SAFETY: EL1 thread context (Haskell exec handler, capability free); pdir
+// must be a registered parked slot. Redirects the session at `entry` with
+// `sp`: ELR/sp_EL0 updated, general + SIMD save cleared (x0 staged by the
+// following `house_resume_el0`), parked retained. Returns 0 ok, -22 unknown.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_set_entry(pdir: *mut u8, entry: u64, sp: u64) -> i32 {
+    unsafe {
+        if pdir.is_null() {
+            return -22;
+        }
+        let key = pdir as u64;
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == key {
+                if EL0_TABLE[i].parked == 0 {
+                    return -22;
+                }
+                EL0_TABLE[i].save = [0; 112];
+                EL0_TABLE[i].elr = entry;
+                EL0_TABLE[i].sp_el0 = sp;
+                EL0_TABLE[i].req = 0;
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                return 0;
+            }
+        }
+        -22
+    }
+}
+
 // SAFETY: EL1 thread context (Haskell park loop, capability free while the
 // caller was blocked). Stages `res` as the resumed x0, clears parked, then
 // re-enters EL0 via `house_resume_asm`; control returns here (0) on the next
@@ -799,12 +916,32 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 }
             }
             HOUSE_SVC_FORK | HOUSE_SVC_WAIT => {
-                // Fork/wait stay inline ENOSYS until the fork slice lands.
+                // Registered sessions park in `c_handle_sync` before reaching
+                // dispatch (no user memory for fork; wait carries only a pid
+                // Haskell validates); this arm is the fail-closed fallback.
                 uart_puts(b"[svc] ENOSYS fork\n\0".as_ptr());
                 if !gpr.is_null() {
                     *gpr = -38i64 as u64;
                 }
                 -38
+            }
+            HOUSE_SVC_EXEC => {
+                // Validate-then-park like OPEN: well-formed paths park in
+                // `c_handle_sync`; reaching here means unregistered slot
+                // (fail closed ENOSYS) or a trap-side errno (bad path).
+                let r = validate_cstring_current(x0, 256);
+                if r == 0 {
+                    uart_puts(b"[svc] ENOSYS exec\n\0".as_ptr());
+                    if !gpr.is_null() {
+                        *gpr = -38i64 as u64;
+                    }
+                    -38
+                } else {
+                    if !gpr.is_null() {
+                        *gpr = r as u64;
+                    }
+                    r
+                }
             }
             HOUSE_SVC_IPC_SEND
             | HOUSE_SVC_IPC_RECV

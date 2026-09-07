@@ -53,7 +53,7 @@ Future symbol additions that touch these paths get bounds review first
   (`10.0.2.0/24` user-mode NAT); there is no DNSSEC/TLS in this slice
   (accepted risk — Track S). The guest still expires ARP entries after 60 s
   and logs DHCP xid mismatches to `dmesg` instead of accepting them.
-- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`, `BRK 0x03` + fd `0x04..0x07/0x0A` + `YIELD 0x00` + IPC `0x10..0x13` park via `house_el0_park` in `c_handle_sync` before dispatch — BRK always parks (no user memory, Haskell decides window/ENOMEM), fd/IPC gated by `house_fd_should_park`/`house_ipc_should_park` so invalid buffers/paths/counts return a precise errno inline instead of parking — with an ENOSYS fallback for unregistered sessions, Track O fork `0x08/0x09` + IPC `GRANT_MAP 0x14` fail-closed ENOSYS until their ring slices land) and
+- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`, `BRK 0x03` + fd `0x04..0x07/0x0A` + `YIELD 0x00` + fork `0x08`/wait `0x09`/exec `0x0B` + IPC `0x10..0x13` park via `house_el0_park` in `c_handle_sync` before dispatch — BRK/FORK/WAIT always park (no user memory / pid only, Haskell decides window/ENOMEM/pid), fd/IPC/EXEC gated by `house_fd_should_park`/`house_ipc_should_park`/`house_exec_should_park` so invalid buffers/paths/counts return a precise errno inline instead of parking — with an ENOSYS fallback for unregistered sessions, Track O fork `0x08/0x09` + exec `0x0B` now ride the ring; IPC `GRANT_MAP 0x14` fail-closed ENOSYS until the grant slice) and
   `house_ipc_svc_dispatch` (`IPC 0x10..0x14`) take raw `imm`/`x0..x3` from EL0;
   unknown `imm` returns an error, user pointers are validated before
   copy (`house_ipc_copy_msg` is length-bounded).
@@ -209,9 +209,11 @@ demand-100 pages, `mprotect` RO perm fault, `munmap` translation fault,
 ### `svc.rs` + `ipc.rs` — `svc.c` / `svc.h` / `ipc.c` / `ipc.h`
 
 EL0 `svc #imm` dispatch (`WRITE 0x01`/`EXIT 0x02`, `BRK 0x03` + fd
-`0x04..0x07/0x0A` + IPC `0x10..0x13` validate-then-park through
-`house_brk_should_park` / `house_fd_should_park` / `house_ipc_should_park`,
-`0x14` inline ENOSYS). Unknown `imm` is rejected; user pointers are validated before copy.
+`0x04..0x07/0x0A` + fork `0x08`/wait `0x09`/exec `0x0B` + IPC `0x10..0x13`
+validate-then-park through `house_brk_should_park` / `house_fd_should_park` /
+`house_fork_should_park` / `house_wait_should_park` /
+`house_exec_should_park` / `house_ipc_should_park`, `0x14` inline ENOSYS).
+Unknown `imm` is rejected; user pointers are validated before copy.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -230,6 +232,11 @@ EL0 `svc #imm` dispatch (`WRITE 0x01`/`EXIT 0x02`, `BRK 0x03` + fd
 | `house-hal-aarch64` | `house_ipc_svc_dispatch` | `int64_t house_ipc_svc_dispatch(uint32_t op, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3)` | `ipc.c` |
 | `house-hal-aarch64` | `house_ipc_should_park` | `int house_ipc_should_park(uint32_t op, uint64_t x1, uint64_t x2)` | `ipc.rs` (new: trap-safe park gate, `1` validated-park / `0` errno-inline / `-22` unknown op; GRANT_MAP always `0`) |
 | `house-hal-aarch64` | `house_brk_should_park` | `int house_brk_should_park(uint32_t op, uint64_t x0)` | `svc.rs` (new: trap-safe park gate, `1` park / `-22` unknown op; no user memory, Haskell decides window/ENOMEM) |
+| `house-hal-aarch64` | `house_fork_should_park` | `int house_fork_should_park(uint32_t op, uint64_t x0)` | `svc.rs` (new: trap-safe park gate, `1` park / `-22` unknown op; no user memory, child inherits trap frame via `house_el0_clone_slot`) |
+| `house-hal-aarch64` | `house_wait_should_park` | `int house_wait_should_park(uint32_t op, uint64_t x0)` | `svc.rs` (new: trap-safe park gate, `1` park / `-22` unknown op; x0 = child pid, Haskell validates/reaps) |
+| `house-hal-aarch64` | `house_exec_should_park` | `int house_exec_should_park(uint32_t op, uint64_t x0)` | `svc.rs` (new: trap-safe park gate, `1` validated-park / `0` errno-inline / `-22` unknown op; x0 = NUL-terminated path ≤256) |
+| `house-hal-aarch64` | `house_el0_clone_slot` | `int house_el0_clone_slot(void *parent, void *child)` | `svc.rs` (new: copy parked trap frame parent→child, child x0 = 0, child parked; `0` ok / `-22` unknown slot) |
+| `house-hal-aarch64` | `house_el0_set_entry` | `int house_el0_set_entry(void *pdir, uint64_t entry, uint64_t sp)` | `svc.rs` (new: redirect parked session at entry/sp for exec, regs cleared; `0` ok / `-22` unknown slot) |
 | `house-hal-aarch64` | `house_fd_should_park` | `int house_fd_should_park(uint32_t op, uint64_t x0, uint64_t x1, uint64_t x2)` | `svc.rs` (new: trap-safe park gate, `1` validated-park / `0` errno-inline / `-22` unknown op; OPEN validates NUL-terminated path ≤256, READ/WRITE validate buf ≤64K) |
 | `house-hal-aarch64` | `house_user_read` | `int house_user_read(void *pdir, uint64_t va, uint64_t *out, uint64_t nwords)` | `svc.rs` (new: EL1 thread-context word copy against an explicit pdir — the recorded root is kernel while parked; `0` ok / `-14` EFAULT / `-22` EINVAL) |
 | `house-hal-aarch64` | `house_user_write` | `int house_user_write(void *pdir, uint64_t va, const uint64_t *in, uint64_t nwords)` | `svc.rs` (new: same as read, opposite direction) |

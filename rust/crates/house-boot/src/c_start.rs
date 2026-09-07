@@ -97,6 +97,9 @@ unsafe extern "C" {
     fn house_ipc_should_park(op: u32, x1: u64, x2: u64) -> i32;
     fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32;
     fn house_brk_should_park(op: u32, x0: u64) -> i32;
+    fn house_fork_should_park(op: u32, x0: u64) -> i32;
+    fn house_wait_should_park(op: u32, x0: u64) -> i32;
+    fn house_exec_should_park(op: u32, x0: u64) -> i32;
     fn house_set_recorded_pdir(pdir: *mut u8);
     fn hs_init(argc: *mut i32, argv: *mut *mut *mut u8);
     fn getenv(name: *const u8) -> *mut u8;
@@ -216,14 +219,20 @@ pub unsafe extern "C" fn c_handle_sync(
         if is_el0 {
             let svc_imm = (esr & 0xFFFF) as u32;
             // YIELD (0x00) always attempts park; BRK (0x03) always attempts
-            // park (no user memory, Haskell decides window/ENOMEM); fd
-            // 0x04..0x07/0x0A park only after trap-side validation passes
-            // (validate-then-park: bad buffers/paths fall through to dispatch
-            // for a precise errno instead of parking); IPC 0x10..0x13 park
-            // only after `house_ipc_should_park` passes. GRANT_MAP 0x14 and
-            // FORK/WAIT 0x08/0x09 never park (inline ENOSYS until their slices).
+            // park (no user memory, Haskell decides window/ENOMEM); FORK
+            // (0x08) and WAIT (0x09) always attempt park (no user memory /
+            // pid only, Haskell decides); EXEC (0x0B) parks only after
+            // trap-side path validation; fd 0x04..0x07/0x0A park only after
+            // trap-side validation passes (validate-then-park: bad
+            // buffers/paths fall through to dispatch for a precise errno
+            // instead of parking); IPC 0x10..0x13 park only after
+            // `house_ipc_should_park` passes. GRANT_MAP 0x14 never parks
+            // (inline ENOSYS until the grant slice).
             let park_candidate = svc_imm == 0x00
                 || svc_imm == 0x03
+                || svc_imm == 0x08
+                || svc_imm == 0x09
+                || svc_imm == 0x0B
                 || (0x04..=0x07).contains(&svc_imm)
                 || svc_imm == 0x0A
                 || (0x10..=0x13).contains(&svc_imm);
@@ -240,6 +249,21 @@ pub unsafe extern "C" fn c_handle_sync(
                     let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
                     // SAFETY: lock-free validator, no memory touch.
                     unsafe { house_brk_should_park(svc_imm, x0) }
+                } else if svc_imm == 0x08 {
+                    // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
+                    let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
+                    // SAFETY: lock-free validator, no memory touch.
+                    unsafe { house_fork_should_park(svc_imm, x0) }
+                } else if svc_imm == 0x09 {
+                    // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
+                    let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
+                    // SAFETY: lock-free validator, no memory touch.
+                    unsafe { house_wait_should_park(svc_imm, x0) }
+                } else if svc_imm == 0x0B {
+                    // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
+                    let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
+                    // SAFETY: lock-free validator, page-table reads only.
+                    unsafe { house_exec_should_park(svc_imm, x0) }
                 } else if svc_imm == 0x04
                     || svc_imm == 0x05
                     || svc_imm == 0x06
