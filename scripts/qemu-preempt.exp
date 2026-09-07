@@ -28,7 +28,13 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
 } else {
     set timeout $timeout_arg
 }
-if {$accel eq "tcg"} { set iters "200000000" } else { set iters "6000000000" }
+# tcg iters sized so a solo spinner runs ~3.4s (measured) against a 100ms
+# (10-tick) quantum: ~200M gave only ~350ms (3-4 ticks total for the race),
+# so interleave direction was a coin flip under host jitter (measured 2/4
+# fail rate). 1.6B gives the same tick-margin as hvf's 6B/~2.7s and was
+# verified 7/8 clean interleaves (1 unrelated host-load prompt-sync hiccup,
+# reproduced clean on immediate rerun).
+if {$accel eq "tcg"} { set iters "1600000000" } else { set iters "6000000000" }
 log_user 1
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel
