@@ -1,71 +1,65 @@
 # AGENTS.md — house/hOp aarch64 OS
 
-GHC RTS microkernel (Haskell + Rust HAL + tinylibc), aarch64-only, QEMU `virt` on Apple silicon.
-Stock threaded RTS (`-N SMP_N`), unsafe FFI only. No x86 paths.
+GHC RTS microkernel with a Haskell kernel, Rust HAL, and tinylibc. It targets
+only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 
-## Layout
+## Build Boundary
 
-- `kernel/` — Haskell closure rooted at `HouseA64.hs` (`H/`, `Kernel/`, `Monad/`, `Util/`). `kernel/Makefile` does `ghc --make -no-link` only.
-- `platform/aarch64/` — freestanding build, `aarch64.ld` (→ `build/aarch64.ld` via `cc -E -P`), `tinylibc/`, `Spike.hs`/`IrqCheck.hs`, `mm/`; `build/` gitignored.
-- `rust/` — Cargo workspace `house-boot` (global_asm `_start`/vectors), `house-hal-aarch64`, `house-libc`; see `rust/ARCHITECTURE.md` and `rust/c-abi.md` (frozen `#[no_mangle]` map, `nm`-auditable).
-- `scripts/` — `expect` harnesses `qemu-*.exp`; `ELF` path is argv.
-- `Makefile` — host orchestration; `Containerfile` — build image.
+- Compile only inside the `house-port:latest` container. Run QEMU only on the
+  macOS host (`brew install qemu expect`).
+- Pin every container invocation to Linux arm64: `container run` uses
+  `--platform linux/arm64`; image building uses the sole sanctioned
+  `CONTAINER_DEFAULT_PLATFORM=linux/arm64` assignment in the root `Makefile`.
+  Never export that variable globally.
+- Build the image once with `make container-image`; use `make container-shell`
+  for an interactive toolchain shell.
+- Host build wrappers are `make spike-build`, `make irq-build`, and
+  `make house-build`. When invoking platform build targets manually, clean
+  `platform/aarch64` first; also clean `kernel` before a House build.
+- `SMP_N` changes only QEMU `-smp`; RAM and core count are detected at boot, so
+  do not introduce build-time RAM or CPU limits.
 
-## Container — build only
+## Verification
 
-- **All compilation inside `house-port:latest`** (Debian 13, GHC 9.14.1 aarch64 + Rust `aarch64-unknown-none`). QEMU never inside container; host needs `brew install qemu expect`.
-- **Every `container` invocation must pin `--platform linux/arm64`.** Single sanctioned `CONTAINER_DEFAULT_PLATFORM=linux/arm64` on the `container build` line only (`Makefile`); never export it globally. `Containerfile:5` fails if `uname -m != aarch64`; `Makefile:9` asserts image arch is `arm64` (no Rosetta/amd64).
-- Host wrappers: `make spike-build` / `irq-build` / `house-build` → `container run --platform linux/arm64 --rm -v $PWD:/work -w /work house-port:latest make -C platform/aarch64 ...`.
-- One-time: `make container-image` · Shell: `make container-shell` → `container run --platform linux/arm64 --rm -it -v $PWD:/work -w /work house-port:latest bash`.
-- Inside container directly: `make -C kernel` and `make -C platform/aarch64 house SMP_N=2`.
+- `make check` is the per-change CI gate: spike, IRQ, House boot, shell, POSIX,
+  and Rust checks under both expected accelerators where applicable.
+- Focused checks include `make spike-check`, `irq-check`, `house-check`,
+  `house-shell-check`, `house-posix-check`, `house-fs-check`, `house-ipc-check`,
+  `house-driver-check`, `house-virtio-transport-check`,
+  `house-virtio-blk-check`, `house-virtio-net-check`, and
+  `house-userspace-check`.
+- SMP checks: `make smp-check` (default `SMP_N=2`),
+  `SMP_N=4 make smp-check`, `make smp-hotplug-check`, and the expensive nightly
+  scaling gate `make smp-check-8` (4 GiB).
+- `make vm-check` is an expensive memory/MMU matrix, not part of the ordinary
+  per-change gate.
+- All `*-check` targets clean their own builds. Set `SPIKE_MEM` to exercise a
+  different QEMU RAM size; valid values are 512M, 1G, 2G, 4G, 8G, and 16G.
+- Rust-only verification is `make rust-check`. After changing Rust/HAL ABI,
+  also audit exported symbols against the frozen map in `rust/c-abi.md`.
 
-## Commands (repo root, macOS host)
+## Repository Boundaries
 
-```sh
-make spike-check                         # ticks-ok  hvf
-make irq-check                           # vm-ok     hvf+tcg
-make house-check                         # "Welcome to the House shell"  hvf+tcg
-make house-shell-check house-posix-check # prompt/help/lambda/wastemem + uname/uptime/shutdown
-make house-fs-check house-ipc-check house-driver-check
-make house-virtio-transport-check house-virtio-blk-check house-virtio-net-check
-make house-userspace-check               # run /bin/hello -> Hello from EL0  tcg only
-make smp-check                           # N cores online, default SMP_N=2; SMP_N=4 needs 4G
-make smp-check-8                         # scaling gate: SMP_N=8 at 4G (ceiling 32; 1-8 verified hvf+tcg — nightly gate, N=2 per-commit)
-make smp-hotplug-check                   # smp down 1/up 1 cycle at N=2, caps mirror, parfib each step (hvf+tcg)
-make vm-check                            # demand paging + mprotect/munmap + ASID + shootdown  512M/2+4G/4+6G/4+8G/4+16G/4 single-build hvf+tcg + mem buddy free/total (pressure leg)
-make rust-check                          # cargo clippy -D warnings + cargo fmt --check (inside container)
-make check                               # CI gate: spike + irq + house + shell + posix + rust
+- `kernel/HouseA64.hs` roots the Haskell closure. `kernel/Makefile` intentionally
+  uses `ghc --make -no-link`; this is not a Cabal project.
+- `platform/aarch64/` owns the freestanding link, linker script, tinylibc,
+  probes, and QEMU-facing platform build. `build/aarch64.ld` is preprocessed
+  from `platform/aarch64/aarch64.ld`; edit the source, not generated output.
+- `rust/` is the Cargo workspace for boot assembly, the AArch64 HAL, and libc.
+  Keep its C ABI consistent with `rust/c-abi.md`; architecture details live in
+  `rust/ARCHITECTURE.md`.
+- `scripts/qemu-*.exp` are host-side Expect harnesses. Their positional API is
+  `expect SCRIPT ELF MARKER [timeout] [accel] [mem] [smp]`.
+- Build outputs under `kernel/build/`, `platform/aarch64/build/`, and
+  `rust/target/` are generated and ignored.
 
-SPIKE_MEM=512M make spike-check          # 512M/1G/2G/4G/8G/16G valid, default 4G
-SMP_N=4 make smp-check
-```
+## Boot And Runtime Traps
 
-`* -check` targets run `clean` themselves. When running `*-build` manually, `make -C platform/aarch64 clean` (and `make -C kernel clean` for house) first.
-
-Inside-container verification of Rust alone:
-
-```sh
-cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings
-cargo fmt --manifest-path rust/Cargo.toml -- --check   # or `bash -c 'cd rust && cargo fmt --check'`
-```
-
-## Build details
-
-- `kernel/Makefile`: `ghc --make -no-link HouseA64.hs -i. -outputdir build -O1 -XGHC2024 -Wall -Werror -package mtl -package array -package containers -package pretty`.
-- `platform/aarch64/Makefile` finds `HsFFI.h` via `ghc --print-libdir` and `libHS{rts,base,ghc-prim,ghc-bignum,ghc-internal,containers,pretty,mtl,array,transformers,deepseq,Cffi}.a` via `ghc-pkg`; threaded RTS only. Rust `libhouse_boot.rlib` + `libhouse_hal_aarch64.rlib` + `libhouse_libc.a` plus `libcore`/`libcompiler_builtins` linked `--start-group`/`--end-group` with `libgmp.a` + `libgcc` via `ld --build-id=none --gc-sections -T build/aarch64.ld`. `readelf -h` gate checks `ENTRY(_start)` / `Machine: AArch64`.
-- `build/aarch64.ld` generated from `aarch64.ld` via `cc -E -P` (no `-DHOUSE_*`); entry `_start` at `0x40080000`.
-- Rust HAL is always linked (`house-boot` + `house-hal-aarch64` + `house-libc`); see `rust/ARCHITECTURE.md` for `house-hal-riscv64` extension.
-
-## Gotchas
-
-- **RAM auto-detected.** No build-time limit. DTB `reg` (via `x0`) → open-ended fault probe (double from 128M) → `512M` fallback, bounded only by TCR/L1 capacity (256G); one binary boots at any QEMU `-m` without rebuild. `-kernel` must be the flat `build/*.bin` (`objcopy -O binary`): QEMU boots non-ELF aarch64 images via its Linux path (`x0`=DTB); ELF `-kernel` gets `x0=0`, no DTB, and the fault probe false-positives on hvf. `SPIKE_MEM` (default `4G`) only drives `qemu -m`; `SMP_N` (default `2`, HW bound `32`, tested to `8`) only drives `qemu -smp` — core count is detected (DTB → PSCI/GICR max). Per-core 64 KiB stacks (`house_boot_stack_top - core*64K`); buddy window `__heap_base+64M .. stack_top-N*64K` (N = detected cores).
-- **MMU/buddy/EL0.** Split `TTBR1` kernel / `TTBR0` user `0x01000000–0x1000000000` (`TCR T1SZ=16 TG1=4K`), 8-bit ASID with `VMALLE1IS` wrap; demand pager `house_handle_user_fault` + RO perm faults via `house_is_ro_page`; shootdown `VAE1IS` + SGI 1 (online-only). Buddy manages `__heap_base+64M .. house_boot_stack_top-N*64K` (N = detected cores, 64-bit counters, i32 saturated compat shims; see `rust/crates/house-hal-aarch64/src/buddy.rs`). EL0 via `svc #imm` (`WRITE 0x01`/`EXIT 0x02`/`IPC 0x10..0x14`), `house_enter_el0` `eret`. Shell: `free`/`mem`/`detect`/`vm` show `buddy`/`ram`/`src`/`banks`/`smp`/`TTBRs`/`TCR`.
-- **QEMU is macOS-host only.** `qemu-system-aarch64 -M virt,gic-version=3 -smp SMP_N -m SPIKE_MEM -nographic -kernel build/*.bin` with `-accel hvf` (default) and `tcg` where harness expects it; `virtio-blk` needs `qemu-img create -f raw /tmp/house.img 64M` + `-drive`/`-device virtio-blk-device`; `virtio-net` needs `-netdev user` + `-device virtio-net-device`.
-- **Expect signature:** `expect scripts/<harness>.exp <elf> <marker> [timeout] [accel] [mem] [smp]` — markers `ticks-ok`, `vm-ok`, `Welcome to the House shell`, `smp: N cores online`. Harness spawns QEMU and asserts marker; timeout and accel args are positional.
-- **Toolchain:** No `npm`/`cargo`/`pytest` on host — only `make` + `expect`; `cargo` runs inside `--platform linux/arm64` container.
-
-## Conventions
-
-- Keep aarch64-only; no x86 paths.
-- `plans/` is untracked local notes (intentional, not gitignored); `.gitignore` covers `kernel/build/`, `platform/aarch64/build/`, `rust/target/`.
-- After modifying HAL/Rust, re-verify `nm` subset against `rust/c-abi.md` and run `make rust-check`.
+- Pass the flat `platform/aarch64/build/*.bin` to QEMU `-kernel`, not the ELF.
+  The flat-image boot path supplies the DTB in `x0`; ELF boot leaves `x0=0` and
+  causes false RAM probing under HVF.
+- The supported machine is `qemu-system-aarch64 -M virt,gic-version=3`; HVF is
+  the host default, while harnesses use TCG where required (notably EL0 tests).
+- The stock threaded GHC RTS and unsafe FFI are deliberate constraints.
+- `plans/` contains untracked local notes and is intentionally not ignored; do
+  not treat those files as product documentation or generated artifacts.
