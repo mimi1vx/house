@@ -1,6 +1,6 @@
 # Toolchain (`house-port:latest`)
 
-Build-only image: reproducible builds, nothing else. QEMU runs on the
+Build-only image with a documented resolved toolchain snapshot. QEMU runs on the
 macOS host, never inside (see `docs/HOST-QEMU.md`).
 
 ## Base
@@ -14,7 +14,11 @@ macOS host, never inside (see `docs/HOST-QEMU.md`).
   pinned in the table below on every rebuild.
 - `WORKDIR /work`, default `CMD ["bash"]`.
 
-## Toolchains (resolved 2026-09-06 — re-pin on every rebuild)
+## Toolchains
+
+The table records the resolved image contents. GHC and Rust nightly float at
+image-build time, so refresh the table whenever the image resolves newer
+versions.
 
 | Tool | Provisioned by | Resolved version |
 |------|---------------|------------------|
@@ -29,8 +33,9 @@ macOS host, never inside (see `docs/HOST-QEMU.md`).
 | `aarch64-unknown-none` | `rustup target add` | installed (alongside `aarch64-unknown-linux-gnu`) |
 | ld.lld | `lld` apt set | Debian LLD 19.1.7 |
 
-Nightly is deliberate: Miri only ships for nightly. Everything else
-(build, clippy, fmt) runs on the same toolchain — one pin, no split.
+Nightly is deliberate: Miri only ships for nightly. Build, Clippy, formatting,
+and Miri use the same nightly resolved into an image; rebuilding the image may
+resolve a newer nightly.
 
 ## Gates
 
@@ -39,8 +44,9 @@ Nightly is deliberate: Miri only ships for nightly. Everything else
   casts trip it; `--all-targets` excluded, no `test` crate on bare metal)
   + `cargo fmt --check` + `cargo deny check`, plus host
   `fourmolu -m check` + `hlint` over the full tree.
-- `make miri` (`cargo miri test -p house-hal -p house-hal-aarch64
-  -p house-libc -p house-boot`, `-c 4 -m 4G`): `asm!`/MMIO stay
+- `make miri` runs 16 pure-logic tests with `cargo miri test -p house-hal
+  -p house-hal-aarch64 -p house-libc -p house-boot` inside a
+  `container run -c 4 -m 4G` invocation. `asm!`/MMIO stay
   QEMU-gated behind `#[cfg]` isolation (`#[cfg(miri)]` no-op spinlock
   stubs; `no_mangle` dropped and syscall modules gated out under
   `cfg(test)` so std's runtime is never interposed). Miri cache
@@ -60,12 +66,13 @@ Bare-metal links use `ld.lld`, not GNU `ld`
 at `0x40080000`, an explicit `.tls` template + `PT_TLS` (GNU ld silently
 orphans `.tbss` into the data LOAD; LLD rejects the link without it),
 and asserts the loaded file-image stays under 16 MiB (`0x40080000–
-0x41080000`; the transcribed 8 MiB does not fit the full threaded-RTS
-closure). A `size` report prints after every link.
+0x41080000`); the full threaded-RTS closure exceeds an 8 MiB bound. A
+`size` report prints after every link.
 
 Measured (`size build/*.elf`, 2026-09-06, ld.lld): spike text 5951724 +
 data 1752912 (~7.7 MiB file-image), house text 10868140 + data 2403024
-(~13.3 MiB); `readelf -h` shows `ENTRY(_start)` / `Machine: AArch64`.
+(~13.3 MiB). The linker script sets `ENTRY(_start)`; `readelf -h` shows
+the numeric entry address and `Machine: AArch64`.
 
 ## Named volumes (created on demand by `make volumes`)
 
@@ -75,15 +82,22 @@ data 1752912 (~7.7 MiB file-image), house text 10868140 + data 2403024
 - `house-cargo` → `/cargo-home` (`CARGO_HOME`; mounting over
   `/root/.cargo` would shadow the image's cargo binaries)
 
-Only `*.elf`/`*.bin` cross back over the `./:/work` bind mount.
+The repository remains bind-mounted at `/work`, including `kernel/build/` and
+`platform/aarch64/build/`. Cargo target output and the Cabal/Cargo homes live
+on named volumes.
 
 ## Host-side setup (not baked into the image)
 
 ```sh
-export CONTAINER_DEFAULT_PLATFORM=linux/arm64   # ~/.zshrc
 brew install qemu expect                        # QEMU 11.1.1, expect 5.45
 container builder start -c 4 -m 4G              # 4 CPU / 4 GB floor
 ```
+
+Install Apple's `container` CLI and `jq` before using the root Makefile.
+Do not export `CONTAINER_DEFAULT_PLATFORM`; the root Makefile scopes it to
+`container build` and pins every run explicitly. Host-side Haskell gates also
+require GHC/Cabal, Fourmolu 0.20.1.0, and a GHC2024-capable HLint (3.10 is
+known to work).
 
 ## Re-verify
 
@@ -104,6 +118,7 @@ container image inspect house-port:latest | jq -r '.[0].variants[].config.archit
 make container-image && make check
 ```
 
-`make check` rebuilds everything from clean inside the container, then
-runs the host QEMU gates. Follows this doc and `docs/HOST-QEMU.md`
-verbatim.
+`make check` obtains clean firmware builds through the spike, IRQ, and House
+legs, runs the host QEMU gates, and then runs Rust checks in the container and
+Haskell checks on the host. Focused filesystem, device, SMP, VM, and EL0
+process gates run on demand.

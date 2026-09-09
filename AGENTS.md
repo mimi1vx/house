@@ -1,12 +1,13 @@
 # AGENTS.md — house/hOp aarch64 OS
 
-GHC RTS microkernel with a Haskell kernel, Rust HAL, and tinylibc. It targets
+GHC RTS microkernel with a Haskell kernel and Rust boot, HAL, and libc layer. It targets
 only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 
 ## Build Boundary
 
-- Compile only inside the `house-port:latest` container. Run QEMU only on the
-  macOS host (`brew install qemu expect`).
+- Compile firmware only inside the `house-port:latest` container. Host-side
+  Fourmolu, HLint, and Cabal tests are the deliberate exception. Run QEMU only
+  on the macOS host (`brew install qemu expect`).
 - Pin every container invocation to Linux arm64: `container run` uses
   `--platform linux/arm64`; image building uses the sole sanctioned
   `CONTAINER_DEFAULT_PLATFORM=linux/arm64` assignment in the root `Makefile`.
@@ -22,19 +23,23 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 ## Verification
 
 - `make check` is the per-change CI gate: spike, IRQ, House boot, shell, POSIX,
-  and Rust checks under both expected accelerators where applicable.
+  Rust, and Haskell checks under both expected accelerators where applicable.
 - Focused checks include `make spike-check`, `irq-check`, `house-check`,
   `house-shell-check`, `house-posix-check`, `house-fs-check`, `house-ipc-check`,
   `house-driver-check`, `house-virtio-transport-check`,
-  `house-virtio-blk-check`, `house-virtio-net-check`, and
-  `house-userspace-check`.
+  `house-virtio-blk-check`, `house-virtio-net-check`,
+  `house-virtio-con-check`, `house-userspace-check`, `house-proc-check`,
+  `house-fd-el0-check`, `house-ipc-el0-check`, `house-fork-check`,
+  `house-preempt-check`, and `house-spin-hotplug-check`.
 - SMP checks: `make smp-check` (default `SMP_N=2`),
   `SMP_N=4 make smp-check`, `make smp-hotplug-check`, and the expensive nightly
   scaling gate `make smp-check-8` (4 GiB).
 - `make vm-check` is an expensive memory/MMU matrix, not part of the ordinary
   per-change gate.
-- All `*-check` targets clean their own builds. Set `SPIKE_MEM` to exercise a
-  different QEMU RAM size; valid values are 512M, 1G, 2G, 4G, 8G, and 16G.
+- The aggregate `make check` gets clean firmware builds through its spike, IRQ,
+  and House legs; focused checks generally reuse incremental artifacts. Set
+  `SPIKE_MEM` to exercise a different QEMU RAM size; valid values are 512M, 1G,
+  2G, 4G, 6G, 8G, and 16G.
 - Rust-only verification is `make rust-check`. After changing Rust/HAL ABI,
   also audit exported symbols against the frozen map in `rust/c-abi.md`.
 
@@ -42,14 +47,16 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 
 - `kernel/HouseA64.hs` roots the Haskell closure. `kernel/Makefile` intentionally
   uses `ghc --make -no-link`; this is not a Cabal project.
-- `platform/aarch64/` owns the freestanding link, linker script, tinylibc,
-  probes, and QEMU-facing platform build. `build/aarch64.ld` is preprocessed
+- `platform/aarch64/` owns the freestanding link, linker script, entry probes,
+  and QEMU-facing platform build. `build/aarch64.ld` is preprocessed
   from `platform/aarch64/aarch64.ld`; edit the source, not generated output.
 - `rust/` is the Cargo workspace for boot assembly, the AArch64 HAL, and libc.
   Keep its C ABI consistent with `rust/c-abi.md`; architecture details live in
   `rust/ARCHITECTURE.md`.
-- `scripts/qemu-*.exp` are host-side Expect harnesses. Their positional API is
-  `expect SCRIPT ELF MARKER [timeout] [accel] [mem] [smp]`.
+- `scripts/qemu-*.exp` are host-side Expect harnesses. Marker-taking harnesses
+  use `expect SCRIPT KERNEL.bin MARKER [timeout] [accel] [mem] [smp]`; most
+  interactive/device harnesses omit `MARKER` and may accept extra QEMU args
+  after `--`.
 - Build outputs under `kernel/build/`, `platform/aarch64/build/`, and
   `rust/target/` are generated and ignored.
 

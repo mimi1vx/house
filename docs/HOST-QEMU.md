@@ -6,10 +6,20 @@ The image stays build-only.
 ## Prerequisites
 
 ```sh
-export CONTAINER_DEFAULT_PLATFORM=linux/arm64   # ~/.zshrc
 brew install qemu expect                        # QEMU 11.1.1, expect 5.45
 qemu-system-aarch64 -accel help                 # want: hvf + tcg
 ```
+
+The build also requires Apple's `container` CLI and `jq`; install and start
+the container system before running `make container-image`.
+
+Do not export `CONTAINER_DEFAULT_PLATFORM`. `make container-image` sets it
+only for `container build`, and every container run pins
+`--platform linux/arm64` explicitly.
+
+The Haskell quality gate runs on the host because the image's HLint cannot
+parse GHC2024. `make check` therefore also requires GHC/Cabal, Fourmolu
+0.20.1.0, and a GHC2024-capable HLint (3.10 is known to work).
 
 ## Build, then boot
 
@@ -17,12 +27,12 @@ qemu-system-aarch64 -accel help                 # want: hvf + tcg
 make container-image && make check
 ```
 
-`make check` rebuilds from clean in the container, then runs the host
-gates: spike `ticks-ok`, irq `vm-ok` (hvf+tcg), house banner `Welcome to
+`make check` obtains clean firmware builds through its spike, IRQ, and House
+legs, then runs the host gates: spike `ticks-ok`, irq `vm-ok` (hvf+tcg), house banner `Welcome to
 the House shell` (hvf+tcg), interactive shell, POSIX shell, plus the
 rust and haskell gates. Scaling legs stay out of the default gate:
-`smp-check-8` (N=8 at 4G) and `vm-check` (512M/2+4G/4+6G/4+8G/4+16G/4
-single-build) run on demand.
+`smp-check-8` (N=8 at 4G) and `vm-check` run on demand. The VM matrix uses
+HVF+TCG at 512M/2, 4G/4, and 6G/4, then HVF at 8G/4 and 16G/4.
 
 ```sh
 file platform/aarch64/build/house.elf
@@ -33,7 +43,7 @@ file platform/aarch64/build/house.elf
 
 Guest RAM/SMP are auto-detected at runtime (DTB via `x0` → open-ended
 fault probe → 512M fallback); one `.bin` boots at any QEMU `-m` without
-a rebuild. `SPIKE_MEM` (default `4G`; 512M/1G/2G/4G/8G/16G valid) only
+a rebuild. `SPIKE_MEM` (default `4G`; 512M/1G/2G/4G/6G/8G/16G valid) only
 drives `qemu -m`; `SMP_N` (default `2`, HW bound `32`, tested to `8`)
 only drives `qemu -smp`.
 
@@ -49,11 +59,12 @@ qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
 
 ## Expect harnesses
 
-`expect scripts/<harness>.exp <elf> <marker> [timeout] [accel] [mem]
-[smp]` spawns QEMU and asserts the marker (`ticks-ok`, `vm-ok`,
-`Welcome to the House shell`, `smp: N cores online`); timeout and accel
-are positional. hvf is the fast path, tcg the reference when they
-disagree. The smp-hotplug `up` leg is tcg-only (hvf refuses PSCI
+The Make targets are the stable harness interface. Marker-taking harnesses
+use `expect SCRIPT KERNEL.bin MARKER [timeout] [accel] [mem] [smp]`.
+Most interactive and device harnesses omit the marker and use
+`expect SCRIPT KERNEL.bin [timeout] [accel] [mem] [smp]
+[-- extra-qemu-args]`. HVF is the fast path; TCG is the reference when
+they disagree. The smp-hotplug `up` leg is TCG-only (HVF refuses PSCI
 re-`CPU_ON` after `CPU_OFF`).
 
 virtio devices attach explicitly per check target: blk needs
@@ -64,18 +75,19 @@ virtio-net-device`; console needs a socket chardev (see
 
 ## Volumes
 
-Bind mounts through the Apple container VM are for sources only.
-Write-heavy state lives on named volumes (`make volumes` creates them;
-build targets depend on it):
+The repository is bind-mounted at `/work`, so Haskell and platform build
+outputs return through that mount. Write-heavy Cargo state and tool caches
+live on named volumes (`make volumes` creates them; build targets depend on
+it):
 
 - `house-target` → `/work/rust/target`
 - `house-cabal` → `/root/.cabal`
 - `house-cargo` → `/cargo-home` (`CARGO_HOME`; mounting over
   `/root/.cargo` would shadow the image's cargo binaries)
 
-Only `*.elf`/`*.bin` cross back over the bind mount (`target/` lives on
-the volume; a stale host `rust/target/` from pre-volume builds is safe
-to delete). If a mount misbehaves, fall back to copying artifacts out:
+Cargo's `rust/target/` lives on the volume; a stale host `rust/target/` from
+pre-volume builds is safe to delete. If a mount misbehaves, fall back to
+copying artifacts out:
 
 ```sh
 container cp <container-id>:/work/platform/aarch64/build/house.bin \
