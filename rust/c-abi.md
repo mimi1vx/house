@@ -291,7 +291,12 @@ bounded only by the 32-entry HW tables.
 | `house-hal-aarch64` | `fdt_get_ram_bytes` | `uint64_t fdt_get_ram_bytes(const void *dtb)` | `house_dtb.c` |
 | `house-hal-aarch64` | `fdt_ram_bank_count` | `int fdt_ram_bank_count(const void *dtb)` | `house_dtb.c` (new) |
 | `house-hal-aarch64` | `fdt_get_ram_bank` | `int fdt_get_ram_bank(const void *dtb, int i, uint64_t *base, uint64_t *size)` | `house_dtb.c` (new) |
+| `house-hal-aarch64` | `fdt_get_initrd` | `int fdt_get_initrd(const void *dtb, uint64_t *start, uint64_t *end)` | `house_dtb.c` (new: chosen `linux,initrd-start\|end`, BE32→u64, fail-closed 0) |
 | `house-hal-aarch64` | `fdt_get_cpu_count` | `int fdt_get_cpu_count(const void *dtb)` | `house_dtb.c` |
+
+Chosen (`linux,initrd-start|end`) is a QEMU-supplied hostile-input trust
+boundary: validated (`fdt_valid` + `checked_add` + strings/prop bounds)
+before use, same fail-closed pattern as the `memory`/`reg` walk.
 | `house-hal-aarch64` | `house_detect_early` | `void house_detect_early(void)` | `house_detect.c` |
 | `house-hal-aarch64` | `house_detect_late` | `void house_detect_late(void)` | `house_detect.c` |
 | `house-hal-aarch64` | `house_smp_detect_psci` | `int house_smp_detect_psci(void)` | `house_detect.c` |

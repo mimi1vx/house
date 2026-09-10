@@ -8,8 +8,9 @@ Stability   : experimental
 Per-pid offsets over 'Kernel.FileSystem.Vfs'. Fds 3..34 per pid (stdio
 0-2 reserved: EL0 svc WRITE uses fd 1 for UART). All paths go through
 'Vfs.splitPath' in the opener's namespace on every call; all lengths are
-capped at 64 KiB (matches the svc user-buffer bound); the 2 MiB ramfs cap
-is inherited -- backend writes return ENOSPC and no fd path grows it.
+capped at 64 KiB (matches the svc user-buffer bound); the RamFS page quota
+(10% of RAM, 16 MiB floor) is inherited -- backend writes return ENOSPC
+and no fd path grows it.
 
 Isolation: tables are keyed by 'Pid', so a cross-pid fd use misses the
 caller's map and fails EBADF. 'fdFork' copies entries+offsets on fork;
@@ -56,6 +57,7 @@ where
 import Data.Bits (complement, (.&.))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Word (Word8)
 import Foreign.C.Types (CInt (..))
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Monad (H)
@@ -192,7 +194,7 @@ fdOpen pid@(Pid pidInt) path flags
     acc = flags .&. 3
     openExisting ns ops rel
       | flags .&. o_TRUNC /= 0 && acc /= o_RDONLY = do
-          r <- Vfs.opsWrite ops rel ""
+          r <- Vfs.opsWrite ops rel []
           case r of
             Left Vfs.ENOSPC -> return (Left FdNoSpace)
             Left e -> return (Left (FdFs e))
@@ -208,7 +210,7 @@ fdOpen pid@(Pid pidInt) path flags
           return (Right fd)
 
 -- | Read up to n bytes from the pid's fd offset. Advances the offset.
-fdRead :: Pid -> Fd -> Int -> H (Either FdError String)
+fdRead :: Pid -> Fd -> Int -> H (Either FdError [Word8])
 fdRead pid fd n
   | n < 0 || n > maxFdBytes = return (Left (FdInval "bad length"))
   | otherwise = do
@@ -240,7 +242,7 @@ fdRead pid fd n
                             return (Right chunk)
 
 -- | Write bytes at the pid's fd offset (read-modify-write). Advances the offset.
-fdWrite :: Pid -> Fd -> String -> H (Either FdError Int)
+fdWrite :: Pid -> Fd -> [Word8] -> H (Either FdError Int)
 fdWrite pid fd content
   | length content > maxFdBytes = return (Left (FdInval "bad length"))
   | otherwise = do
@@ -257,7 +259,7 @@ fdWrite pid fd content
                   cr <- Vfs.opsRead ops rel
                   cur <- case cr of
                     Right s -> return (Right s)
-                    Left Vfs.ENOENT -> return (Right "")
+                    Left Vfs.ENOENT -> return (Right [])
                     Left Vfs.ENOSPC -> return (Left FdNoSpace)
                     Left e -> return (Left (FdFs e))
                   case cur of

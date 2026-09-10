@@ -505,7 +505,7 @@ a mapping failure past it resumes ENOMEM on a half-built image.
 execReplace :: Pid -> Ptr Word64 -> String -> H (Either LoadError (Word64, Word64))
 execReplace pid@(Pid pidInt) pdir path = do
   ns <- Vfs.vfsEnsurePid pidInt
-  mBytes <- Vfs.vfsReadBytes ns path
+  mBytes <- Vfs.vfsRead ns path
   case mBytes of
     Left _ -> return (Left (BadSegment "enoent"))
     Right bytes -> case loadElf bytes of
@@ -766,7 +766,7 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
           case r of
             Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
             Right chunk -> do
-              mRc <- writeUserBytes pid pdir va (map (\c -> fromIntegral (ord c `mod` 256) :: Word8) chunk)
+              mRc <- writeUserBytes pid pdir va chunk
               case mRc of
                 Nothing -> return ()
                 Just 0 -> resumeWith (fromIntegral (length chunk))
@@ -780,7 +780,7 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
             Nothing -> return ()
             Just (Left rc) -> resumeWith (fromIntegral rc)
             Just (Right bytes) -> do
-              r <- Fd.fdWrite pid (Fd.Fd (fromIntegral fdNum)) (map (chr . fromIntegral) bytes)
+              r <- Fd.fdWrite pid (Fd.Fd (fromIntegral fdNum)) bytes
               case r of
                 Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
                 Right k -> resumeWith (fromIntegral k)

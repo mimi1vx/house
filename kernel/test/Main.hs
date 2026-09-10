@@ -10,6 +10,14 @@ any FFI (foreign symbols are stubbed at link time, never called):
   truncated vectors that must return @Left@ (never @ErrorCall@).
 * Loader: bad-ELF vectors return typed @Left@ (never throw); hex goldens.
 * BlkPersist: QuickCheck @decode . encode = id@ plus golden truncations.
+* VFS routing: longest-prefix dispatch, @..@-confinement per backend,
+  @nsFork@ invisibility, and bytes round-trips (NUL + 0x80-0xFF) through
+  fake in-memory backends via @runH@ (RamFS pages need real FFI, so the
+  routing contract is exercised without them).
+* Initramfs: cpio newc round-trip (all-256 binary payloads) plus
+  bad-magic/truncation/traversal/oversize rejects, unpack via the fake
+  backends, manifest line validation, RamFS quota math + over-quota
+  refusal.
 * H.FileSystem.splitPath: normalization goldens.
 * Util.Word12: Enum/Ix contract errors fire (HasCallStack-annotated),
   guarded paths stay pure.
@@ -18,14 +26,22 @@ module Main (main) where
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM, unless)
+import Data.Char (chr, ord)
 import Data.Either (isLeft)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Ix qualified as Ix
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Word (Word16, Word32, Word8)
 import H.FileSystem qualified as FS
+import H.Monad qualified as HM
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types qualified as NT
 import Kernel.FileSystem.BlkPersist qualified as BP
+import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as Vfs
+import Kernel.Initramfs.Cpio qualified as Cpio
+import Kernel.Initramfs.Unpack qualified as Unpack
 import Kernel.Userspace.Loader qualified as Ldr
 import System.Exit (exitFailure)
 import Test.QuickCheck (Arbitrary (..), Property, choose, counterexample, property, quickCheckResult, vectorOf, (===))
@@ -45,6 +61,13 @@ checkQC :: (QC.Testable a) => String -> a -> IO Bool
 checkQC name prop = do
   r <- quickCheckResult (QC.withMaxSuccess 200 prop)
   let ok = QC.isSuccess r
+  putStrLn ((if ok then "PASS " else "FAIL ") ++ name)
+  return ok
+
+-- | Run one named IO check (H actions via runH); prints PASS/FAIL.
+checkIO :: String -> IO Bool -> IO Bool
+checkIO name act = do
+  ok <- act
   putStrLn ((if ok then "PASS " else "FAIL ") ++ name)
   return ok
 
@@ -166,6 +189,243 @@ dnsFakeResponse xid q
           answer = [0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 93, 184, 216, 34]
        in Just (hdr ++ question ++ answer)
 
+-- VFS routing goldens (fake backends, no pages/QEMU) ---------------------------
+
+{- | In-memory 'FsOps' backend over IORefs (files + dir set, normalized
+paths). Exercises the VFS routing contract without RamFS pages, which
+need real FFI-backed page allocation.
+-}
+newMemBackend :: IO Vfs.FsOps
+newMemBackend = do
+  files <- newIORef (Map.empty :: Map.Map FilePath [Word8])
+  dirs <- newIORef (Set.singleton "/" :: Set.Set FilePath)
+  return
+    Vfs.FsOps {
+      Vfs.opsInit = HM.liftIO (writeIORef files Map.empty >> writeIORef dirs (Set.singleton "/"))
+      , Vfs.opsCreate = \p -> HM.liftIO $ case norm p of
+          Left e -> return (Left e)
+          Right (np, cs)
+            | null cs -> return (Left (Vfs.EINVAL "cannot create root"))
+            | otherwise -> do
+                fs <- readIORef files
+                ds <- readIORef dirs
+                if Map.member np fs || Set.member np ds
+                  then return (Left Vfs.EEXIST)
+                  else do
+                    let par = parentOf cs
+                    if Map.member par fs
+                      then return (Left Vfs.ENOTDIR)
+                      else
+                        if Set.member par ds
+                          then writeIORef files (Map.insert np [] fs) >> return (Right ())
+                          else return (Left Vfs.ENOENT)
+      , Vfs.opsMkdir = \p -> HM.liftIO $ case norm p of
+          Left e -> return (Left e)
+          Right (np, cs)
+            | null cs -> return (Left Vfs.EEXIST)
+            | otherwise -> do
+                fs <- readIORef files
+                ds <- readIORef dirs
+                if Map.member np fs || Set.member np ds
+                  then return (Left Vfs.EEXIST)
+                  else do
+                    let par = parentOf cs
+                    if Map.member par fs
+                      then return (Left Vfs.ENOTDIR)
+                      else
+                        if Set.member par ds
+                          then writeIORef dirs (Set.insert np ds) >> return (Right ())
+                          else return (Left Vfs.ENOENT)
+      , Vfs.opsWrite = \p bs -> HM.liftIO $ case norm p of
+          Left e -> return (Left e)
+          Right (np, cs)
+            | null cs -> return (Left Vfs.EISDIR)
+            | otherwise -> do
+                fs <- readIORef files
+                ds <- readIORef dirs
+                if Set.member np ds
+                  then return (Left Vfs.EISDIR)
+                  else do
+                    let par = parentOf cs
+                    if Map.member par fs
+                      then return (Left Vfs.ENOTDIR)
+                      else
+                        if Set.member par ds
+                          then writeIORef files (Map.insert np bs fs) >> return (Right ())
+                          else return (Left Vfs.ENOENT)
+      , Vfs.opsRead = \p -> HM.liftIO $ case norm p of
+          Left e -> return (Left e)
+          Right (np, _) -> do
+            fs <- readIORef files
+            ds <- readIORef dirs
+            case Map.lookup np fs of
+              Just bs -> return (Right bs)
+              Nothing
+                | Set.member np ds -> return (Left Vfs.EISDIR)
+                | otherwise -> return (Left Vfs.ENOENT)
+      , Vfs.opsLs = \p -> HM.liftIO $ case norm p of
+          Left e -> return (Left e)
+          Right (np, _) -> do
+            fs <- readIORef files
+            ds <- readIORef dirs
+            if Map.member np fs
+              then return (Left Vfs.ENOTDIR)
+              else
+                if Set.member np ds
+                  then return (Right (childrenOf np fs ds))
+                  else return (Left Vfs.ENOENT)
+      , Vfs.opsRm = \p -> HM.liftIO $ case norm p of
+          Left e -> return (Left e)
+          Right (np, cs)
+            | null cs -> return (Left (Vfs.EINVAL "cannot remove root"))
+            | otherwise -> do
+                fs <- readIORef files
+                ds <- readIORef dirs
+                if Map.member np fs
+                  then writeIORef files (Map.delete np fs) >> return (Right ())
+                  else
+                    if Set.member np ds
+                      then
+                        if null (childrenOf np fs ds)
+                          then writeIORef dirs (Set.delete np ds) >> return (Right ())
+                          else return (Left (Vfs.EINVAL "directory not empty"))
+                      else return (Left Vfs.ENOENT)
+      , Vfs.opsStat = \p -> HM.liftIO $ case norm p of
+          Left e -> return (Left e)
+          Right (np, _) -> do
+            fs <- readIORef files
+            ds <- readIORef dirs
+            case Map.lookup np fs of
+              Just bs -> return (Right (Vfs.FsStat False (length bs) ((length bs + 4095) `div` 4096)))
+              Nothing
+                | Set.member np ds -> return (Right (Vfs.FsStat True 0 (length (childrenOf np fs ds))))
+                | otherwise -> return (Left Vfs.ENOENT)
+      }
+  where
+    norm p = case Vfs.splitPath p of
+      Left e -> Left e
+      Right cs -> Right (Vfs.joinRel cs, cs)
+    parentOf cs = Vfs.joinRel (if null cs then [] else init cs)
+    childrenOf np fs ds =
+      Set.toList
+        ( Set.fromList [last pcs | (fp, _) <- Map.toList fs, let pcs = compsOf fp, not (null pcs), parentOf pcs == np]
+            `Set.union` Set.fromList [last dcs | d <- Set.toList ds, d /= np, let dcs = compsOf d, not (null dcs), parentOf dcs == np]
+        )
+    compsOf fp = case Vfs.splitPath fp of
+      Right cs -> cs
+      Left _ -> []
+
+-- | Longest-prefix dispatch: /blk writes land in backend B, invisible in A.
+vfsPrefixGolden :: IO Bool
+vfsPrefixGolden = do
+  a <- newMemBackend
+  b <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" a
+    _ <- Vfs.vfsMount ns "/blk" b
+    _ <- Vfs.vfsWrite ns "/a" [1, 2, 3]
+    _ <- Vfs.vfsWrite ns "/blk/b" [4, 5]
+    ra <- Vfs.vfsRead ns "/a"
+    rb <- Vfs.vfsRead ns "/blk/b"
+    da <- Vfs.opsRead a "/blk/b"
+    db <- Vfs.opsRead b "/b"
+    return (ra == Right [1, 2, 3] && rb == Right [4, 5] && isLeft da && db == Right [4, 5])
+
+-- | @..@ never escapes the mount: /blk/../who resolves in the root backend.
+vfsDotDotGolden :: IO Bool
+vfsDotDotGolden = do
+  a <- newMemBackend
+  b <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" a
+    _ <- Vfs.vfsMount ns "/blk" b
+    _ <- Vfs.vfsWrite ns "/who" [65]
+    _ <- Vfs.vfsWrite ns "/blk/who" [66]
+    r <- Vfs.vfsRead ns "/blk/../who"
+    return (r == Right [65])
+
+{- | A mount in a forked namespace is invisible in the parent: the same
+path reads through the parent's root backend (ENOENT) and the child's
+mount (bytes). With @/@ mounted every path resolves, so invisibility
+is asserted at read level, not lookup level.
+-}
+vfsForkGolden :: IO Bool
+vfsForkGolden = do
+  a <- newMemBackend
+  b <- newMemBackend
+  HM.runH $ do
+    nsP <- Vfs.nsCreate
+    _ <- Vfs.vfsMount nsP "/" a
+    child <- Vfs.nsFork nsP
+    _ <- Vfs.vfsMount child "/extra" b
+    _ <- Vfs.vfsWrite child "/extra/secret" [7]
+    rp <- Vfs.vfsRead nsP "/extra/secret"
+    rc <- Vfs.vfsRead child "/extra/secret"
+    return (isLeft rp && rc == Right [7])
+
+-- | Byte fidelity through routing: all 256 values + NUL + empty.
+vfsBytesGolden :: IO Bool
+vfsBytesGolden = do
+  a <- newMemBackend
+  let allBs = [0 .. 255] :: [Word8]
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" a
+    _ <- Vfs.vfsWrite ns "/all" allBs
+    _ <- Vfs.vfsWrite ns "/empty" []
+    ra <- Vfs.vfsRead ns "/all"
+    re <- Vfs.vfsRead ns "/empty"
+    return (ra == Right allBs && re == Right [])
+
+-- Initramfs goldens (cpio newc + unpack + manifest + quota) ---------------------
+
+-- | Fixture: dir, text file, all-256 binary, empty file, skipped symlink.
+cpioGood :: [Cpio.CpioEntry]
+cpioGood =
+  [ Cpio.mkCpioDir "etc"
+  , Cpio.mkCpioFile "etc/house-servers" [104, 105]
+  , Cpio.mkCpioFile "all" [0 .. 255]
+  , Cpio.mkCpioFile "empty" []
+  , Cpio.CpioEntry "link" 0o120777 [120]
+  ]
+
+{- | Exact newc bytes for one tiny file (pins the 110-byte-header
+alignment: names end at offset 2 mod 4, pads restore 4-alignment).
+-}
+cpioTinyGolden :: [Word8]
+cpioTinyGolden =
+  [48, 55, 48, 55, 48, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 56, 49, 97, 52, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 48, 48, 48, 48, 48, 48, 48, 48, 102, 0, 9, 0, 0, 0, 48, 55, 48, 55, 48, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 98, 48, 48, 48, 48, 48, 48, 48, 48, 84, 82, 65, 73, 76, 69, 82, 33, 33, 33, 0, 0, 0, 0]
+
+-- | Encode/parse round-trip preserves every entry byte-for-byte.
+cpioRoundTrip :: Bool
+cpioRoundTrip = Cpio.parseCpio (Cpio.encodeCpio cpioGood) == Right cpioGood
+
+{- | Unpack through VFS routing: dirs before files, `./` confined,
+symlink skipped, payloads byte-exact.
+-}
+unpackGolden :: IO Bool
+unpackGolden = do
+  a <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" a
+    r <- Unpack.unpackEntries ns cpioGood
+    back <- Vfs.vfsRead ns "/etc/house-servers"
+    allB <- Vfs.vfsRead ns "/all"
+    return (r == Right 3 && back == Right [104, 105] && allB == Right [0 .. 255])
+
+-- | Over-quota write is refused without mutating the FS.
+ramfsQuotaGolden :: IO Bool
+ramfsQuotaGolden = HM.runH $ do
+  RamFs.ramfsInit
+  RamFs.ramfsSetQuotaPages 1
+  r <- RamFs.ramfsWrite "/big" (replicate 5000 0)
+  used <- RamFs.ramfsUsedPages
+  RamFs.ramfsInit
+  return (r == Left Vfs.ENOSPC && used == 0)
+
 -- Main ----------------------------------------------------------------------
 
 main :: IO ()
@@ -226,6 +486,34 @@ main = do
       , check "vfs ns isolation" (Vfs.resolvePrefix [([], "ram")] ["mnt", "x"] == Just ("ram", ["mnt", "x"]) && Vfs.resolvePrefix [(["mnt"], "blk"), ([], "ram")] ["mnt", "x"] == Just ("blk", ["x"]))
       , assertLeft "vfs mount relative" (Vfs.normalizeMount "ram")
       , check "vfs headerTotal" (case BP.encodeImage [("/a", [1, 2, 3])] of Left _ -> False; Right img -> BP.headerTotal img == Right (length img))
+      , checkIO "vfs prefix routing" vfsPrefixGolden
+      , checkIO "vfs dotdot per-backend" vfsDotDotGolden
+      , checkIO "vfs nsFork invisibility" vfsForkGolden
+      , checkIO "vfs bytes all-256" vfsBytesGolden
+      , check "cpio round-trip all-256" cpioRoundTrip
+      , check "cpio tiny exact bytes" (Cpio.encodeCpio [Cpio.mkCpioFile "f" [9]] == cpioTinyGolden)
+      , check "cpio tiny parses back" (Cpio.parseCpio cpioTinyGolden == Right [Cpio.mkCpioFile "f" [9]])
+      , assertLeft "cpio bad magic" (Cpio.parseCpio [0, 1, 2, 3, 4, 5, 6])
+      , assertLeft "cpio truncated header" (Cpio.parseCpio ([48, 55, 48, 55, 48, 49] ++ replicate 10 0))
+      , assertLeft "cpio empty missing trailer" (Cpio.parseCpio [])
+      , assertLeft "cpio traversal" (Cpio.parseCpio (Cpio.encodeCpio [Cpio.mkCpioFile "../evil" [1]]))
+      , assertLeft "cpio absolute" (Cpio.parseCpio (Cpio.encodeCpio [Cpio.mkCpioFile "/abs" [1]]))
+      , assertLeft "cpio NUL name" (Cpio.parseCpio (Cpio.encodeCpio [Cpio.mkCpioFile "a\0b" [1]]))
+      , assertLeft "cpio long name" (Cpio.parseCpio (Cpio.encodeCpio [Cpio.mkCpioFile (replicate 256 'a') [1]]))
+      , assertLeft "cpio big file" (Cpio.parseCpio (Cpio.encodeCpio [Cpio.mkCpioFile "big" (replicate (1024 * 1024 + 1) 0)]))
+      , checkIO "cpio unpack via VFS" unpackGolden
+      , check "manifest good" (Unpack.parseManifest "# c\nhello /sbin/init init\n" == Right [("hello", "/sbin/init", "init")])
+      , assertLeft "manifest bad line" (Unpack.parseManifest "oops\n")
+      , assertLeft "manifest traversal" (Unpack.parseManifest "x /a/../b y\n")
+      , assertLeft "manifest relative" (Unpack.parseManifest "x sbin/init y\n")
+      , assertLeft "manifest too many" (Unpack.parseManifest (unlines (replicate 65 "a /b c")))
+      , check "quota floor 16M" (RamFs.quotaPagesFor 0 == (16 * 1024 * 1024) `div` 4096)
+      , check "quota 512M" (RamFs.quotaPagesFor (512 * 1024 * 1024) == 13107)
+      , check "quota 4G" (RamFs.quotaPagesFor (4 * 1024 * 1024 * 1024) == 104857)
+      , checkIO "ramfs over-quota refused" ramfsQuotaGolden
+      , check "blk bytes all-256 round-trip" (case BP.encodeImage [("/all", [0 .. 255])] of Left _ -> False; Right img -> BP.decodeImage img == Right [("/all", [0 .. 255])])
+      , check "blk bytes NUL+high round-trip" (case BP.encodeImage [("/b", [0, 128, 255, 0, 1])] of Left _ -> False; Right img -> BP.decodeImage img == Right [("/b", [0, 128, 255, 0, 1])])
+      , check "latin1 edge round-trip" (let enc s = [fromIntegral (ord c `mod` 256) :: Word8 | c <- s]; dec bs = [chr (fromIntegral b) | b <- bs]; s = dec [0 .. 255] in dec (enc s) == s)
       , -- splitPath goldens
         check "splitPath a/b" (FS.splitPath "/a/b" == Right ["a", "b"])
       , check "splitPath collapse" (FS.splitPath "/a//b" == Right ["a", "b"])

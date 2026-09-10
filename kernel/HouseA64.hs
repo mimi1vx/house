@@ -8,7 +8,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (forM_, void, when)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
-import Data.Char (chr)
+import Data.Char (chr, ord)
 import Data.List (isPrefixOf)
 import Data.Word (Word8)
 import Foreign.C.String (withCString)
@@ -46,6 +46,7 @@ import qualified Kernel.IPC.Endpoint as IPC
 import qualified Kernel.IPC.Grant as G
 import qualified Kernel.IPC.Nameservice as NS
 import Kernel.IPC.Types (EndpointId (..), Message (..))
+import qualified Kernel.Initramfs as Initrd
 import qualified Kernel.LineEditor as LE
 import qualified Kernel.SMP as SMP
 import Kernel.Shell.Foreign (c_uart_puts, conMirror)
@@ -2737,6 +2738,15 @@ spinBytes = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0, 
 
 foreign export ccall house_main :: IO ()
 
+{- | Shell-edge Latin-1 codec. File content is bytes end-to-end; text
+verbs ('cat', 'write', 'echo >') convert here, nowhere inside VFS.
+-}
+encodeLatin1 :: String -> [Word8]
+encodeLatin1 s = [fromIntegral (ord c `mod` 256) | c <- s]
+
+decodeLatin1 :: [Word8] -> String
+decodeLatin1 bs = [chr (fromIntegral b) | b <- bs]
+
 house_main :: IO ()
 house_main = do
   caps0 <- getNumCapabilities
@@ -2749,6 +2759,47 @@ house_main = do
   editor <- runH (LE.newEditor kbd console)
   _ <- runH (FS.vfsMount FS.defaultNamespace "/" RamFs.ramfsOps)
   _ <- runH (FS.vfsInit FS.defaultNamespace)
+  _ <- runH Dmesg.dmesgInit
+  _ <- runH (Dmesg.dmesgLog "House driver framework online")
+  -- initramfs via QEMU -initrd: unpack wins, embedded seeding fills gaps
+  mInitrd <- runH Initrd.probeInitrd
+  case mInitrd of
+    Nothing -> return ()
+    Just bs -> case Initrd.parseCpio bs of
+      Left err -> do
+        withCString ("initramfs: parse fail " ++ show err ++ "\n") c_uart_puts
+        runH (Dmesg.dmesgLog ("initramfs: parse fail " ++ show err))
+      Right entries -> do
+        r <- runH (Initrd.unpackEntries FS.defaultNamespace entries)
+        case r of
+          Left e -> do
+            withCString ("initramfs: unpack fail " ++ showFsError e ++ "\n") c_uart_puts
+            runH (Dmesg.dmesgLog ("initramfs: unpack fail " ++ showFsError e))
+          Right nFiles -> do
+            withCString ("initramfs: " ++ show nFiles ++ " files\n") c_uart_puts
+            runH (Dmesg.dmesgLog ("initramfs: " ++ show nFiles ++ " files"))
+            rInit <- runH $ do
+              mBytes <- FS.vfsRead FS.defaultNamespace "/sbin/init"
+              case mBytes of
+                Left _ -> return (Left "no init")
+                Right bytes -> case ULdr.loadElf bytes of
+                  Left le -> return (Left (toExecError le))
+                  Right elf -> do
+                    res <- U.runElf elf ["/sbin/init"] ["HOUSE=1", "PATH=/bin"]
+                    case res of
+                      Left le2 -> return (Left (toExecError le2))
+                      Right (U.Pid n) -> return (Right n)
+            case rInit of
+              Left e -> do
+                withCString ("initramfs: init fail " ++ e ++ "\n") c_uart_puts
+                runH (Dmesg.dmesgLog ("initramfs: init fail " ++ e))
+              Right n -> do
+                withCString ("init pid " ++ show n ++ "\n") c_uart_puts
+                _ <- forkIO $ do
+                  code <- runH (U.waitPid (U.Pid n))
+                  withCString ("init exit " ++ show code ++ "\n") c_uart_puts
+                  runH (Dmesg.dmesgLog ("init exit " ++ show code))
+                return ()
   -- bootstrap /bin/hello + /bin/argenv + /bin/yield + /bin/ipc_pp + /bin/cat + /bin/brk + /bin/fork + /bin/exec + /bin/spin + /probe.txt from embedded bytes if missing
   _ <- runH $ do
     r <- FS.vfsStat FS.defaultNamespace "/bin/hello"
@@ -2756,81 +2807,114 @@ house_main = do
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt = map (chr . fromIntegral) helloBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/hello" txt
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/hello" helloBytes
         return ()
     r2 <- FS.vfsStat FS.defaultNamespace "/bin/argenv"
     case r2 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt2 = map (chr . fromIntegral) argenvBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/argenv" txt2
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/argenv" argenvBytes
         return ()
     r3 <- FS.vfsStat FS.defaultNamespace "/bin/yield"
     case r3 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt3 = map (chr . fromIntegral) yieldBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/yield" txt3
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/yield" yieldBytes
         return ()
     r4 <- FS.vfsStat FS.defaultNamespace "/bin/ipc_pp"
     case r4 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt4 = map (chr . fromIntegral) ipcPpBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/ipc_pp" txt4
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/ipc_pp" ipcPpBytes
         return ()
     r5 <- FS.vfsStat FS.defaultNamespace "/bin/cat"
     case r5 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt5 = map (chr . fromIntegral) catBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/cat" txt5
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/cat" catBytes
         return ()
     r6 <- FS.vfsStat FS.defaultNamespace "/bin/brk"
     case r6 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt6 = map (chr . fromIntegral) brkBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/brk" txt6
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/brk" brkBytes
         return ()
     r7 <- FS.vfsStat FS.defaultNamespace "/probe.txt"
     case r7 of
       Right _ -> return ()
       Left _ -> do
-        _ <- FS.vfsWrite FS.defaultNamespace "/probe.txt" "hello fd el0\n"
+        _ <- FS.vfsWrite FS.defaultNamespace "/probe.txt" (encodeLatin1 "hello fd el0\n")
         return ()
     r8 <- FS.vfsStat FS.defaultNamespace "/bin/fork"
     case r8 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt8 = map (chr . fromIntegral) forkBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/fork" txt8
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/fork" forkBytes
         return ()
     r9 <- FS.vfsStat FS.defaultNamespace "/bin/exec"
     case r9 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt9 = map (chr . fromIntegral) execBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/exec" txt9
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/exec" execBytes
         return ()
     r10 <- FS.vfsStat FS.defaultNamespace "/bin/spin"
     case r10 of
       Right _ -> return ()
       Left _ -> do
         _ <- FS.vfsMkdir FS.defaultNamespace "/bin"
-        let txt10 = map (chr . fromIntegral) spinBytes
-        _ <- FS.vfsWrite FS.defaultNamespace "/bin/spin" txt10
+        _ <- FS.vfsWrite FS.defaultNamespace "/bin/spin" spinBytes
         return ()
-  _ <- runH Dmesg.dmesgInit
-  _ <- runH (Dmesg.dmesgLog "House driver framework online")
+  -- server manifest from initramfs: register + spawn EL0 servers
+  mManifest <- runH (FS.vfsRead FS.defaultNamespace "/etc/house-servers")
+  case mManifest of
+    Left _ -> return ()
+    Right bytes -> case Initrd.parseManifest (decodeLatin1 bytes) of
+      Left err -> do
+        withCString ("servers: manifest fail " ++ err ++ "\n") c_uart_puts
+        runH (Dmesg.dmesgLog ("servers: manifest fail " ++ err))
+      Right servers ->
+        forM_ servers $ \(name, path, epArg) -> do
+          r <- runH $ do
+            ep <- IPC.newEndpoint
+            res <- NS.nsRegister name ep
+            case res of
+              Left e -> do
+                IPC.freeEndpoint ep
+                return (Left (show e))
+              Right () -> do
+                mBytes <- FS.vfsRead FS.defaultNamespace path
+                case mBytes of
+                  Left e -> do
+                    _ <- NS.nsUnregister name
+                    IPC.freeEndpoint ep
+                    return (Left (showFsError e))
+                  Right elfBytes -> case ULdr.loadElf elfBytes of
+                    Left le -> do
+                      _ <- NS.nsUnregister name
+                      IPC.freeEndpoint ep
+                      return (Left (toExecError le))
+                    Right elf -> do
+                      sRes <- U.runElf elf [path, epArg] ["HOUSE=1", "PATH=/bin"]
+                      case sRes of
+                        Left le2 -> do
+                          _ <- NS.nsUnregister name
+                          IPC.freeEndpoint ep
+                          return (Left (toExecError le2))
+                        Right (U.Pid n) -> return (Right n)
+          case r of
+            Left e -> do
+              withCString ("server " ++ name ++ " fail " ++ e ++ "\n") c_uart_puts
+              runH (Dmesg.dmesgLog ("server " ++ name ++ " fail " ++ e))
+            Right n -> do
+              withCString ("server " ++ name ++ " pid " ++ show n ++ "\n") c_uart_puts
+              runH (Dmesg.dmesgLog ("server " ++ name ++ " pid " ++ show n))
   -- Link driver GIC/IRQ helpers into closure (probe-only track keeps them unused at runtime)
   _ <- runH (void (return (DGIC.enableSpi, DGIC.disableSpi, DIRQ.registerIrqForwarding)))
   loop editor
@@ -2948,7 +3032,7 @@ house_main = do
       (pre, _ : rest) -> case rest of
         [] -> withCString "EINVAL: missing target after >\n" c_uart_puts
         (target : _) -> do
-          r <- runH (FS.vfsWrite FS.defaultNamespace target (unwords pre))
+          r <- runH (FS.vfsWrite FS.defaultNamespace target (encodeLatin1 (unwords pre)))
           case r of
             Left e -> withCString (showFsError e ++ "\n") c_uart_puts
             Right () -> return ()
@@ -2982,7 +3066,7 @@ house_main = do
       r <- runH (FS.vfsRead FS.defaultNamespace p)
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
-        Right s -> withCString (s ++ "\n") c_uart_puts
+        Right bs -> withCString (decodeLatin1 bs ++ "\n") c_uart_puts
     handleMkdir p = do
       r <- runH (FS.vfsMkdir FS.defaultNamespace p)
       case r of
@@ -2999,7 +3083,7 @@ house_main = do
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right st -> withCString (show st ++ "\n") c_uart_puts
     handleWrite p txt = do
-      r <- runH (FS.vfsWrite FS.defaultNamespace p txt)
+      r <- runH (FS.vfsWrite FS.defaultNamespace p (encodeLatin1 txt))
       case r of
         Left e -> withCString (showFsError e ++ "\n") c_uart_puts
         Right () -> return ()
@@ -3065,7 +3149,7 @@ house_main = do
           Left _ -> return (Left ("not found: " ++ name))
           Right ep -> do
             let (EndpointId w) = IPC.endpointId ep
-            mBytes <- FS.vfsReadBytes FS.defaultNamespace "/bin/ipc_pp"
+            mBytes <- FS.vfsRead FS.defaultNamespace "/bin/ipc_pp"
             case mBytes of
               Left e -> return (Left (showFsError e))
               Right bytes -> case ULdr.loadElf bytes of
@@ -3333,7 +3417,7 @@ house_main = do
     handleForktest = do
       r <- runH $ do
         refs0 <- U.cowLiveCount
-        mBytes <- FS.vfsReadBytes FS.defaultNamespace "/bin/hello"
+        mBytes <- FS.vfsRead FS.defaultNamespace "/bin/hello"
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> case ULdr.loadElf bytes of
@@ -3395,7 +3479,7 @@ house_main = do
         case mFd of
           Left e -> return (Left (U.fdErrorToString e))
           Right fd -> do
-            w <- U.fdWrite shellPid fd "hello fd"
+            w <- U.fdWrite shellPid fd (encodeLatin1 "hello fd")
             case w of
               Left e -> do _ <- U.fdClose shellPid fd; return (Left (U.fdErrorToString e))
               Right _ -> do
@@ -3406,19 +3490,19 @@ house_main = do
                     c <- U.fdRead shellPid fd 64
                     case c of
                       Left e -> do _ <- U.fdClose shellPid fd; return (Left (U.fdErrorToString e))
-                      Right txt -> do
+                      Right bytes -> do
                         _ <- U.fdClose shellPid fd
                         -- cross-pid isolation: shell pid 1 never owns fd 3
                         x <- U.fdRead (U.Pid 1) fd 1
                         case x of
-                          Left _ -> if txt == "hello fd" then return (Right ()) else return (Left ("mismatch: " ++ txt))
+                          Left _ -> if decodeLatin1 bytes == "hello fd" then return (Right ()) else return (Left ("mismatch: " ++ decodeLatin1 bytes))
                           Right _ -> return (Left "cross-pid fd leaked")
       case r of
         Left e -> withCString ("fdtest fail " ++ e ++ "\n") c_uart_puts
         Right () -> withCString "fdtest ok\n" c_uart_puts
     handleRun path args = do
       r <- runH $ do
-        mBytes <- FS.vfsReadBytes FS.defaultNamespace path
+        mBytes <- FS.vfsRead FS.defaultNamespace path
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> do
@@ -3436,7 +3520,7 @@ house_main = do
         Right code -> withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
     handleSpawn path args = do
       r <- runH $ do
-        mBytes <- FS.vfsReadBytes FS.defaultNamespace path
+        mBytes <- FS.vfsRead FS.defaultNamespace path
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> do

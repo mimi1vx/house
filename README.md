@@ -106,6 +106,26 @@ Expect harnesses live under `scripts/qemu-*.exp`; the Make targets are their sta
 
 The aggregate `make check` gets clean firmware builds through its spike, IRQ, and House legs. Standalone focused checks generally reuse incremental artifacts. Clean `platform/aarch64` before manual platform builds, and also clean `kernel` before a manual House build.
 
+## Initramfs (`-initrd`)
+
+QEMU `-initrd build/initramfs.cpio` supplies a cpio newc archive via
+`chosen/linux,initrd-start|end`, unpacked at boot into the default VFS
+namespace as `[Word8]` bytes (text decode lives at the shell edge only).
+Caps: archive ≤8 MiB, ≤512 files, names ≤255 chars, files ≤1 MiB;
+`..`/absolute/NUL names are rejected. RamFS enforces a page quota of
+10% of RAM (16 MiB floor) with `ENOSPC` + `dmesg` on refusal; `free`
+reports `ramfs used/quota`.
+
+```sh
+sh scripts/mkinitramfs.sh          # build/initramfs.cpio from initramfs-staging/
+make house-initrd-check            # unpack + /sbin/init + manifest, hvf+tcg
+```
+
+After unpack, `/sbin/init` spawns (exit logged, shell never blocks) and
+`/etc/house-servers` registers `name path endpoint` lines (≤64,
+`#` comments) in `ns ls` and spawns each ELF as a `runElf` child.
+Without `-initrd` the embedded `/bin/*` fallback is unchanged.
+
 ## Closure & extensions
 
 `kernel/Makefile` is the single source of truth:

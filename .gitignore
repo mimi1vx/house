@@ -2,3 +2,4 @@ kernel/build/
 kernel/test/dist-newstyle/
 platform/aarch64/build/
 rust/target/
+build/

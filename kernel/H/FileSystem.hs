@@ -19,7 +19,6 @@ module H.FileSystem (
   fsLs,
   fsRm,
   fsStat,
-  fsReadBytes,
   splitPath,
   freePageCount,
 )
@@ -39,7 +38,6 @@ import Kernel.FileSystem.Vfs (
   vfsMkdir,
   vfsMount,
   vfsRead,
-  vfsReadBytes,
   vfsRm,
   vfsStat,
   vfsWrite,
@@ -57,15 +55,11 @@ fsCreate = vfsCreate defaultNamespace
 fsMkdir :: FilePath -> H (Either FsError ())
 fsMkdir = vfsMkdir defaultNamespace
 
-fsWrite :: FilePath -> String -> H (Either FsError ())
+fsWrite :: FilePath -> [Word8] -> H (Either FsError ())
 fsWrite = vfsWrite defaultNamespace
 
-fsRead :: FilePath -> H (Either FsError String)
+fsRead :: FilePath -> H (Either FsError [Word8])
 fsRead = vfsRead defaultNamespace
-
--- | Binary-safe read: raw bytes via peek, no Char round-trip.
-fsReadBytes :: FilePath -> H (Either FsError [Word8])
-fsReadBytes = vfsReadBytes defaultNamespace
 
 fsLs :: FilePath -> H (Either FsError [String])
 fsLs = vfsLs defaultNamespace

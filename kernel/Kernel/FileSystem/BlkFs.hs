@@ -22,7 +22,6 @@ module Kernel.FileSystem.BlkFs (
 )
 where
 
-import Data.Char (chr, ord)
 import Data.Either (fromRight)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -234,8 +233,7 @@ blkfsSave slot = do
               eR <- vfsRead defaultNamespace full
               case eR of
                 Left e -> return (Left e)
-                Right s -> do
-                  let bs = map (\c -> fromIntegral (ord c `mod` 256) :: Word8) s
+                Right bs -> do
                   r <- walkNames dir ns
                   case r of
                     Left e -> return (Left e)
@@ -256,8 +254,7 @@ blkfsRestore slot = do
     go [] = return (Right ())
     go ((p, bs) : rest) = do
       mapM_ ensureDir (parentDirs p)
-      let s = map (chr . fromIntegral) bs
-      r <- vfsWrite defaultNamespace p s
+      r <- vfsWrite defaultNamespace p bs
       case r of
         Left e -> return (Left e)
         Right () -> go rest
@@ -288,7 +285,6 @@ blkfsOps slot =
     , opsMkdir = blkMkdir slot
     , opsWrite = blkWrite slot
     , opsRead = blkRead slot
-    , opsReadBytes = blkReadBytes slot
     , opsLs = blkLs slot
     , opsRm = blkRm slot
     , opsStat = blkStat slot
@@ -338,7 +334,7 @@ blkMkdir slot path = case pathComps path of
                 rememberDir slot cs
                 return (Right ())
 
-blkWrite :: Int -> FilePath -> String -> H (Either FsError ())
+blkWrite :: Int -> FilePath -> [Word8] -> H (Either FsError ())
 blkWrite slot path content = case pathComps path of
   Left e -> return (Left e)
   Right [] -> return (Left EISDIR)
@@ -356,9 +352,8 @@ blkWrite slot path content = case pathComps path of
             | otherwise -> case fileAt files cs of
                 Just _ | cs `elem` cached -> return (Left EISDIR)
                 _ ->
-                  let bs = map (\c -> fromIntegral (ord c `mod` 256) :: Word8) content
-                      without = filter (\(p, _) -> p /= render cs) files
-                   in storeFiles slot ((render cs, bs) : without)
+                  let without = filter (\(p, _) -> p /= render cs) files
+                   in storeFiles slot ((render cs, content) : without)
   where
     render [] = "/"
     render xs = "/" ++ joinWith "/" xs
@@ -366,15 +361,8 @@ blkWrite slot path content = case pathComps path of
     joinWith _ [x] = x
     joinWith s (x : xs) = x ++ s ++ joinWith s xs
 
-blkRead :: Int -> FilePath -> H (Either FsError String)
-blkRead slot path = do
-  r <- blkReadBytes slot path
-  case r of
-    Left e -> return (Left e)
-    Right bs -> return (Right (map (chr . fromIntegral) bs))
-
-blkReadBytes :: Int -> FilePath -> H (Either FsError [Word8])
-blkReadBytes slot path = case pathComps path of
+blkRead :: Int -> FilePath -> H (Either FsError [Word8])
+blkRead slot path = case pathComps path of
   Left e -> return (Left e)
   Right cs -> do
     eFiles <- loadFiles slot

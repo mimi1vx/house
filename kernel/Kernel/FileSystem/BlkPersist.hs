@@ -71,6 +71,15 @@ safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x : _) = Just x
 
+{- | Path-name codec: names stay 'String', so paths convert at the codec
+edge (Latin-1, matching the shell edge). File *content* is bytes.
+-}
+pathToBytes :: FilePath -> [Word8]
+pathToBytes p = [fromIntegral (ord c) | c <- p]
+
+bytesToPath :: [Word8] -> FilePath
+bytesToPath bs = [chr (fromIntegral b) | b <- bs]
+
 -- | Pure encode. Total; caps enforced before allocation. Emits v2.
 encodeImage :: [(FilePath, [Word8])] -> Either String [Word8]
 encodeImage files
@@ -86,7 +95,7 @@ encodeImage files
   where
     badPath (p, _) = null p || length p > maxPathLen || safeHead p /= Just '/'
     encodeOne (p, bs) =
-      let pb = map (fromIntegral . ord) p
+      let pb = pathToBytes p
        in word16LE (length pb) ++ pb ++ word32LE (fromIntegral (length bs)) ++ bs
 
 safeIndex :: [Word8] -> Int -> Maybe Word8
@@ -166,7 +175,7 @@ decodeImage bytes = case decodeHeader bytes of
         | toInteger off + 2 + toInteger plen + 4 > toInteger (length img) -> Left "truncated entry"
         | otherwise ->
             let pbs = take plen (drop (off + 2) img)
-                path = map (chr . fromIntegral) pbs
+                path = bytesToPath pbs
              in if null path || safeHead path /= Just '/' || elem 0 pbs
                   then Left "bad path"
                   else case getU32 (off + 2 + plen) img of
@@ -249,8 +258,7 @@ collectAll = go ["/"] []
               eR <- VFS.vfsRead VFS.defaultNamespace full
               case eR of
                 Left e -> return (Left e)
-                Right s -> do
-                  let bs = map (\c -> fromIntegral (ord c `mod` 256) :: Word8) s
+                Right bs -> do
                   r <- walkNames dir ns
                   case r of
                     Left e -> return (Left e)
@@ -305,8 +313,7 @@ persistRestore slot = do
     go [] = return (Right ())
     go ((p, bs) : rest) = do
       mapM_ ensureDir (parentDirs p)
-      let s = map (chr . fromIntegral) bs
-      r <- VFS.vfsWrite VFS.defaultNamespace p s
+      r <- VFS.vfsWrite VFS.defaultNamespace p bs
       case r of
         Left e -> return (Left (PersistFs e))
         Right () -> go rest

@@ -15,6 +15,7 @@ import Foreign.Storable (peek)
 import GHC.Conc (getNumCapabilities, getNumProcessors)
 import H.Monad (runH)
 import qualified H.Pages as HPages
+import qualified Kernel.FileSystem.RamFs as RamFs
 import Kernel.Shell.Foreign (
   c_bank_count,
   c_bank_get,
@@ -35,6 +36,8 @@ import Kernel.Shell.Format (showHex, showHex64)
 handleFree :: IO ()
 handleFree = do
   fc <- runH HPages.freePageCount
+  ru <- runH RamFs.ramfsUsedPages
+  rq <- runH RamFs.ramfsQuotaPages
   tot <- c_buddy_total
   freeB <- c_buddy_free
   ram <- peek c_ram_ref
@@ -45,7 +48,7 @@ handleFree = do
     c_mem_stats pTot pFree
     t <- peek pTot
     f <- peek pFree
-    withCString ("free: H.Pages=" ++ show fc ++ " buddy " ++ show freeB ++ "/" ++ show tot ++ " mem " ++ show f ++ "/" ++ show t ++ " ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " smp=" ++ show smpV ++ "\n") c_uart_puts
+    withCString ("free: H.Pages=" ++ show fc ++ " ramfs " ++ show ru ++ "/" ++ show rq ++ "p buddy " ++ show freeB ++ "/" ++ show tot ++ " mem " ++ show f ++ "/" ++ show t ++ " ram " ++ show (ram `div` (1024 * 1024)) ++ "M src=" ++ src ++ " smp=" ++ show smpV ++ "\n") c_uart_puts
 
 handleMem :: IO ()
 handleMem = do

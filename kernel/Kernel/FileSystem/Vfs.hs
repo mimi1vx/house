@@ -39,7 +39,6 @@ module Kernel.FileSystem.Vfs (
   vfsMkdir,
   vfsWrite,
   vfsRead,
-  vfsReadBytes,
   vfsLs,
   vfsRm,
   vfsStat,
@@ -77,14 +76,16 @@ data FsStat = FsStat {
   }
   deriving (Eq, Show)
 
--- | Backend interface. Paths are backend-relative absolute paths.
+{- | Backend interface. Paths are backend-relative absolute paths.
+File content is bytes end-to-end; text encode/decode lives at the
+shell edge only.
+-}
 data FsOps = FsOps {
   opsInit :: H ()
   , opsCreate :: FilePath -> H (Either FsError ())
   , opsMkdir :: FilePath -> H (Either FsError ())
-  , opsWrite :: FilePath -> String -> H (Either FsError ())
-  , opsRead :: FilePath -> H (Either FsError String)
-  , opsReadBytes :: FilePath -> H (Either FsError [Word8])
+  , opsWrite :: FilePath -> [Word8] -> H (Either FsError ())
+  , opsRead :: FilePath -> H (Either FsError [Word8])
   , opsLs :: FilePath -> H (Either FsError [String])
   , opsRm :: FilePath -> H (Either FsError ())
   , opsStat :: FilePath -> H (Either FsError FsStat)
@@ -285,26 +286,19 @@ vfsMkdir ns path = do
     Left e -> return (Left e)
     Right (ops, rel) -> opsMkdir ops rel
 
-vfsWrite :: NamespaceId -> FilePath -> String -> H (Either FsError ())
+vfsWrite :: NamespaceId -> FilePath -> [Word8] -> H (Either FsError ())
 vfsWrite ns path content = do
   r <- vfsLookup ns path
   case r of
     Left e -> return (Left e)
     Right (ops, rel) -> opsWrite ops rel content
 
-vfsRead :: NamespaceId -> FilePath -> H (Either FsError String)
+vfsRead :: NamespaceId -> FilePath -> H (Either FsError [Word8])
 vfsRead ns path = do
   r <- vfsLookup ns path
   case r of
     Left e -> return (Left e)
     Right (ops, rel) -> opsRead ops rel
-
-vfsReadBytes :: NamespaceId -> FilePath -> H (Either FsError [Word8])
-vfsReadBytes ns path = do
-  r <- vfsLookup ns path
-  case r of
-    Left e -> return (Left e)
-    Right (ops, rel) -> opsReadBytes ops rel
 
 vfsLs :: NamespaceId -> FilePath -> H (Either FsError [String])
 vfsLs ns path = do

@@ -570,3 +570,183 @@ pub unsafe extern "C" fn fdt_get_ram_bank(
     // SAFETY: dtb valid, idx in range, base/size non-null 8-byte aligned by caller.
     unsafe { ram_bank_at(dtb, idx, base, size).1 }
 }
+
+/// int fdt_get_initrd(const void *dtb, uint64_t *start, uint64_t *end)
+/// — 1 with chosen/linux,initrd-start|end, 0 when missing/invalid.
+///
+/// Trust boundary: `chosen` is QEMU-supplied hostile input; every offset,
+/// length, and name reference is bounds-checked before use, BE32→u64 via
+/// `checked_*`, fail-closed 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdt_get_initrd(dtb: *const u8, start: *mut u64, end: *mut u64) -> i32 {
+    if unsafe { fdt_valid(dtb) } == 0 || start.is_null() || end.is_null() {
+        return 0;
+    }
+    // SAFETY: dtb valid per fdt_valid, start/end non-null 8-byte slots by caller.
+    unsafe {
+        let base = dtb;
+        let totalsize = be32(base.add(4));
+        let off_struct = be32(base.add(8));
+        let off_strings = be32(base.add(12));
+        let size_strings = be32(base.add(32));
+        let size_struct = be32(base.add(36));
+        let mut struct_end = off_struct.checked_add(size_struct).unwrap_or(totalsize);
+        if struct_end > totalsize {
+            struct_end = totalsize;
+        }
+        // Strings block must sit inside the blob.
+        if off_strings.checked_add(size_strings).unwrap_or(u32::MAX) > totalsize {
+            return 0;
+        }
+        let mut stack_depth: i32 = 0;
+        let mut is_chosen_stack = [false; 16];
+        let mut have_start = false;
+        let mut have_end = false;
+        let mut v_start: u64 = 0;
+        let mut v_end: u64 = 0;
+        let mut p = off_struct;
+        let mut ok = true;
+        while ok && p.checked_add(4).unwrap_or(u32::MAX) <= struct_end {
+            let token = be32(base.add(p as usize));
+            p = p.wrapping_add(4);
+            if token == 0x1 {
+                // BEGIN_NODE
+                let name_ptr = base.add(p as usize) as *const u8;
+                let mut namelen: u32 = 0;
+                while p.checked_add(namelen).unwrap_or(u32::MAX) < totalsize
+                    && *base.add((p + namelen) as usize) != 0
+                {
+                    namelen += 1;
+                    if namelen > 64 {
+                        break;
+                    }
+                }
+                if p.checked_add(namelen).unwrap_or(u32::MAX) >= totalsize {
+                    ok = false;
+                    break;
+                }
+                namelen += 1;
+                // "chosen" as a direct child of root (depth 1 before push).
+                let is_chosen = if stack_depth == 1 {
+                    *name_ptr == b'c'
+                        && *name_ptr.add(1) == b'h'
+                        && *name_ptr.add(2) == b'o'
+                        && *name_ptr.add(3) == b's'
+                        && *name_ptr.add(4) == b'e'
+                        && *name_ptr.add(5) == b'n'
+                        && *name_ptr.add(6) == 0
+                } else {
+                    false
+                };
+                if stack_depth >= 0 && (stack_depth as usize) < 16 {
+                    is_chosen_stack[stack_depth as usize] = is_chosen;
+                }
+                stack_depth += 1;
+                if stack_depth > 16 {
+                    stack_depth = 16;
+                }
+                p = align4(p.wrapping_add(namelen));
+            } else if token == 0x2 {
+                if stack_depth > 0 {
+                    stack_depth -= 1;
+                }
+            } else if token == 0x3 {
+                if p.checked_add(8).unwrap_or(u32::MAX) > struct_end {
+                    ok = false;
+                    break;
+                }
+                let len = be32(base.add(p as usize));
+                p = p.wrapping_add(4);
+                let nameoff = be32(base.add(p as usize));
+                p = p.wrapping_add(4);
+                let prop_ptr = base.add(p as usize);
+                if p.checked_add(len).unwrap_or(u32::MAX) > struct_end {
+                    ok = false;
+                    break;
+                }
+                let cur_is_chosen = if stack_depth > 0 && (stack_depth as usize) <= 16 {
+                    is_chosen_stack[(stack_depth - 1) as usize]
+                } else {
+                    false
+                };
+                if cur_is_chosen && nameoff < size_strings {
+                    let s = base.add((off_strings + nameoff) as usize) as *const u8;
+                    // "linux,initrd-start" (17) / "linux,initrd-end" (15)
+                    let want_start: &[u8] = b"linux,initrd-start";
+                    let want_end: &[u8] = b"linux,initrd-end";
+                    let mut is_start = (len == 4 || len == 8)
+                        && nameoff
+                            .checked_add(want_start.len() as u32 + 1)
+                            .unwrap_or(u32::MAX)
+                            <= size_strings;
+                    if is_start {
+                        for i in 0..want_start.len() {
+                            if *s.add(i) != want_start[i] {
+                                is_start = false;
+                                break;
+                            }
+                        }
+                        if is_start && *s.add(want_start.len()) != 0 {
+                            is_start = false;
+                        }
+                    }
+                    let mut is_end = !is_start
+                        && (len == 4 || len == 8)
+                        && nameoff
+                            .checked_add(want_end.len() as u32 + 1)
+                            .unwrap_or(u32::MAX)
+                            <= size_strings;
+                    if is_end {
+                        for i in 0..want_end.len() {
+                            if *s.add(i) != want_end[i] {
+                                is_end = false;
+                                break;
+                            }
+                        }
+                        if is_end && *s.add(want_end.len()) != 0 {
+                            is_end = false;
+                        }
+                    }
+                    if is_start {
+                        v_start = if len == 8 {
+                            let hi = be32(prop_ptr);
+                            let lo = be32(prop_ptr.add(4));
+                            ((hi as u64) << 32) | lo as u64
+                        } else {
+                            be32(prop_ptr) as u64
+                        };
+                        have_start = true;
+                    } else if is_end {
+                        v_end = if len == 8 {
+                            let hi = be32(prop_ptr);
+                            let lo = be32(prop_ptr.add(4));
+                            ((hi as u64) << 32) | lo as u64
+                        } else {
+                            be32(prop_ptr) as u64
+                        };
+                        have_end = true;
+                    }
+                }
+                p = align4(p.wrapping_add(len));
+            } else if token == 0x4 {
+                continue;
+            } else if token == 0x9 {
+                break;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if !ok || !have_start || !have_end || v_end <= v_start {
+            return 0;
+        }
+        // len = end - start via checked math; reject empty/huge windows here
+        // (caller re-validates against RAM + the 8M archive cap).
+        if v_end.checked_sub(v_start).is_none() {
+            return 0;
+        }
+        *start = v_start;
+        *end = v_end;
+        1
+    }
+}

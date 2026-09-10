@@ -47,6 +47,8 @@ test-suite house-pure
     Kernel.FileSystem.BlkFs
     Kernel.FileSystem.RamFs
     Kernel.FileSystem.Vfs
+    Kernel.Initramfs.Cpio
+    Kernel.Initramfs.Unpack
     Kernel.IPC.Endpoint
     Kernel.IPC.Grant
     Kernel.IPC.Nameservice

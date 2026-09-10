@@ -1,0 +1,61 @@
+#!/usr/bin/expect -f
+# Initramfs test: boot with QEMU -initrd, assert unpack + /sbin/init + manifest.
+# Usage: expect scripts/qemu-initramfs.exp <kernel.bin> [timeout] [accel] [mem] [smp] [-- extra qemu args]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 60}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+set qemu_extra [lrange $argv 5 end]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -smp $smp -m $mem -nographic -kernel $kernel"
+foreach a $qemu_extra {
+    if {$a eq "--"} { continue }
+    append cmd " $a"
+}
+puts "SPAWN: $cmd"
+eval spawn $cmd
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "initramfs: 2 files" { puts "\nPASS: initramfs unpacked 2 files" }
+    timeout { puts "\nFAIL: initramfs marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before initramfs marker"; exit 1 }
+}
+expect {
+    -re "Hello from EL0" { puts "\nPASS: /sbin/init ran" }
+    timeout { puts "\nFAIL: init output timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before init output"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+send "ns ls\r"
+expect {
+    -re "hello" { puts "\nPASS: manifest server resolves in ns ls" }
+    timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "cat /etc/house-servers\r"
+expect {
+    -re "hello /sbin/init" { puts "\nPASS: manifest file intact" }
+    timeout { puts "\nFAIL: cat manifest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+puts "\nPASS: initramfs ok"
+catch {exec kill -9 [exp_pid]}
+exit 0
