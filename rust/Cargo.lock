@@ -10,6 +10,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "house-el0-tiny"
+version = "0.1.0"
+
+[[package]]
 name = "house-hal"
 version = "0.1.0"
 

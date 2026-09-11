@@ -10,6 +10,6 @@ SECTIONS
   .text : { *(.text*) } :text
   .rodata : { *(.rodata*) } :text
   . = 0x1001000;
-  .data : { *(.data*) } :data
+  .data : { KEEP(*(.data*)) } :data
   /DISCARD/ : { *(.note*) *(.comment*) *(.eh_frame*) }
 }

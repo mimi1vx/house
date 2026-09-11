@@ -132,7 +132,7 @@ _lint-inner:
 
 # Miri target is a stub until step 9 adds #[cfg(miri)] isolation for asm!/MMIO.
 miri: volumes
-	$(MIRI_IN_CONTAINER) cargo miri test --manifest-path rust/Cargo.toml -p house-hal -p house-hal-aarch64 -p house-libc -p house-boot
+	$(MIRI_IN_CONTAINER) cargo miri test --manifest-path rust/Cargo.toml -p house-hal -p house-hal-aarch64 -p house-libc -p house-boot -p house-el0-tiny
 
 house-run: initrd
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
@@ -318,16 +318,23 @@ run: house-run
 
 # --- Track H: Haskell hygiene gates (host tools, full tree) ---
 # fourmolu/hlint cover kernel/ plus the platform entry points (Spike,
-# IrqCheck); the kernel closure itself is built with -Wall -Werror via
-# house-build. cabal runs the QuickCheck + golden suite with FFI stubbed
-# (never executed). Container hlint cannot parse GHC2024 (see lint above),
-# so the Haskell gates stay on the host until Hackage hlint supports
-# ghc-lib-parser 9.14.
+# IrqCheck) plus the userspace EDSL (userspace/hs, userspace/test); the
+# kernel closure itself is built with -Wall -Werror via house-build. cabal
+# runs the workspace (kernel lib + userspace exes + golden) plus the
+# QuickCheck + golden suite with FFI stubbed (never executed). Container
+# hlint cannot parse GHC2024 (see lint above), so the Haskell gates stay on
+# the host until Hackage hlint supports ghc-lib-parser 9.14.
 haskell-check:
-	fourmolu -m check kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs
-	hlint kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs
-	cd kernel/test && cabal build all --enable-tests
-	cd kernel/test && cabal test all
+	fourmolu -m check kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs userspace/hs/ userspace/test/
+	hlint kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs userspace/hs/ userspace/test/
+	cabal build all --enable-tests
+	cabal test all
+
+# Tiny EL0 libc audit (plans/userspace-edsl-tinylibc.md gates): the crate
+# object exports exactly strlen/strncmp/memcpy/memset + the EXIT(1) unwind
+# with no U symbols, so --gc-sections keeps EL0 binaries at asm scale.
+el0tiny-check: volumes
+	$(RUN_IN_CONTAINER) sh scripts/el0tiny-check.sh
 
 check:
 	$(MAKE) spike-check
@@ -341,4 +348,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check run check

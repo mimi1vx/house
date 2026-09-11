@@ -1,0 +1,107 @@
+cabal-version: 3.0
+name: house-kernel
+version: 0.1.0.0
+synopsis: House/hOp aarch64 Haskell kernel closure (host-typecheckable)
+description:
+  Freestanding Haskell kernel rooting at HouseA64.house_main.
+  Host-typecheckable via Cabal; firmware link still collects .o files
+  via kernel/Makefile + platform/aarch64 until proven otherwise.
+license: MIT
+license-file: ../LICENSE
+author: house
+maintainer: house
+build-type: Simple
+tested-with: GHC == 9.14.1
+
+common warnings
+  ghc-options: -Wall
+  default-language: GHC2024
+
+library
+  import: warnings
+  hs-source-dirs: .
+  exposed-modules:
+    H.AdHocMem
+    H.Concurrency
+    H.FileSystem
+    H.Interrupts
+    H.Monad
+    H.Mutable
+    H.Pages
+    H.PhysicalMemory
+    H.Unsafe
+    H.Utils
+    H.VirtualMemory
+    HouseA64
+    Kernel.Boot
+    Kernel.Console
+    Kernel.Debug
+    Kernel.Driver
+    Kernel.Driver.Dmesg
+    Kernel.Driver.GIC
+    Kernel.Driver.IRQ
+    Kernel.Driver.Keyboard
+    Kernel.Driver.PL011
+    Kernel.Driver.PL011Server
+    Kernel.Driver.Registry
+    Kernel.Driver.Types
+    Kernel.Driver.Virtio
+    Kernel.Driver.Virtio.Blk
+    Kernel.Driver.Virtio.Blk.Device
+    Kernel.Driver.Virtio.Blk.Server
+    Kernel.Driver.Virtio.Blk.Types
+    Kernel.Driver.Virtio.Con
+    Kernel.Driver.Virtio.Con.Device
+    Kernel.Driver.Virtio.Con.Server
+    Kernel.Driver.Virtio.Con.Types
+    Kernel.Driver.Virtio.Net
+    Kernel.Driver.Virtio.Net.Device
+    Kernel.Driver.Virtio.Net.Server
+    Kernel.Driver.Virtio.Net.Stack
+    Kernel.Driver.Virtio.Net.Types
+    Kernel.Driver.Virtio.Queue
+    Kernel.Driver.Virtio.Transport
+    Kernel.Driver.Virtio.Types
+    Kernel.Driver.VirtioProbe
+    Kernel.FileSystem.BlkFs
+    Kernel.FileSystem.BlkPersist
+    Kernel.FileSystem.RamFs
+    Kernel.FileSystem.Vfs
+    Kernel.Init
+    Kernel.Initramfs
+    Kernel.Initramfs.Cpio
+    Kernel.Initramfs.Unpack
+    Kernel.IPC
+    Kernel.IPC.Endpoint
+    Kernel.IPC.Grant
+    Kernel.IPC.IRQ
+    Kernel.IPC.Nameservice
+    Kernel.IPC.Types
+    Kernel.LineEditor
+    Kernel.Shell.Foreign
+    Kernel.Shell.Format
+    Kernel.Shell.Loop
+    Kernel.Shell.Mem
+    Kernel.Shell.Parse
+    Kernel.Shell.Posix
+    Kernel.Shell.Vm
+    Kernel.SMP
+    Kernel.Types.Console
+    Kernel.Userspace
+    Kernel.Userspace.Fd
+    Kernel.Userspace.Loader
+    Kernel.Userspace.Process
+    Kernel.Userspace.Sched
+    Kernel.Userspace.Syscall
+    Kernel.Userspace.Types
+    Monad.Util
+    Util.CmdLineParser
+    Util.Grammar
+    Util.PM
+    Util.Word12
+  build-depends:
+    base >= 4.22 && < 5
+    , array
+    , containers
+    , mtl
+    , pretty

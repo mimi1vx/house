@@ -1,5 +1,6 @@
 kernel/build/
 kernel/test/dist-newstyle/
+dist-newstyle/
 platform/aarch64/build/
 rust/target/
 build/

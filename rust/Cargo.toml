@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/house-hal", "crates/house-hal-aarch64", "crates/house-libc", "crates/house-boot"]
+members = ["crates/house-hal", "crates/house-hal-aarch64", "crates/house-libc", "crates/house-boot", "crates/house-el0-tiny"]
 resolver = "2"
 
 [workspace.package]
@@ -34,3 +34,11 @@ lto = "off"
 # opt-level = 2: size/speed balance for the MMU + virtio hot paths;
 # 3/s/z unmeasured — change only with a .bin-size + boot-time note.
 opt-level = 2
+
+# EL0 tiny libc never panics by construction (guarded decrements only,
+# pointer arithmetic is unchecked by definition); overflow checks off in
+# every profile so the debug EL0 archive stays panic-free too.
+[profile.dev.package.house-el0-tiny]
+overflow-checks = false
+[profile.release.package.house-el0-tiny]
+overflow-checks = false

@@ -1,0 +1,4 @@
+packages:
+  kernel/house-kernel.cabal
+  kernel/test/house-pure-tests.cabal
+  userspace/house-userspace.cabal

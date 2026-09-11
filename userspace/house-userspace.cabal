@@ -1,0 +1,154 @@
+cabal-version: 3.0
+name: house-userspace
+version: 0.1.0.0
+synopsis: House/hOp EL0 Haskell userspace (GHC + tiny svc shim)
+description:
+  Step-2 package shell: one lib plus ten exes, host-buildable.
+  Step 3 adds total FFI wrappers over the existing svc numbers only.
+license: MIT
+license-file: ../LICENSE
+author: house
+maintainer: house
+build-type: Simple
+tested-with: GHC == 9.14.1
+
+common warnings
+  ghc-options: -Wall
+  default-language: GHC2024
+
+library
+  import: warnings
+  hs-source-dirs: hs
+  exposed-modules:
+    Userspace.Shim
+    Userspace.Asm
+    Userspace.Tool.Common
+    Userspace.Tool.Hello
+    Userspace.Tool.Echo
+    Userspace.Tool.Mkdir
+    Userspace.Tool.Rm
+    Userspace.Tool.Ls
+    Userspace.Tool.Stat
+    Userspace.Tool.Write
+    Userspace.Tool.Cat
+  build-depends:
+    base >= 4.22 && < 5
+
+executable house-hello
+  import: warnings
+  main-is: Hello.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-init
+  import: warnings
+  main-is: Init.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-sh
+  import: warnings
+  main-is: Sh.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-ls
+  import: warnings
+  main-is: Ls.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-cat
+  import: warnings
+  main-is: Cat.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-echo
+  import: warnings
+  main-is: Echo.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-mkdir
+  import: warnings
+  main-is: Mkdir.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-rm
+  import: warnings
+  main-is: Rm.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-stat
+  import: warnings
+  main-is: Stat.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-write
+  import: warnings
+  main-is: Write.hs
+  hs-source-dirs: hs
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+executable house-gen
+  import: warnings
+  main-is: Gen.hs
+  hs-source-dirs: hs
+  other-modules:
+    Userspace.Asm
+    Userspace.Tool.Common
+    Userspace.Tool.Hello
+    Userspace.Tool.Echo
+    Userspace.Tool.Mkdir
+    Userspace.Tool.Rm
+    Userspace.Tool.Ls
+    Userspace.Tool.Stat
+    Userspace.Tool.Write
+    Userspace.Tool.Cat
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
+
+test-suite house-userspace-test
+  import: warnings
+  type: exitcode-stdio-1.0
+  main-is: Golden.hs
+  hs-source-dirs: test hs
+  other-modules:
+    Userspace.Asm
+    Userspace.Tool.Common
+    Userspace.Tool.Hello
+    Userspace.Tool.Echo
+    Userspace.Tool.Mkdir
+    Userspace.Tool.Rm
+    Userspace.Tool.Ls
+    Userspace.Tool.Stat
+    Userspace.Tool.Write
+    Userspace.Tool.Cat
+  build-depends:
+    base >= 4.22 && < 5
+    , house-userspace
