@@ -379,6 +379,60 @@ vfsBytesGolden = do
     re <- Vfs.vfsRead ns "/empty"
     return (ra == Right allBs && re == Right [])
 
+-- Dir-op goldens for the pid1 VFS slice (0x0C..0x0F): mkdir/rm/stat/ls
+-- over the fake backends, incl. bad-path/over-cap/namespace vectors.
+
+-- | mkdir/rm/stat/ls round-trip plus bad-path errnos.
+vfsDirGolden :: IO Bool
+vfsDirGolden = do
+  a <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" a
+    okMkdir <- Vfs.vfsMkdir ns "/d"
+    dupMkdir <- Vfs.vfsMkdir ns "/d"
+    _ <- Vfs.vfsWrite ns "/d/f" [1, 2, 3]
+    lsD <- Vfs.vfsLs ns "/d"
+    stF <- Vfs.vfsStat ns "/d/f"
+    stD <- Vfs.vfsStat ns "/d"
+    lsF <- Vfs.vfsLs ns "/d/f"
+    rmMissing <- Vfs.vfsRm ns "/nope"
+    _ <- Vfs.vfsRm ns "/d/f"
+    rmDir <- Vfs.vfsRm ns "/d"
+    stGone <- Vfs.vfsStat ns "/d/f"
+    return
+      ( okMkdir == Right ()
+          && dupMkdir == Left Vfs.EEXIST
+          && lsD == Right ["f"]
+          && stF == Right (Vfs.FsStat False 3 1)
+          && stD == Right (Vfs.FsStat True 0 1)
+          && lsF == Left Vfs.ENOTDIR
+          && rmMissing == Left Vfs.ENOENT
+          && rmDir == Right ()
+          && stGone == Left Vfs.ENOENT
+      )
+
+{- | Dir ops resolve through the caller's pid namespace (the EL0
+0x0C..0x0F path): a mount+mkdir under a forked pid is invisible in the
+parent pid's namespace.
+-}
+vfsDirPidNsGolden :: IO Bool
+vfsDirPidNsGolden = do
+  a <- newMemBackend
+  b <- newMemBackend
+  HM.runH $ do
+    _ <- Vfs.vfsEnsurePid 100
+    _ <- Vfs.vfsMount Vfs.defaultNamespace "/" a
+    Vfs.vfsForkPid 100 101
+    childNs <- Vfs.vfsEnsurePid 101
+    _ <- Vfs.vfsMount childNs "/extra" b
+    _ <- Vfs.vfsMkdir childNs "/extra/kid"
+    rp <- Vfs.vfsStat Vfs.defaultNamespace "/extra/kid"
+    rc <- Vfs.vfsStat childNs "/extra/kid"
+    Vfs.vfsReleasePid 100
+    Vfs.vfsReleasePid 101
+    return (rp == Left Vfs.ENOENT && rc == Right (Vfs.FsStat True 0 0))
+
 -- Initramfs goldens (cpio newc + unpack + manifest + quota) ---------------------
 
 -- | Fixture: dir, text file, all-256 binary, empty file, skipped symlink.
@@ -490,6 +544,10 @@ main = do
       , checkIO "vfs dotdot per-backend" vfsDotDotGolden
       , checkIO "vfs nsFork invisibility" vfsForkGolden
       , checkIO "vfs bytes all-256" vfsBytesGolden
+      , checkIO "vfs dir mkdir/rm/stat/ls" vfsDirGolden
+      , checkIO "vfs dir pid-namespace isolation" vfsDirPidNsGolden
+      , assertLeft "vfs empty path" (Vfs.splitPath "")
+      , assertLeft "vfs long name" (Vfs.splitPath ("/" ++ replicate 256 'a'))
       , check "cpio round-trip all-256" cpioRoundTrip
       , check "cpio tiny exact bytes" (Cpio.encodeCpio [Cpio.mkCpioFile "f" [9]] == cpioTinyGolden)
       , check "cpio tiny parses back" (Cpio.parseCpio cpioTinyGolden == Right [Cpio.mkCpioFile "f" [9]])

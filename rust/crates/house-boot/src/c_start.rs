@@ -99,6 +99,7 @@ unsafe extern "C" {
     fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *const u64) -> i32;
     fn house_ipc_should_park(op: u32, x1: u64, x2: u64) -> i32;
     fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32;
+    fn house_dir_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32;
     fn house_brk_should_park(op: u32, x0: u64) -> i32;
     fn house_fork_should_park(op: u32, x0: u64) -> i32;
     fn house_wait_should_park(op: u32, x0: u64) -> i32;
@@ -258,7 +259,8 @@ pub unsafe extern "C" fn c_handle_sync(
             // trap-side path validation; fd 0x04..0x07/0x0A park only after
             // trap-side validation passes (validate-then-park: bad
             // buffers/paths fall through to dispatch for a precise errno
-            // instead of parking); IPC 0x10..0x13 park only after
+            // instead of parking); dir 0x0C..0x0F park only after
+            // `house_dir_should_park` passes; IPC 0x10..0x13 park only after
             // `house_ipc_should_park` passes. GRANT_MAP 0x14 never parks
             // (inline ENOSYS until the grant slice).
             let park_candidate = svc_imm == 0x00
@@ -268,6 +270,7 @@ pub unsafe extern "C" fn c_handle_sync(
                 || svc_imm == 0x0B
                 || (0x04..=0x07).contains(&svc_imm)
                 || svc_imm == 0x0A
+                || (0x0C..=0x0F).contains(&svc_imm)
                 || (0x10..=0x13).contains(&svc_imm);
             if park_candidate {
                 // YIELD park: save the 896B frame + ELR (as-delivered, already
@@ -313,6 +316,17 @@ pub unsafe extern "C" fn c_handle_sync(
                     };
                     // SAFETY: lock-free validator, page-table reads only.
                     unsafe { house_fd_should_park(svc_imm, x0, x1, x2) }
+                } else if (0x0C..=0x0F).contains(&svc_imm) {
+                    // SAFETY: gpr is the 896B vec_sync frame; x0/x1/x2 reads only.
+                    let (x0, x1, x2) = unsafe {
+                        if gpr.is_null() {
+                            (0, 0, 0)
+                        } else {
+                            (*gpr.add(0), *gpr.add(1), *gpr.add(2))
+                        }
+                    };
+                    // SAFETY: lock-free validator, page-table reads only.
+                    unsafe { house_dir_should_park(svc_imm, x0, x1, x2) }
                 } else {
                     // SAFETY: gpr is the 896B vec_sync frame; x1/x2 reads only.
                     let (x1, x2) = unsafe {

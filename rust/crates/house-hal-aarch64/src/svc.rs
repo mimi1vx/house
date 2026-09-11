@@ -16,6 +16,12 @@ const HOUSE_SVC_SEEK: u32 = 0x0A;
 // EL0 exec replaces the image under the same pid (path VA in x0,
 // NUL-terminated, like OPEN). Rides the delegation ring.
 const HOUSE_SVC_EXEC: u32 = 0x0B;
+// VFS dir ops (pid1 slice): MKDIR/UNLINK take a path VA; STAT/GETDENTS
+// take (path VA, buf VA, len) and render newline text. Ride the ring.
+const HOUSE_SVC_MKDIR: u32 = 0x0C;
+const HOUSE_SVC_UNLINK: u32 = 0x0D;
+const HOUSE_SVC_STAT: u32 = 0x0E;
+const HOUSE_SVC_GETDENTS: u32 = 0x0F;
 const HOUSE_SVC_IPC_SEND: u32 = 0x10;
 const HOUSE_SVC_IPC_RECV: u32 = 0x11;
 const HOUSE_SVC_IPC_CALL: u32 = 0x12;
@@ -36,6 +42,7 @@ const EL0_N: usize = 64;
 
 // Park request codes (svc #imm that parks instead of completing inline).
 // YIELD + BRK + fd 0x04..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B +
+// dir 0x0C..0x0F +
 // IPC 0x10..0x13 ride the delegation ring (validate-then-park in
 // `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS
 // until the grant-transfer slice.
@@ -49,6 +56,10 @@ const EL0_REQ_FORK: u32 = 0x08;
 const EL0_REQ_WAIT: u32 = 0x09;
 const EL0_REQ_SEEK: u32 = 0x0A;
 const EL0_REQ_EXEC: u32 = 0x0B;
+const EL0_REQ_MKDIR: u32 = 0x0C;
+const EL0_REQ_UNLINK: u32 = 0x0D;
+const EL0_REQ_STAT: u32 = 0x0E;
+const EL0_REQ_GETDENTS: u32 = 0x0F;
 const EL0_REQ_IPC_SEND: u32 = 0x10;
 const EL0_REQ_IPC_RECV: u32 = 0x11;
 const EL0_REQ_IPC_CALL: u32 = 0x12;
@@ -315,6 +326,54 @@ unsafe fn validate_fd(op: u32, x0: u64, x1: u64, x2: u64) -> i64 {
             HOUSE_SVC_CLOSE | HOUSE_SVC_SEEK => VALID_PARK,
             _ => EINVAL,
         }
+    }
+}
+
+// Shared dir validator: VALID_PARK when well-formed, otherwise a precise
+// errno (EFAULT/EINVAL). MKDIR/UNLINK take (path_va, _, _); STAT/GETDENTS
+// take (path_va, buf, len) with the fd-slice buffer bound (64K).
+unsafe fn validate_dir(op: u32, x0: u64, x1: u64, x2: u64) -> i64 {
+    unsafe {
+        match op {
+            HOUSE_SVC_MKDIR | HOUSE_SVC_UNLINK => {
+                let r = validate_cstring_current(x0, 256);
+                if r != 0 {
+                    return r;
+                }
+                VALID_PARK
+            }
+            HOUSE_SVC_STAT | HOUSE_SVC_GETDENTS => {
+                let r = validate_cstring_current(x0, 256);
+                if r != 0 {
+                    return r;
+                }
+                if x2 > 65536 {
+                    return EINVAL;
+                }
+                if validate_user_buffer(x1, x2) != 0 {
+                    return EFAULT;
+                }
+                VALID_PARK
+            }
+            _ => EINVAL,
+        }
+    }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); integer + page-table
+// validation only, no locks or allocation. Returns 1 when validated and the
+// caller should park, 0 when validation failed (caller falls through to
+// dispatch for the precise errno), -22 unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_dir_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32 {
+    // SAFETY: delegates to the lock-free validator.
+    let r = unsafe { validate_dir(op, x0, x1, x2) };
+    if r == VALID_PARK {
+        1
+    } else if r == ENOSYS || r == EFAULT || r == EINVAL {
+        0
+    } else {
+        -22
     }
 }
 
@@ -1062,7 +1121,6 @@ pub unsafe extern "C" fn house_svc_dispatch(
             HOUSE_SVC_EXIT => {
                 let code = (x0 & 0xFF) as i32;
                 house_set_exit(code);
-                uart_puts(b"[svc] exit\n\0".as_ptr());
                 if !gpr.is_null() {
                     *gpr = 0;
                 }
@@ -1086,6 +1144,24 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 let r = validate_fd(imm, x0, x1, x2);
                 if r == VALID_PARK {
                     uart_puts(b"[svc] ENOSYS fd\n\0".as_ptr());
+                    if !gpr.is_null() {
+                        *gpr = -38i64 as u64;
+                    }
+                    -38
+                } else {
+                    if !gpr.is_null() {
+                        *gpr = r as u64;
+                    }
+                    r
+                }
+            }
+            HOUSE_SVC_MKDIR | HOUSE_SVC_UNLINK | HOUSE_SVC_STAT | HOUSE_SVC_GETDENTS => {
+                // Validate-then-park like the fd slice: well-formed calls
+                // park in `c_handle_sync`; reaching here means unregistered
+                // slot (fail closed ENOSYS) or a trap-side errno.
+                let r = validate_dir(imm, x0, x1, x2);
+                if r == VALID_PARK {
+                    uart_puts(b"[svc] ENOSYS dir\n\0".as_ptr());
                     if !gpr.is_null() {
                         *gpr = -38i64 as u64;
                     }

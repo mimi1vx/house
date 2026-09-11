@@ -53,7 +53,7 @@ proc sock_drain {s} {
     set ::sockbuf ""
 }
 log_user 1
-set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel"
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
 foreach a $qemu_extra {
     if {$a eq "--"} { continue }
     append cmd " $a"

@@ -53,7 +53,7 @@ Future symbol additions that touch these paths get bounds review first
   (`10.0.2.0/24` user-mode NAT); there is no DNSSEC/TLS in this slice
   (accepted risk — Track S). The guest still expires ARP entries after 60 s
   and logs DHCP xid mismatches to `dmesg` instead of accepting them.
-- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`, `BRK 0x03` + fd `0x04..0x07/0x0A` + `YIELD 0x00` + fork `0x08`/wait `0x09`/exec `0x0B` + IPC `0x10..0x13` park via `house_el0_park` in `c_handle_sync` before dispatch — BRK/FORK/WAIT always park (no user memory / pid only, Haskell decides window/ENOMEM/pid), fd/IPC/EXEC gated by `house_fd_should_park`/`house_ipc_should_park`/`house_exec_should_park` so invalid buffers/paths/counts return a precise errno inline instead of parking — with an ENOSYS fallback for unregistered sessions, Track O fork `0x08/0x09` + exec `0x0B` now ride the ring; IPC `GRANT_MAP 0x14` fail-closed ENOSYS until the grant slice) and
+- **EL0 `svc` dispatch.** `house_svc_dispatch` (`WRITE 0x01`/`EXIT 0x02`, `BRK 0x03` + fd `0x04..0x07/0x0A` + `YIELD 0x00` + fork `0x08`/wait `0x09`/exec `0x0B` + dir `0x0C..0x0F` + IPC `0x10..0x13` park via `house_el0_park` in `c_handle_sync` before dispatch — BRK/FORK/WAIT always park (no user memory / pid only, Haskell decides window/ENOMEM/pid), fd/dir/IPC/EXEC gated by `house_fd_should_park`/`house_dir_should_park`/`house_ipc_should_park`/`house_exec_should_park` so invalid buffers/paths/counts return a precise errno inline instead of parking — with an ENOSYS fallback for unregistered sessions, Track O fork `0x08/0x09` + exec `0x0B` now ride the ring; IPC `GRANT_MAP 0x14` fail-closed ENOSYS until the grant slice) and
   `house_ipc_svc_dispatch` (`IPC 0x10..0x14`) take raw `imm`/`x0..x3` from EL0;
   unknown `imm` returns an error, user pointers are validated before
   copy (`house_ipc_copy_msg` is length-bounded).
@@ -210,8 +210,10 @@ demand-100 pages, `mprotect` RO perm fault, `munmap` translation fault,
 ### `svc.rs` + `ipc.rs` — `svc.c` / `svc.h` / `ipc.c` / `ipc.h`
 
 EL0 `svc #imm` dispatch (`WRITE 0x01`/`EXIT 0x02`, `BRK 0x03` + fd
-`0x04..0x07/0x0A` + fork `0x08`/wait `0x09`/exec `0x0B` + IPC `0x10..0x13`
+`0x04..0x07/0x0A` + fork `0x08`/wait `0x09`/exec `0x0B` + dir
+`0x0C..0x0F` + IPC `0x10..0x13`
 validate-then-park through `house_brk_should_park` / `house_fd_should_park` /
+`house_dir_should_park` /
 `house_fork_should_park` / `house_wait_should_park` /
 `house_exec_should_park` / `house_ipc_should_park`, `0x14` inline ENOSYS).
 Unknown `imm` is rejected; user pointers are validated before copy.
@@ -244,6 +246,7 @@ Unknown `imm` is rejected; user pointers are validated before copy.
 | `house-hal-aarch64` | `house_sched_tick_preempt` | `int house_sched_tick_preempt(uint64_t *gpr, uint64_t elr, uint64_t sp_el0, int is_el0)` | `svc.rs` (new: timer-IRQ quantum countdown, parks the EL0 frame as `0x1E` on expiry with oversubscription; `1` parked / `0` keep running; lock-free) |
 | `house-hal-aarch64` | `house_el0_fault_addr` | `uint64_t house_el0_fault_addr(void *pdir)` | `svc.rs` (new: parked fault VA for the pid, `0` when no FAULT request) |
 | `house-hal-aarch64` | `house_fd_should_park` | `int house_fd_should_park(uint32_t op, uint64_t x0, uint64_t x1, uint64_t x2)` | `svc.rs` (new: trap-safe park gate, `1` validated-park / `0` errno-inline / `-22` unknown op; OPEN validates NUL-terminated path ≤256, READ/WRITE validate buf ≤64K) |
+| `house-hal-aarch64` | `house_dir_should_park` | `int house_dir_should_park(uint32_t op, uint64_t x0, uint64_t x1, uint64_t x2)` | `svc.rs` (new: trap-safe park gate, `1` validated-park / `0` errno-inline / `-22` unknown op; MKDIR/UNLINK validate NUL-terminated path ≤256, STAT/GETDENTS validate path plus buf ≤64K) |
 | `house-hal-aarch64` | `house_user_read` | `int house_user_read(void *pdir, uint64_t va, uint64_t *out, uint64_t nwords)` | `svc.rs` (new: EL1 thread-context word copy against an explicit pdir — the recorded root is kernel while parked; `0` ok / `-14` EFAULT / `-22` EINVAL) |
 | `house-hal-aarch64` | `house_user_write` | `int house_user_write(void *pdir, uint64_t va, const uint64_t *in, uint64_t nwords)` | `svc.rs` (new: same as read, opposite direction) |
 | `house-hal-aarch64` | `house_user_read_bytes` | `int house_user_read_bytes(void *pdir, uint64_t va, uint8_t *out, uint64_t len)` | `svc.rs` (new: EL1 thread-context byte copy for the fd ring, `len` ≤ 64K; `0` ok / `-14` EFAULT / `-22` EINVAL) |

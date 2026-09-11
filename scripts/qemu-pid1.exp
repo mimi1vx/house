@@ -1,0 +1,121 @@
+#!/usr/bin/expect -f
+# pid1 test (plans/pid1-init-shell.md step 9): boot with QEMU -initrd,
+# assert boot -> pid1 -> shell separation (initramfs unpack + init pid +
+# init up + hello child), then exercise the EL0 coreutils over run/spawn.
+# Usage: expect scripts/qemu-pid1.exp <kernel.bin> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 60}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "initramfs: 18 files" { puts "\nPASS: initramfs unpacked" }
+    timeout { puts "\nFAIL: initramfs marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before initramfs marker"; exit 1 }
+}
+# EL0 output races the boot thread on SMP ("init up" may precede
+# "init pid"; either may precede the prompt): collect all three markers
+# order-free, then re-sync with an empty line so straggler init output
+# ("init done"/"init exit 0") drains before the first command.
+set saw_pid 0
+set saw_up 0
+set saw_prompt 0
+while {!$saw_pid || !$saw_up || !$saw_prompt} {
+    expect {
+        -re "init pid (\[0-9\]+)" { puts "\nPASS: pid1 launched"; set saw_pid 1 }
+        -re "init up" { puts "\nPASS: /sbin/init running"; set saw_up 1 }
+        -re "> " { puts "\nPASS: saw prompt"; set saw_prompt 1 }
+        timeout { puts "\nFAIL: boot marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof before boot markers"; exit 1 }
+    }
+}
+send "\r"
+expect {
+    -re "> " { puts "\nPASS: re-synced prompt" }
+    timeout { puts "\nFAIL: resync timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before resync"; exit 1 }
+}
+send "run /bin/hello\r"
+expect {
+    -re "Hello from EL0" { puts "\nPASS: run hello" }
+    timeout { puts "\nFAIL: run hello timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before run hello"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: hello ok exit 0" }
+    timeout { puts "\nFAIL: hello exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before hello exit"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after hello timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "run /bin/ls /bin\r"
+expect {
+    -re "hello" { puts "\nPASS: ls /bin lists hello" }
+    timeout { puts "\nFAIL: ls output timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before ls output"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "run /bin/cat /probe.txt\r"
+expect {
+    -re "hello fd el0" { puts "\nPASS: cat /probe.txt content" }
+    timeout { puts "\nFAIL: cat content timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before cat content"; exit 1 }
+}
+expect {
+    -re "cat ok" { puts "\nPASS: cat ok" }
+    timeout { puts "\nFAIL: cat ok timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before cat ok"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "spawn /bin/hello\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spawn pid $p1" }
+    timeout { puts "\nFAIL: spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spawn"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "jobs\r"
+expect {
+    -re "jobs:" { puts "\nPASS: jobs listed" }
+    timeout { puts "\nFAIL: jobs timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before jobs"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after jobs timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "wait $p1\r"
+expect {
+    -re "ok exit 0" { puts "\nPASS: wait reaped exit 0" }
+    timeout { puts "\nFAIL: wait timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before wait"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+puts "\nPASS: pid1 ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

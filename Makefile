@@ -134,9 +134,9 @@ _lint-inner:
 miri: volumes
 	$(MIRI_IN_CONTAINER) cargo miri test --manifest-path rust/Cargo.toml -p house-hal -p house-hal-aarch64 -p house-libc -p house-boot
 
-house-run:
+house-run: initrd
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
-	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.bin
+	  -smp $(SMP_N) -m $(SPIKE_MEM) -nographic -kernel $(SPIKE_DIR)/build/house.bin -initrd build/initramfs.cpio
 
 house-check:
 	$(RUN_IN_CONTAINER) \
@@ -150,13 +150,13 @@ house-check:
 	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Interactive shell (phase 5): prompt → help/lambda/wastemem via PL011 RX
-house-shell-check:
+house-shell-check: initrd
 	$(MAKE) house-build
 	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # POSIX-ish shell + PSCI (phase 7): help descriptions, echo/clear/uname/uptime, shutdown -r/-h
-house-posix-check:
+house-posix-check: initrd
 	$(MAKE) house-build
 	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
@@ -173,64 +173,78 @@ smp-check:
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # RamFS + VFS (Track 1): volatile 2 MiB pool over H.Pages, H.FileSystem via ls/cat/write/rm/mkdir/stat + echo > /path
-house-fs-check: house-build
+house-fs-check: house-build initrd
 	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # IPC microkernel (Track 1b): L4 sync rendezvous, copy+grant, ns+cap, hybrid Haskell/EL0
-house-ipc-check: house-build
+house-ipc-check: house-build initrd
 	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Driver framework (Track 2): registry on IPC + dmesg ring + SPI + virtio-MMIO probe 0x0a000000+i*0x200
-house-driver-check: house-build
+house-driver-check: house-build initrd
 	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Virtio-MMIO transport (Track 3): device-agnostic split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint
-house-virtio-transport-check: house-build
+house-virtio-transport-check: house-build initrd
 	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Virtio-blk (Track 4): block device on transport, virtio_blk_req, Grant pages, 4K blocks (512B sectors on wire), capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B
-house-virtio-blk-check: house-build
+house-virtio-blk-check: house-build initrd
 	qemu-img create -f raw /tmp/house.img 64M
 	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 tcg $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 
 # Virtio-net (Track 5): virtio-net server, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user netdev 10.0.2.0/24
-house-virtio-net-check: house-build
+house-virtio-net-check: house-build initrd
 	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 
 # Virtio-console (ID 3): console server, rx0+tx1, Grant 4K, full-duplex + mirror, socket chardev
-house-virtio-con-check: house-build
+house-virtio-con-check: house-build initrd
 	rm -f /tmp/house-con.sock
 	expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 	expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 
-# Initramfs/initrd (cpio newc via QEMU -initrd, unpack + run /sbin/init)
-house-initrd-check: house-build
+# EL0 userspace + initramfs (pid1 slice): assemble userspace/*.s +
+# build-probe/*.s in the container, pack the cpio on the host.
+# File-tracked: repeat runs skip the rebuild and boot straight in.
+USERSPACE_SRCS := $(wildcard userspace/*.s userspace/*.ld build-probe/*.s build-probe/*.ld)
+STAGING_STATIC := initramfs-staging/etc/house-servers initramfs-staging/probe.txt
+initrd: build/initramfs.cpio
+build/initramfs.cpio: $(USERSPACE_SRCS) build-probe/repack.py scripts/mk-userspace.sh scripts/mkinitramfs.sh $(STAGING_STATIC) | volumes
+	$(RUN_IN_CONTAINER) sh scripts/mk-userspace.sh
 	sh scripts/mkinitramfs.sh
 	file build/initramfs.cpio
+
+# Initramfs/initrd (cpio newc via QEMU -initrd, unpack + run /sbin/init)
+house-initrd-check: house-build initrd
 	expect scripts/qemu-initramfs.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N) -- -initrd build/initramfs.cpio
 	expect scripts/qemu-initramfs.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N) -- -initrd build/initramfs.cpio
 
+# pid1 (boot -> pid1 -> shell + EL0 coreutils over run/spawn/jobs/wait)
+house-pid1-check: house-build initrd
+	expect scripts/qemu-pid1.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-pid1.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
+
 # EL0 process checks: per-pid exits + spawn/jobs/wait, 2 concurrent hellos
-house-proc-check: house-build
+house-proc-check: house-build initrd
 	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 fork/wait/exec via park ring (multiprocess step 9): fork probe
 # parent/child distinct + wait reaps; exec probe replaces image w/ hello
-house-fork-check: house-build
+house-fork-check: house-build initrd
 	expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 preemption via timer IRQ + baton run queue (multiprocess step 11):
 # 2 CPU-bound spinners interleave on -smp 1 (smp forced to 1: the switch is
 # proven by alternation, not core count), shell responsive throughout.
-house-preempt-check: house-build
+house-preempt-check: house-build initrd
 	expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 120 hvf $(SPIKE_MEM) 1
 	expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 300 tcg $(SPIKE_MEM) 1
 
@@ -238,22 +252,22 @@ house-preempt-check: house-build
 # survives `smp down 1` (hvf: down-leg only, PSCI refuses re-CPU_ON) and the
 # full down/up cycle on tcg (resume migrates cores via the global run queue);
 # shell responsive throughout, spinner reaped exit 0.
-house-spin-hotplug-check: house-build
+house-spin-hotplug-check: house-build initrd
 	expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 300 hvf $(SPIKE_MEM) 2
 	expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 420 tcg $(SPIKE_MEM) 2
 
 # EL0 fd/brk via park ring (multiprocess step 7): per-pid OPEN/READ/CLOSE cat + brk grow-touch
-house-fd-el0-check: house-build
+house-fd-el0-check: house-build initrd
 	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 IPC ping-pong (multiprocess step 6): server RECV+REPLY + client CALL via the park ring
-house-ipc-el0-check: house-build
+house-ipc-el0-check: house-build initrd
 	expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Userspace EL0 (Track 6): ELF loader 0x01000000 window, svc write/exit/brk + IPC 0x10..0x14 via Endpoint, TTBR0/ASID/pager
-house-userspace-check: house-build
+house-userspace-check: house-build initrd
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
 
@@ -294,7 +308,7 @@ vm-check: house-build
 
 house-vm-check: vm-check
 
-# `make run` is a convenience alias for the house shell (hvf, 4G default).
+# `make run` boots the whole system (shell + pid1 + initrd, hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
 # spike ticks, GIC dispatch + VM, house banner, interactive shell, and
 # rust (clippy + fmt), each under hvf and tcg where applicable. It is the
@@ -327,4 +341,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-initrd-check rust-check rust-clean haskell-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check run check

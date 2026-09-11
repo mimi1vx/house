@@ -1,4 +1,3 @@
 # House server manifest: '<name> <elf-path> <endpoint-arg>' per line.
 # Blank lines and '#' comments are skipped; at most 64 servers.
 # Names register in `ns ls`; ELFs spawn as runElf children at boot.
-hello /sbin/init init

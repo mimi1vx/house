@@ -12,7 +12,7 @@ if {$mem eq ""} { set mem 4G }
 if {$smp eq ""} { set smp 2 }
 log_user 1
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
-    -smp $smp -m $mem -nographic -kernel $kernel
+    -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
     -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }

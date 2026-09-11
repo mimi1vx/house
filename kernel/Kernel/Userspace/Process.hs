@@ -27,8 +27,7 @@ import Data.IORef (atomicModifyIORef')
 import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
 import Data.Word (Word32, Word64, Word8)
-import Foreign.C.String (withCString)
-import Foreign.C.Types (CChar, CInt (..))
+import Foreign.C.Types (CInt (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import H.AdHocMem (allocaArray, peek, peekElemOff, poke, pokeElemOff)
 import H.Concurrency (MVar, forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
@@ -90,17 +89,17 @@ foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
 
-foreign import ccall unsafe "uart_puts" c_uart_puts :: Ptr CChar -> IO ()
-
 stackTop :: Word64
 stackTop = 0x3FFFE000
 
 {- | Request parked by an EL0 trap (svc #imm). Yield plus brk/fd
-0x03..0x07/0x0A plus fork 0x08/wait 0x09/exec 0x0B plus IPC 0x10..0x13 ride
+0x03..0x07/0x0A plus fork 0x08/wait 0x09/exec 0x0B plus dir 0x0C..0x0F
+plus IPC 0x10..0x13 ride
 the ring; GRANT_MAP 0x14 stays inline ENOSYS. Each IPC request carries the
 trapped x0..x3 (ep, va, nwords, tag); fd requests carry their trapped
 x0..x2 (see 'classify' below); WAIT carries the child pid in x0, EXEC the
-path VA in x0, FORK takes no args. ReqFault carries the trapped x0 plus the
+path VA in x0, FORK takes no args; MKDIR/UNLINK carry the path VA in x0,
+STAT/GETDENTS carry (path VA, buf VA, len). ReqFault carries the trapped x0 plus the
 fault VA (an RO write to a COW page parks 0x1F via the RO perm guard).
 ReqPreempt carries the trapped x0 (an over-quantum EL0 frame parks 0x1E via
 the timer IRQ; resume retries the interrupted insn).
@@ -116,6 +115,10 @@ data ParkRequest
   | ReqFork
   | ReqWait Word64
   | ReqExec Word64
+  | ReqMkdir Word64
+  | ReqUnlink Word64
+  | ReqStat Word64 Word64 Word64
+  | ReqGetdents Word64 Word64 Word64
   | ReqIpcSend Word64 Word64 Word64 Word64
   | ReqIpcRecv Word64 Word64 Word64
   | ReqIpcCall Word64 Word64 Word64 Word64
@@ -193,9 +196,7 @@ runElf elf argv envp = withQSem userSem $ do
     Nothing -> return (Left NoSpace)
     Just pdir -> do
       let pdirPtr = VM.fromPageMap pdir
-      _ <- liftIO (withCString "[run] mapSegments start\n" c_uart_puts)
       mapped <- mapSegments pdir elf
-      _ <- liftIO (withCString "[run] mapSegments done\n" c_uart_puts)
       case mapped of
         Left err -> do
           freePDir pdir
@@ -217,7 +218,6 @@ runElf elf argv envp = withQSem userSem $ do
                     then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
                     else do
                       asid <- liftIO (c_asid_for pdirPtr)
-                      _ <- liftIO (withCString "[run] got asid\n" c_uart_puts)
                       reg <- liftIO (c_el0_register pdirPtr)
                       if reg /= 0
                         then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
@@ -226,15 +226,11 @@ runElf elf argv envp = withQSem userSem $ do
                           modifyRef procExitMap (Map.insert pid exitVar)
                           modifyRef procMap (Map.insert pid (Process pid pdir (elfEntry elf) initBrk))
                           Sched.schedRegister pid
-                          _ <- liftIO (withCString "[run] before fork\n" c_uart_puts)
                           _ <- forkH $ do
-                            _ <- liftIO (withCString "[run] fork enter\n" c_uart_puts)
                             liftIO (c_set_pdir pdirPtr)
                             liftIO (c_enter_el0 (elfEntry elf) sp pdirPtr asid)
-                            _ <- liftIO (withCString "[run] fork after enter\n" c_uart_puts)
                             parkLoop pid pdirPtr asid exitVar
                             return ()
-                          _ <- liftIO (withCString "[run] after fork\n" c_uart_puts)
                           return (Right pid)
 
 {- | Fork slice (Track O + COW, no signals): share the parent address space
@@ -674,7 +670,9 @@ new break); fd 0x04..0x07/0x0A run against the pid's 'Fd' table (per-pid,
 so cross-pid use fails EBADF); fork 0x08 shares via 'shareAddrSpace'
 (child x0 = 0, parent resumes the child pid); wait 0x09 blocks in 'waitPid'
 until the child exits (reaps, resumes the exit code); exec 0x0B replaces
-the image via 'execReplace' (resumes 0 in the new image); a write to a cow
+the image via 'execReplace' (resumes 0 in the new image); dir 0x0C..0x0F
+run against the pid's VFS namespace (MKDIR/UNLINK resume 0, STAT/GETDENTS
+resume the rendered byte count); a write to a cow
 page parks FAULT and 'breakCow' copies/remaps RW (resumes the trapped x0
 so the faulting store retries); an over-quantum frame parks PREEMPT and the
 baton passes to the next runnable pid ('Sched.schedElectNext', resume x0);
@@ -690,9 +688,10 @@ buffer; RECV resumes x0 = sender tag with received words in the buffer;
 REPLY resumes x0 = 0; BRK resumes the new break; OPEN resumes the fd
 number; READ/WRITE resume the byte count; CLOSE resumes 0; SEEK resumes
 the new offset; FORK resumes the child pid (0 in the child); WAIT resumes
-the reaped exit code; EXEC resumes 0. Errors resume negative errnos:
+the reaped exit code; EXEC resumes 0; MKDIR/UNLINK resume 0; STAT/GETDENTS
+resume the rendered byte count. Errors resume negative errnos:
 -2 ENOENT, -9 EBADF, -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
--14 EFAULT, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
+-14 EFAULT, -17 EEXIST, -20 ENOTDIR, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
 -}
 parkLoop :: Pid -> Ptr Word64 -> Word64 -> MVar Int -> H ()
 parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
@@ -723,6 +722,10 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
                 Just ReqFork -> do handleFork; loop
                 Just (ReqWait c) -> do handleWait c; loop
                 Just (ReqExec va) -> do handleExec va; loop
+                Just (ReqMkdir va) -> do handleMkdir va; loop
+                Just (ReqUnlink va) -> do handleUnlink va; loop
+                Just (ReqStat va buf ln) -> do handleStat va buf ln; loop
+                Just (ReqGetdents va buf ln) -> do handleGetdents va buf ln; loop
                 Just (ReqIpcSend ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
@@ -826,6 +829,82 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
             Left NoSpace -> resumeWith negNOMEM
             Left _ -> resumeWith negINVAL
             Right _ -> resumeWith 0
+    fsErrno e = case e of
+      Vfs.ENOENT -> negENOENT
+      Vfs.EEXIST -> fromIntegral (-17 :: Int)
+      Vfs.ENOTDIR -> fromIntegral (-20 :: Int)
+      Vfs.EISDIR -> fromIntegral (-21 :: Int)
+      Vfs.ENOSPC -> fromIntegral (-28 :: Int)
+      Vfs.EINVAL _ -> negINVAL
+    handleMkdir va = do
+      mPath <- readUserCString pid pdir va 256
+      case mPath of
+        Nothing -> return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right path) -> do
+          ns <- Vfs.vfsEnsurePid selfInt
+          r <- Vfs.vfsMkdir ns path
+          case r of
+            Left e -> resumeWith (fsErrno e)
+            Right () -> resumeWith 0
+    handleUnlink va = do
+      mPath <- readUserCString pid pdir va 256
+      case mPath of
+        Nothing -> return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right path) -> do
+          ns <- Vfs.vfsEnsurePid selfInt
+          r <- Vfs.vfsRm ns path
+          case r of
+            Left e -> resumeWith (fsErrno e)
+            Right () -> resumeWith 0
+    handleStat va buf ln = do
+      mPath <- readUserCString pid pdir va 256
+      case mPath of
+        Nothing -> return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right path) -> do
+          ns <- Vfs.vfsEnsurePid selfInt
+          r <- Vfs.vfsStat ns path
+          case r of
+            Left e -> resumeWith (fsErrno e)
+            Right st -> do
+              let bytes = map (\c -> fromIntegral (ord c) :: Word8) (renderStat st)
+              if length bytes > fromIntegral ln
+                then resumeWith negINVAL
+                else do
+                  mRc <- writeUserBytes pid pdir buf bytes
+                  case mRc of
+                    Nothing -> return ()
+                    Just 0 -> resumeWith (fromIntegral (length bytes))
+                    Just rc -> resumeWith (fromIntegral rc)
+    renderStat st =
+      (if Vfs.fsIsDir st then "dir" else "file")
+        ++ " size "
+        ++ show (Vfs.fsSize st)
+        ++ " blocks "
+        ++ show (Vfs.fsBlocks st)
+        ++ "\n"
+    handleGetdents va buf ln = do
+      mPath <- readUserCString pid pdir va 256
+      case mPath of
+        Nothing -> return ()
+        Just (Left rc) -> resumeWith (fromIntegral rc)
+        Just (Right path) -> do
+          ns <- Vfs.vfsEnsurePid selfInt
+          r <- Vfs.vfsLs ns path
+          case r of
+            Left e -> resumeWith (fsErrno e)
+            Right names -> do
+              let bytes = map (\c -> fromIntegral (ord c) :: Word8) (unlines names)
+              if length bytes > fromIntegral ln
+                then resumeWith negINVAL
+                else do
+                  mRc <- writeUserBytes pid pdir buf bytes
+                  case mRc of
+                    Nothing -> return ()
+                    Just 0 -> resumeWith (fromIntegral (length bytes))
+                    Just rc -> resumeWith (fromIntegral rc)
     handleCowFault x0 va = do
       alive <- withQSem userSem (Map.member pid <$> readRef procMap)
       when alive $ do
@@ -1039,7 +1118,9 @@ tryReadExitOnce pdir = allocaArray 1 $ \p -> do
 {- | Single parked-request poll: 0 maps to yield, 0x03 to brk (x0 = new
 break), 0x04..0x07/0x0A to fd (OPEN pathVa/flags, READ/WRITE fd/buf/len,
 CLOSE fd, SEEK fd/off/whence), 0x08 to fork (no args), 0x09 to wait
-(x0 = child pid), 0x0B to exec (x0 = path VA), 0x10..0x13 to IPC (with the
+(x0 = child pid), 0x0B to exec (x0 = path VA), 0x0C to mkdir (x0 = path
+VA), 0x0D to unlink (x0 = path VA), 0x0E to stat / 0x0F to getdents
+(x0 = path VA, x1 = buf, x2 = len), 0x10..0x13 to IPC (with the
 trapped x0..x3 as ep/va/nwords/tag), 0x1F to a COW fault (trapped x0 plus
 the fault VA from the slot), 0x1E to a timer preemption (trapped x0),
 anything else is unknown (resumed with
@@ -1075,6 +1156,10 @@ tryTakeParkedOnce pdir = do
     classify 0x08 _ _ _ _ = ReqFork
     classify 0x09 c _ _ _ = ReqWait c
     classify 0x0B va _ _ _ = ReqExec va
+    classify 0x0C va _ _ _ = ReqMkdir va
+    classify 0x0D va _ _ _ = ReqUnlink va
+    classify 0x0E va buf ln _ = ReqStat va buf ln
+    classify 0x0F va buf ln _ = ReqGetdents va buf ln
     classify 0x0A fd off wh _ = ReqSeek fd off wh
     classify 0x10 ep va nw tag = ReqIpcSend ep va nw tag
     classify 0x1E x0 _ _ _ = ReqPreempt x0

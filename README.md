@@ -106,7 +106,14 @@ Expect harnesses live under `scripts/qemu-*.exp`; the Make targets are their sta
 
 The aggregate `make check` gets clean firmware builds through its spike, IRQ, and House legs. Standalone focused checks generally reuse incremental artifacts. Clean `platform/aarch64` before manual platform builds, and also clean `kernel` before a manual House build.
 
-## Initramfs (`-initrd`)
+## Boot: kernel → pid1 → shell, initramfs (`-initrd`)
+
+`house_main` is three stages: `Kernel.Boot.boot` mounts VFS/RamFS, inits
+dmesg, and unpacks the initrd; `Kernel.Init.launchPid1` runs EL0
+`/sbin/init` (`init pid N`, reaped as `init exit CODE`, fail-closed
+`init fail E` without `-initrd` so the shell still comes up);
+`Kernel.Shell.Loop.loop` runs the slim shell whose FS verbs
+(`ls/cat/echo/mkdir/rm/stat/write`) are thin `runElf /bin/*` wrappers.
 
 QEMU `-initrd build/initramfs.cpio` supplies a cpio newc archive via
 `chosen/linux,initrd-start|end`, unpacked at boot into the default VFS
@@ -116,15 +123,24 @@ Caps: archive ≤8 MiB, ≤512 files, names ≤255 chars, files ≤1 MiB;
 10% of RAM (16 MiB floor) with `ENOSPC` + `dmesg` on refusal; `free`
 reports `ramfs used/quota`.
 
+The initrd is the sole `/bin/*` source, built from `userspace/*.s` plus
+`build-probe/*.s` (each assembled + linked + `repack.py`-packed to the
+Loader's hello-style ELF). EL0 syscalls are `svc #imm`: `0x00` yield,
+`0x01` write, `0x02` exit, `0x03` brk, `0x04..0x07/0x0A` fd,
+`0x08/0x09` fork/wait, `0x0B` exec, `0x0C..0x0F` mkdir/unlink/stat/getdents,
+`0x10..0x13` IPC (all validate-then-park through the Rust trap gates;
+`0x14` stays inline `ENOSYS`).
+
 ```sh
-sh scripts/mkinitramfs.sh          # build/initramfs.cpio from initramfs-staging/
-make house-initrd-check            # unpack + /sbin/init + manifest, hvf+tcg
+sh scripts/mk-userspace.sh        # container: initramfs-staging/bin/* + sbin/init
+sh scripts/mkinitramfs.sh         # host: build/initramfs.cpio from initramfs-staging/
+make house-initrd-check           # unpack + /sbin/init + manifest, hvf+tcg
+make house-pid1-check             # boot -> pid1 -> shell + EL0 coreutils, hvf+tcg
 ```
 
 After unpack, `/sbin/init` spawns (exit logged, shell never blocks) and
 `/etc/house-servers` registers `name path endpoint` lines (≤64,
 `#` comments) in `ns ls` and spawns each ELF as a `runElf` child.
-Without `-initrd` the embedded `/bin/*` fallback is unchanged.
 
 ## Closure & extensions
 
@@ -163,6 +179,7 @@ EXTS = -XGHC2024
 |   |-- ARCHITECTURE.md
 |   |-- c-abi.md
 |   `-- crates/
+|-- userspace/          # EL0 sources: pid1 init + FS coreutils (userspace.ld link)
 |-- scripts/            # host-side QEMU Expect harnesses and ABI checks
 `-- plans/              # untracked, left on disk (local dev notes)
 ```

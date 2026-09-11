@@ -5,9 +5,11 @@ Module      : Kernel.Userspace.Syscall
 Description : SVC -> IPC/fd/brk shims docs.
 Stability   : experimental
 
- Syscalls 0x03..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B + 0x10..0x13
- delegate through the park/resume ring: Rust ('svc.rs'
- 'house_brk_should_park' / 'house_fd_should_park' / 'house_fork_should_park'
+  Syscalls 0x03..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B + dir
+  0x0C..0x0F + 0x10..0x13
+  delegate through the park/resume ring: Rust ('svc.rs'
+  'house_brk_should_park' / 'house_fd_should_park' / 'house_dir_should_park'
+  / 'house_fork_should_park' / 'house_wait_should_park'
  / 'house_wait_should_park' / 'house_exec_should_park', 'ipc.rs'
  'house_ipc_should_park') validates trap-side and parks; Haskell
  ('Kernel.Userspace.Process.parkLoop') completes the op and resumes with
@@ -41,6 +43,10 @@ module Kernel.Userspace.Syscall (
   syscallWait,
   syscallExec,
   syscallSeek,
+  syscallMkdir,
+  syscallUnlink,
+  syscallStat,
+  syscallGetdents,
   syscallIpcSend,
   syscallIpcRecv,
   syscallIpcCall,
@@ -81,6 +87,18 @@ syscallFork = 0x08
 syscallWait = 0x09
 syscallSeek = 0x0A
 syscallExec = 0x0B
+
+{- | VFS dir numbers (svc #imm, pid1 slice). MKDIR/UNLINK take a path VA;
+STAT/GETDENTS take (path VA, buf VA, len) and render newline text into the
+buffer (STAT one `dir|file size N blocks M` line, GETDENTS one name per
+line), resuming the byte count. Same bounds as the fd slice: paths
+NUL-terminated ≤256, buffers ≤64K; over-cap fails EINVAL trap-side.
+-}
+syscallMkdir, syscallUnlink, syscallStat, syscallGetdents :: Int
+syscallMkdir = 0x0C
+syscallUnlink = 0x0D
+syscallStat = 0x0E
+syscallGetdents = 0x0F
 
 -- | IPC ops (svc #imm), validated by `ipc.rs` before any queue touch.
 syscallIpcSend, syscallIpcRecv, syscallIpcCall, syscallIpcReply, syscallIpcGrantMap :: Int

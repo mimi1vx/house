@@ -228,22 +228,11 @@ house_enter_el0:
     tlbi    vmalle1is
     dsb     ish
     isb
-    // debug
-    stp     x0, x1, [sp, #-16]!
-    stp     x2, x3, [sp, #-16]!
-    adrp    x0, enter_msg
-    add     x0, x0, :lo12:enter_msg
-    bl      uart_puts
-    ldp     x2, x3, [sp], #16
-    ldp     x0, x1, [sp], #16
     msr     elr_el1, x0
     mov     x0, #0
     msr     spsr_el1, x0
     msr     sp_el0, x1
     eret
-    .align 2
-enter_msg:
-    .asciz "[enter] eret to EL0\n"
     .align 2
     // EL1 trampoline that SVC EXIT returns to — restores kernel TTBR0 and returns.
     .global svc_exit_trampoline
@@ -256,12 +245,6 @@ svc_exit_trampoline:
     tlbi    vmalle1is
     dsb     ish
     isb
-    // debug
-    stp     x0, x1, [sp, #-16]!
-    adrp    x0, exit_msg
-    add     x0, x0, :lo12:exit_msg
-    bl      uart_puts
-    ldp     x0, x1, [sp], #16
     // Restore the callee-saved regs stashed by house_enter_el0 (reverse
     // order), then the x29/x30 pair, and return to the Haskell FFI caller.
     ldp     x27, x28, [sp], #16
@@ -271,9 +254,6 @@ svc_exit_trampoline:
     ldp     x19, x20, [sp], #16
     ldp     x29, x30, [sp], #16
     ret
-    .align 2
-exit_msg:
-    .asciz "[enter] exit trampoline EL1\n"
     .align 2
 
 vec_fatal:

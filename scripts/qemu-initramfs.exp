@@ -24,32 +24,50 @@ expect {
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
 expect {
-    -re "initramfs: 2 files" { puts "\nPASS: initramfs unpacked 2 files" }
+    -re "initramfs: 18 files" { puts "\nPASS: initramfs unpacked 18 files" }
     timeout { puts "\nFAIL: initramfs marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before initramfs marker"; exit 1 }
 }
-expect {
-    -re "Hello from EL0" { puts "\nPASS: /sbin/init ran" }
-    timeout { puts "\nFAIL: init output timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before init output"; exit 1 }
+set saw_pid 0
+set saw_up 0
+set saw_prompt 0
+while {!$saw_pid || !$saw_up || !$saw_prompt} {
+    expect {
+        -re "init pid (\[0-9\]+)" { puts "\nPASS: pid1 launched"; set saw_pid 1 }
+        -re "init up" { puts "\nPASS: /sbin/init running"; set saw_up 1 }
+        -re "> " { puts "\nPASS: saw prompt"; set saw_prompt 1 }
+        timeout { puts "\nFAIL: boot marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof before boot markers"; exit 1 }
+    }
 }
+send "\r"
 expect {
-    -re "> " { puts "\nPASS: saw prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+    -re "> " { puts "\nPASS: re-synced prompt" }
+    timeout { puts "\nFAIL: resync timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before resync"; exit 1 }
 }
 send "ns ls\r"
 expect {
-    -re "hello" { puts "\nPASS: manifest server resolves in ns ls" }
+    -re "empty" { puts "\nPASS: ns empty at boot (no demo servers)" }
     timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 expect {
     -re "> " {}
     timeout { puts "\nFAIL: prompt after ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
+send "run /bin/ls /bin\r"
+expect {
+    -re "hello" { puts "\nPASS: /bin/ls lists hello" }
+    timeout { puts "\nFAIL: ls output timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before ls output"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
 send "cat /etc/house-servers\r"
 expect {
-    -re "hello /sbin/init" { puts "\nPASS: manifest file intact" }
+    -re "endpoint-arg" { puts "\nPASS: manifest file intact" }
     timeout { puts "\nFAIL: cat manifest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 expect {

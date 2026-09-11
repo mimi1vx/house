@@ -6,7 +6,7 @@ RUN case "$(uname -m)" in aarch64) ;; *) \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential curl xz-utils git ca-certificates libgmp-dev \
-      libffi-dev libncurses-dev zlib1g-dev pkg-config \
+      libffi-dev libncurses-dev zlib1g-dev pkg-config python3 \
       llvm lld \
    && rm -rf /var/lib/apt/lists/*
 

@@ -19,15 +19,11 @@ where
 -- import Kernel.Debug(putStrLn)
 import Control.Monad
 import Data.Bits
-import Foreign.C.String (withCString)
-import Foreign.C.Types (CChar)
 import H.AdHocMem
 import H.Monad (liftIO)
 import qualified H.Pages as P
 import H.PhysicalMemory (PhysPage, fromPhysPage, toPhysPage)
 import H.Utils
-
-foreign import ccall unsafe "uart_puts" c_uart_puts_vm :: Ptr CChar -> IO ()
 
 foreign import ccall unsafe "house_mmu_clone_kernel_l1" c_clone_l1 :: Table -> IO ()
 
@@ -282,31 +278,23 @@ setPage _ _ _ = return False
 
 allocPageMap =
   do
-    liftIO $ withCString "allocPageMap start\n" c_uart_puts_vm
     mL0 <- P.allocPage
-    liftIO $ withCString ("allocPageMap mL0 " ++ show (case mL0 of Just _ -> True; Nothing -> False) ++ "\n") c_uart_puts_vm
     case mL0 of
       Nothing -> return Nothing
       Just l0 -> do
         P.zeroPage l0
-        liftIO $ withCString "allocPageMap l0 zero ok\n" c_uart_puts_vm
         mL1 <- P.allocPage
-        liftIO $ withCString ("allocPageMap mL1 " ++ show (case mL1 of Just _ -> True; Nothing -> False) ++ "\n") c_uart_puts_vm
         case mL1 of
           Nothing -> do P.freePage l0; return Nothing
           Just l1 -> do
             P.zeroPage l1
-            liftIO $ withCString "allocPageMap l1 zero ok\n" c_uart_puts_vm
             liftIO $ c_clone_l1 l1
-            liftIO $ withCString "allocPageMap clone l1 ok\n" c_uart_puts_vm
             mL2 <- P.allocPage
-            liftIO $ withCString ("allocPageMap mL2 " ++ show (case mL2 of Just _ -> True; Nothing -> False) ++ "\n") c_uart_puts_vm
             case mL2 of
               Nothing -> do P.freePage l1; P.freePage l0; return Nothing
               Just l2 -> do
                 P.zeroPage l2
                 liftIO $ c_clone_l2 l2
-                liftIO $ withCString "allocPageMap l2 zero ok\n" c_uart_puts_vm
                 pokeElemOff l0 (l0Index minVAddr) (descFromTable l1)
                 pokeElemOff l1 (l1Index minVAddr) (descFromTable l2)
                 let pm = PageMap l0

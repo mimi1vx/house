@@ -14,7 +14,7 @@ log_user 1
 # Build spawn command with extra args
 # Force 8 transports so first blk lands at slot 7 (within 0..7 scan) — QEMU default 32 puts it at 31 outside our 8.
 # Also force modern virtio (force-legacy=false) else queue setup fails with legacy mode.
-set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel"
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
 foreach a $qemu_extra {
     if {$a eq "--"} { continue }
     append cmd " $a"

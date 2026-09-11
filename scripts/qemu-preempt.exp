@@ -37,7 +37,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
 if {$accel eq "tcg"} { set iters "1600000000" } else { set iters "6000000000" }
 log_user 1
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
-    -smp $smp -m $mem -nographic -kernel $kernel
+    -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
     -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
