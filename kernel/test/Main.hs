@@ -26,13 +26,15 @@ module Main (main) where
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM, unless)
+import Data.Bits (shiftR)
+import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.Either (isLeft)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Ix qualified as Ix
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Word (Word16, Word32, Word8)
+import Data.Word (Word16, Word32, Word64, Word8)
 import H.FileSystem qualified as FS
 import H.Monad qualified as HM
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
@@ -43,7 +45,11 @@ import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
 import Kernel.Userspace.Loader qualified as Ldr
-import System.Exit (exitFailure)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
+import System.Exit (ExitCode (..), exitFailure)
+import System.FilePath ((</>))
+import System.IO (hPutStrLn, stderr)
+import System.Process (readProcessWithExitCode)
 import Test.QuickCheck (Arbitrary (..), Property, choose, counterexample, property, quickCheckResult, vectorOf, (===))
 import Test.QuickCheck qualified as QC
 import Util.Word12 (Word12)
@@ -592,6 +598,34 @@ main = do
       , assertThrows "word12 succ maxBound" (succ (maxBound :: Word12))
       , assertThrows "word12 pred minBound" (pred (minBound :: Word12))
       , assertThrows "word12 ix OOB" (Ix.index (0, 3 :: Word12) 4)
+      , -- M1 dynamic linking: ET_DYN + RELATIVE-only RELA + hostile vectors
+        check "elf ET_EXEC min parses" (isDynRight elfExecMin False)
+      , check "elf ET_DYN good parses" (isDynRight elfDynGood True)
+      , check "elf dyn interp pin" (dynInterpIs elfDynGood (Just "/lib/ld-house.so.0"))
+      , check "elf dyn one rela" (dynRelaCountIs elfDynGood 1)
+      , check "elf dyn relro pin" (dynRelroIs elfDynGood (Just (Ldr.RelroRange 0x01000000 0x01000010)))
+      , check "elf dyn two needed" (dynNeededIs elfNeededTwo ["libc-house.so.0", "libm-house.so.0"])
+      , assertLoadLeft "elf bad type" elfBadType Ldr.BadType
+      , assertLoadLeft "elf entry outside LOAD" elfEntryOutside (Ldr.BadSegment "entry not in LOAD")
+      , assertLoadLeft "elf interp wrong path" elfInterpWrong (Ldr.BadDyn "interp path /lib/ld-linux.so.2")
+      , assertLoadLeft "elf interp too long" elfInterpLong (Ldr.BadDyn "interp too long")
+      , assertLoadLeft "elf interp double" elfDoubleInterp (Ldr.BadDyn "double-interp")
+      , assertLoadLeft "elf dynamic truncated" elfDynTrunc Ldr.Truncated
+      , assertLoadLeft "elf strsz overrun" elfStrszOverrun (Ldr.BadDyn "strsz overrun")
+      , assertLoadLeft "elf rela outside LOAD" elfRelaOutside (Ldr.BadDyn "rela outside LOAD")
+      , assertLoadLeft "elf rela count cap" elfRelaCount (Ldr.BadDyn "rela count")
+      , check "elf jump-slot reject" (Ldr.loadElf elfJumpSlot == Left (Ldr.UnsupportedReloc 1026))
+      , check "elf tls reject" (Ldr.loadElf elfTls == Left Ldr.TlsUnsupported)
+      , assertLoadLeft "elf relro outside LOAD" elfRelroOutside (Ldr.BadDyn "relro outside LOAD")
+      , check "needed cycle a->b->a" (Ldr.findNeededCycle [("a", ["b"]), ("b", ["a"])] == Left Ldr.NeededCycle)
+      , check "needed self cycle" (Ldr.findNeededCycle [("a", ["a"])] == Left Ldr.NeededCycle)
+      , check "needed acyclic" (Ldr.findNeededCycle [("a", ["b"]), ("b", [])] == Right ())
+      , check "needed diamond ok" (Ldr.findNeededCycle [("a", ["b", "c"]), ("b", ["d"]), ("c", ["d"]), ("d", [])] == Right ())
+      , check "rela slide good" (Ldr.applyRelativeRelocs 0x01000000 [Ldr.Rela 0x01000008 1027 0x2000] (replicate 16 0) == Right (replicate 8 0 ++ put64le 0x01002000))
+      , check "rela slide overflow" (Ldr.applyRelativeRelocs 0x01000000 [Ldr.Rela 0x01000008 1027 (maxBound :: Word64)] (replicate 16 0) == Left Ldr.OverlapSize)
+      , check "rela slide jump reject" (Ldr.applyRelativeRelocs 0x01000000 [Ldr.Rela 0x01000008 1026 0] (replicate 16 0) == Left (Ldr.UnsupportedReloc 1026))
+      , check "rela file slide good" (Ldr.applyRelocsToFile [Ldr.Segment 0x01000000 288 512 512 5] 0x01000000 [Ldr.Rela 0x01000008 1027 0x2000] (replicate 512 0) == Right (replicate 296 0 ++ put64le 0x01002000 ++ replicate 208 0))
+      , checkIO "loader vs repack parity" parityCheck
       ]
   unless (and results) exitFailure
   putStrLn "all pure tests passed"
@@ -614,3 +648,237 @@ blkTruncGolden :: IO Bool
 blkTruncGolden = case BP.encodeImage [("/a", [1, 2, 3])] of
   Left _ -> check "blk trunc body" False
   Right img -> assertLeft "blk trunc body" (BP.decodeImage (trunc img))
+
+-- M1 dynamic-linking fixtures -------------------------------------------------
+
+-- | Little-endian encoders for synthetic ELF fixtures.
+put16le :: Word16 -> [Word8]
+put16le w = [fromIntegral w, fromIntegral (w `shiftR` 8)]
+
+put32le :: Word32 -> [Word8]
+put32le w = [fromIntegral (w `shiftR` s) | s <- [0, 8, 16, 24]]
+
+put64le :: Word64 -> [Word8]
+put64le w = [fromIntegral (w `shiftR` s) | s <- [0, 8, 16, 24, 32, 40, 48, 56]]
+
+-- | Splice bytes into a fixture at a file offset (total).
+patchAt :: [Word8] -> Int -> [Word8] -> [Word8]
+patchAt bs off new = take off bs ++ new ++ drop (off + length new) bs
+
+-- | Minimal 64-byte EHDR (phoff 64, phentsize 56).
+mkEhdr :: Word16 -> Word64 -> Int -> [Word8]
+mkEhdr etype entry phnum =
+  [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    ++ put16le etype
+    ++ put16le 183
+    ++ put32le 1
+    ++ put64le entry
+    ++ put64le 64
+    ++ put64le 0
+    ++ put32le 0
+    ++ put16le 64
+    ++ put16le 56
+    ++ put16le (fromIntegral phnum)
+    ++ put16le 0
+    ++ put16le 0
+    ++ put16le 0
+
+-- | One 56-byte program header.
+mkPhdr :: Word32 -> Word32 -> Word64 -> Word64 -> Word64 -> Word64 -> Word64 -> [Word8]
+mkPhdr ptype flags off vaddr filesz memsz align =
+  put32le ptype
+    ++ put32le flags
+    ++ put64le off
+    ++ put64le vaddr
+    ++ put64le vaddr
+    ++ put64le filesz
+    ++ put64le memsz
+    ++ put64le align
+
+-- | 16-byte EL0 stub (movz x0 + ret) standing in for real code.
+dynCode16 :: [Word8]
+dynCode16 = [0x20, 0x00, 0x80, 0xD2, 0xC0, 0x03, 0x5F, 0xD6, 0, 0, 0, 0, 0, 0, 0, 0]
+
+interpGoodBs :: [Word8]
+interpGoodBs = map (fromIntegral . ord) "/lib/ld-house.so.0" ++ [0]
+
+interpBadBs :: [Word8]
+interpBadBs = map (fromIntegral . ord) "/lib/ld-linux.so.2" ++ [0]
+
+-- | Dynamic array with DT_NULL terminator appended.
+mkDynArr :: [(Word64, Word64)] -> [Word8]
+mkDynArr ents = concatMap (\(t, v) -> put64le t ++ put64le v) (ents ++ [(0, 0)])
+
+-- | One 24-byte RELA entry (symbol field 0).
+mkRelaEnt :: Word64 -> Word32 -> Word64 -> [Word8]
+mkRelaEnt off typ add = put64le off ++ put64le (fromIntegral typ) ++ put64le add
+
+{- | 512-byte LOAD blob: code at 0, interp at 0x10, dynamic at 0x100,
+RELA at 0x180 (VAs 0x01000000 + offset).
+-}
+mkDynBlob :: [Word8] -> [(Word64, Word64)] -> (Word32, Word64, Word64) -> [Word8]
+mkDynBlob interp dynEnts (rtype, roff, radd) =
+  patchAt
+    (patchAt (patchAt (patchAt (replicate 512 0) 0 dynCode16) 0x10 interp) 0x100 (mkDynArr dynEnts))
+    0x180
+    (mkRelaEnt roff rtype radd)
+
+goodDynEnts :: [(Word64, Word64)]
+goodDynEnts = [(7, 0x01000180), (8, 24), (9, 24)]
+
+goodBlob :: [Word8]
+goodBlob = mkDynBlob interpGoodBs goodDynEnts (1027, 0x01000008, 0x2000)
+
+{- | Dynamic ELF: LOAD + INTERP + DYNAMIC + RELRO, blobs packed after the
+headers. Interp/dyn specs are (blob off, size); dyn also carries its VA.
+The LOAD file offset is computed from the phdr count, never hardcoded.
+-}
+mkDynElf :: Word16 -> Word64 -> [Word8] -> [(Int, Int)] -> [(Int, Word64, Int)] -> [(Word64, Word64)] -> [[Word8]] -> [Word8]
+mkDynElf etype entry blob interps dyns relros extras =
+  let n = 1 + length interps + length dyns + length relros + length extras
+      base = 64 + 56 * n
+      h = mkEhdr etype entry n
+      pLoad = mkPhdr 1 5 (fromIntegral base) 0x01000000 0x200 0x200 0
+      pIs = [mkPhdr 3 0 (fromIntegral (base + o)) 0 (fromIntegral s) (fromIntegral s) 1 | (o, s) <- interps]
+      pDs = [mkPhdr 2 0 (fromIntegral (base + o)) v (fromIntegral s) (fromIntegral s) 8 | (o, v, s) <- dyns]
+      pRs = [mkPhdr 0x6474E552 0 0 v m m 1 | (v, m) <- relros]
+   in h ++ pLoad ++ concat pIs ++ concat pDs ++ concat pRs ++ concat extras ++ blob
+
+elfExecMin :: [Word8]
+elfExecMin = mkEhdr 2 0x01000000 1 ++ mkPhdr 1 5 120 0x01000000 16 16 0 ++ dynCode16
+
+elfDynGood :: [Word8]
+elfDynGood = mkDynElf 3 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 64)] [(0x01000000, 0x10)] []
+
+elfBadType :: [Word8]
+elfBadType = mkDynElf 7 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 64)] [(0x01000000, 0x10)] []
+
+elfEntryOutside :: [Word8]
+elfEntryOutside = mkDynElf 3 0x02000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 64)] [(0x01000000, 0x10)] []
+
+elfInterpWrong :: [Word8]
+elfInterpWrong =
+  mkDynElf 3 0x01000000 (mkDynBlob interpBadBs goodDynEnts (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [(0x01000000, 0x10)] []
+
+elfInterpLong :: [Word8]
+elfInterpLong = mkDynElf 3 0x01000000 goodBlob [(0x10, 300)] [(0x100, 0x01000100, 64)] [(0x01000000, 0x10)] []
+
+elfDoubleInterp :: [Word8]
+elfDoubleInterp = mkDynElf 3 0x01000000 goodBlob [(0x10, 19), (0x10, 19)] [(0x100, 0x01000100, 64)] [] []
+
+elfDynTrunc :: [Word8]
+elfDynTrunc = mkDynElf 3 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 10000)] [] []
+
+elfStrszOverrun :: [Word8]
+elfStrszOverrun =
+  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [(5, 0x01000000), (10, 70000)] (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 48)] [] []
+
+elfRelaOutside :: [Word8]
+elfRelaOutside =
+  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs goodDynEnts (1027, 0x02000000, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
+
+elfRelaCount :: [Word8]
+elfRelaCount =
+  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [(7, 0x01000180), (8, 120000), (9, 24)] (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
+
+elfJumpSlot :: [Word8]
+elfJumpSlot =
+  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs goodDynEnts (1026, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
+
+elfTls :: [Word8]
+elfTls =
+  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs goodDynEnts (1051, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
+
+elfRelroOutside :: [Word8]
+elfRelroOutside = mkDynElf 3 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 64)] [(0x02000000, 0x10)] []
+
+elfNeededTwo :: [Word8]
+elfNeededTwo =
+  let strtab = map (fromIntegral . ord) "libc-house.so.0\0libm-house.so.0\0" :: [Word8]
+      blob = patchAt (mkDynBlob interpGoodBs [(1, 0), (1, 16), (5, 0x010001A0), (10, 32)] (1027, 0x01000008, 0x2000)) 0x1A0 strtab
+   in mkDynElf 3 0x01000000 blob [(0x10, 19)] [(0x100, 0x01000100, 80)] [] []
+
+-- | Total field probes over a parsed fixture (Left counts as mismatch).
+isDynRight :: [Word8] -> Bool -> Bool
+isDynRight bytes wantDyn = case Ldr.loadElf bytes of
+  Right e -> Ldr.elfIsDyn e == wantDyn
+  Left _ -> False
+
+dynInterpIs :: [Word8] -> Maybe String -> Bool
+dynInterpIs bytes want = case Ldr.loadElf bytes of
+  Right e -> Ldr.elfInterp e == want
+  Left _ -> False
+
+dynRelaCountIs :: [Word8] -> Int -> Bool
+dynRelaCountIs bytes n = case Ldr.loadElf bytes of
+  Right e -> length (Ldr.elfRelas e) == n
+  Left _ -> False
+
+dynRelroIs :: [Word8] -> Maybe Ldr.RelroRange -> Bool
+dynRelroIs bytes want = case Ldr.loadElf bytes of
+  Right e -> Ldr.elfRelro e == want
+  Left _ -> False
+
+dynNeededIs :: [Word8] -> [String] -> Bool
+dynNeededIs bytes want = case Ldr.loadElf bytes of
+  Right e -> Ldr.dynNeeded (Ldr.elfDyn e) == want
+  Left _ -> False
+
+-- Differential parity: every vector must agree accept/reject ------------------
+
+parityVectors :: [(String, [Word8])]
+parityVectors =
+  [ ("static-min", elfExecMin)
+  , ("dyn-good", elfDynGood)
+  , ("dyn-needed-two", elfNeededTwo)
+  , ("bad-type", elfBadType)
+  , ("entry-outside", elfEntryOutside)
+  , ("interp-wrong", elfInterpWrong)
+  , ("interp-long", elfInterpLong)
+  , ("interp-double", elfDoubleInterp)
+  , ("dyn-trunc", elfDynTrunc)
+  , ("strsz-overrun", elfStrszOverrun)
+  , ("rela-outside", elfRelaOutside)
+  , ("rela-count", elfRelaCount)
+  , ("jump-slot", elfJumpSlot)
+  , ("tls", elfTls)
+  , ("relro-outside", elfRelroOutside)
+  ]
+
+findRepack :: IO (Maybe FilePath)
+findRepack = go ["../../build-probe/repack.py", "../build-probe/repack.py", "build-probe/repack.py"]
+  where
+    go [] = return Nothing
+    go (p : rest) = do
+      ok <- doesFileExist p
+      if ok then return (Just p) else go rest
+
+{- | Feed every vector to both Loader.hs and repack.py; any accept/reject
+divergence fails. Fixture bytes are pure ASCII-range values, but they are
+still written as raw bytes so the harness never depends on the locale.
+-}
+parityCheck :: IO Bool
+parityCheck = do
+  tmp <- getTemporaryDirectory
+  let dir = tmp </> "house-parity"
+  createDirectoryIfMissing True dir
+  mRepack <- findRepack
+  case mRepack of
+    Nothing -> hPutStrLn stderr "parity: repack.py not found" >> return False
+    Just repack -> do
+      results <- forM parityVectors $ \(name, bytes) -> do
+        let src = dir </> (name ++ ".bin")
+            dst = dir </> (name ++ ".out")
+        BS.writeFile src (BS.pack bytes)
+        r <- try (readProcessWithExitCode "python3" [repack, src, dst] "") :: IO (Either SomeException (ExitCode, String, String))
+        case r of
+          Left e -> hPutStrLn stderr ("parity spawn failed: " ++ show e) >> return False
+          Right (code, _, _) -> do
+            let repackAccept = code == ExitSuccess
+                loaderAccept = case Ldr.loadElf bytes of
+                  Right _ -> True
+                  Left _ -> False
+            if repackAccept == loaderAccept
+              then return True
+              else hPutStrLn stderr ("parity mismatch: " ++ name) >> return False
+      return (and results)

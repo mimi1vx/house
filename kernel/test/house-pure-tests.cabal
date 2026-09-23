@@ -60,9 +60,13 @@ test-suite house-pure
   build-depends:
     base >= 4.18 && < 5,
     array,
+    bytestring,
     containers,
+    directory,
+    filepath,
     mtl,
     pretty,
+    process,
     QuickCheck >= 2.14 && < 3
   default-language: GHC2024
   ghc-options: -Wall
