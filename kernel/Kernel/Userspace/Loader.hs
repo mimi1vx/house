@@ -5,31 +5,32 @@ Module      : Kernel.Userspace.Loader
 Description : Pure ELF64 aarch64 parser with caps (untrusted input).
 Stability   : experimental
 
-Parses static + PIE aarch64 ELF64 (LE) for the 0x01000000 window.
-Validates e_ident, e_machine=183, e_type in {ET_EXEC, ET_DYN},
-phnum<=8, each PT_LOAD segment p_vaddr in window,
-p_filesz<=p_memsz, p_memsz<=256K, total pages<=64, entry inside a
-PT_LOAD, overflow guards, no partial functions.
-
-Dynamic (M1, kernel-is-the-loader): PT_INTERP is recorded + validated
-only (must equal /lib/ld-house.so.0, never executed as EL0 code);
-PT_DYNAMIC DT_NEEDED/STRTAB/STRSZ/RELA parsed with bounds;
-PT_GNU_RELRO recorded + validated inside a PT_LOAD (no permission
-enforcement yet beyond bind-now); RELA R_AARCH64_RELATIVE-only applied
-by a pure function. JUMP_SLOT/GLOB_DAT rejected, TLS fail-closed.
+Parses static + PIE/shared aarch64 ELF64 (LE) with bounded metadata.
+ET_EXEC retains the 0x01000000-0xFFFFFFFF window; ET_DYN accepts standard
+low relative virtual addresses and BSS. Dynamic metadata is limited to
+SysV hash, eager AArch64 symbol relocations, relative relocations, and
+RELRO. PT_INTERP is pinned to /lib/ld-house.so.0 and recorded only.
+Runtime execution rejects dynamic objects until M2.1 implements binding.
 -}
 module Kernel.Userspace.Loader (
   LoadError (..),
   Segment (..),
   Elf (..),
   DynInfo (..),
-  Rela (..),
+  DynamicSymbol (..),
+  DynamicSymbols (..),
+  HashStyle (..),
+  SysvHash (..),
+  RelocationTable (..),
+  RelocationTableKind (..),
+  Relocation (..),
+  RelativeRelocation (..),
+  EagerSymbolRelocation (..),
   RelroRange (..),
-  DynAcc (..),
-  emptyDynInfo,
-  emptyDynAcc,
   ldHousePath,
+  stackPageStart,
   loadElf,
+  validateRunElf,
   loadErrorToString,
   applyRelativeRelocs,
   applyRelocsToFile,
@@ -41,18 +42,21 @@ module Kernel.Userspace.Loader (
   maxDynStrSz,
   maxNeeded,
   maxRelaCount,
+  maxDynHashBuckets,
+  maxDynSymbols,
+  maxSymbolNameLen,
 )
 where
 
 import Data.Array (Array, bounds, listArray, (!), (//))
 import Data.Bits (Bits (shiftL, shiftR), (.&.), (.|.))
 import Data.Char (chr)
-import Data.Maybe (fromMaybe)
-import Data.Word (Word32, Word64, Word8)
+import Data.List (sortOn)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Word (Word16, Word32, Word64, Word8)
 
--- | Caps from plan security invariants.
 maxElfBytes :: Int
-maxElfBytes = 1 `shiftL` 20 -- 1M
+maxElfBytes = 1 `shiftL` 20
 
 maxPhnum :: Int
 maxPhnum = 8
@@ -63,13 +67,12 @@ maxSegMemSz = 256 * 1024
 maxTotalPages :: Int
 maxTotalPages = 64
 
-minVAddr :: Word64
-minVAddr = 0x01000000
+minExecVAddr :: Word64
+minExecVAddr = 0x01000000
 
 maxVAddr :: Word64
 maxVAddr = 0xFFFFFFFF
 
--- | M1 caps: hostile dynamic input stays bounded before expensive work.
 maxInterpLen :: Int
 maxInterpLen = 256
 
@@ -88,70 +91,122 @@ maxDynEnt = 64
 maxNeededNameLen :: Int
 maxNeededNameLen = 128
 
--- | Version pin + path contract: the only accepted PT_INTERP value.
+maxDynHashBuckets :: Int
+maxDynHashBuckets = 4096
+
+maxDynSymbols :: Int
+maxDynSymbols = 4096
+
+maxSymbolNameLen :: Int
+maxSymbolNameLen = 256
+
 ldHousePath :: String
 ldHousePath = "/lib/ld-house.so.0"
 
--- | Phdr types we materialize; all other types are skipped.
-ptLoad :: Word32
+stackPageStart :: Word64
+stackPageStart = 0x3FFFD000
+
+ptLoad, ptDynamic, ptInterp, ptTls :: Word32
 ptLoad = 1
-
-ptDynamic :: Word32
 ptDynamic = 2
-
-ptInterp :: Word32
 ptInterp = 3
+ptTls = 7
 
 ptGnuRelro :: Word32
 ptGnuRelro = 0x6474E552
 
-{- | Dynamic tags accepted in v1 (plus DT_NULL terminator and the
-bind-now markers DT_BIND_NOW/DT_FLAGS, whose values are ignored).
-PT_GNU_RELRO carries the RELRO range, so no DT_RELRO tag is needed.
--}
-dtNull :: Word64
+pfW :: Word32
+pfW = 2
+
+dtNull, dtNeeded, dtPltGot, dtStrtab, dtSymtab :: Word64
 dtNull = 0
-
-dtNeeded :: Word64
 dtNeeded = 1
-
-dtStrtab :: Word64
+dtPltGot = 3
 dtStrtab = 5
-
-dtSymtab :: Word64
 dtSymtab = 6
 
-dtRela :: Word64
+dtRela, dtRelasz, dtRelaent, dtStrsz, dtSyment :: Word64
 dtRela = 7
-
-dtRelasz :: Word64
 dtRelasz = 8
-
-dtRelaent :: Word64
 dtRelaent = 9
-
-dtStrsz :: Word64
 dtStrsz = 10
+dtSyment = 11
 
-dtBindNow :: Word64
+dtSoname, dtInit, dtFini :: Word64
+dtSoname = 14
+dtInit = 12
+dtFini = 13
+
+dtRel, dtRelsz, dtRelent, dtDebug, dtTextrel :: Word64
+dtRel = 17
+dtRelsz = 18
+dtRelent = 19
+dtDebug = 21
+dtTextrel = 22
+
+dtJmpRel, dtPltRelsz, dtPltRel, dtBindNow, dtFlags :: Word64
+dtJmpRel = 23
+dtPltRelsz = 2
+dtPltRel = 20
 dtBindNow = 24
-
-dtFlags :: Word64
 dtFlags = 30
 
--- | AArch64 dynamic reloc types (v1 is RELATIVE-only, bind-now).
-rAarch64GlobDat :: Word32
+dtInitArray, dtFiniArray, dtInitArraySz, dtFiniArraySz :: Word64
+dtInitArray = 25
+dtFiniArray = 26
+dtInitArraySz = 27
+dtFiniArraySz = 28
+
+dtRunPath, dtPreinitArray :: Word64
+dtRunPath = 29
+dtPreinitArray = 32
+
+dtPreinitArraySz, dtPreinitArrayEnt, dtSymtabShndx :: Word64
+dtPreinitArraySz = 33
+dtPreinitArrayEnt = 34
+dtSymtabShndx = 35
+
+dtRelaCount, dtHash, dtGnuHash, dtFlags1 :: Word64
+dtRelaCount = 0x6FFFFFF9
+dtHash = 4
+dtGnuHash = 0x6FFFFEF5
+dtFlags1 = 0x6FFFFFFB
+
+dtRelr, dtRelrSz, dtRelrEnt :: Word64
+dtRelr = 36
+dtRelrSz = 35
+dtRelrEnt = 37
+
+dtVerSym, dtVerDef, dtVerNeed :: Word64
+dtVerSym = 0x6FFFFFF0
+dtVerDef = 0x6FFFFFFC
+dtVerNeed = 0x6FFFFFFE
+
+dtTlsDescPlt, dtTlsDescGot, dtTlsMod, dtTlsLo, dtTlsHi :: Word64
+dtTlsDescPlt = 0x6FFFFEF6
+dtTlsDescGot = 0x6FFFFEF7
+dtTlsMod = 0x6FFFFEF9
+dtTlsLo = 0x6FFFFEFA
+dtTlsHi = 0x6FFFFEFB
+
+rAarch64GlobDat, rAarch64JumpSlot, rAarch64Relative :: Word32
 rAarch64GlobDat = 1025
-
-rAarch64JumpSlot :: Word32
 rAarch64JumpSlot = 1026
-
-rAarch64Relative :: Word32
 rAarch64Relative = 1027
 
--- | First AArch64 TLS reloc: everything at/above is TLS fail-closed.
-rAarch64TlsFirst :: Word32
-rAarch64TlsFirst = 1029
+rAarch64TlsFirst, rAarch64IRelative :: Word32
+rAarch64TlsFirst = 1028
+rAarch64IRelative = 1037
+
+dfBindNow, dfTextrel :: Word64
+dfBindNow = 0x8
+dfTextrel = 0x4
+
+df1Now :: Word64
+df1Now = 0x1
+
+sttTls :: Word8
+sttTls = 6
 
 data LoadError
   = BadMagic
@@ -179,41 +234,88 @@ data Segment = Segment {
   }
   deriving (Eq, Show)
 
--- | Raw file offsets parsed from PT_DYNAMIC (VAs translated via LOADs).
+data HashStyle
+  = NoHash
+  | SysVHash SysvHash
+  deriving (Eq, Show)
+
+data SysvHash = SysvHash {
+  sysvHashOffset :: Int
+  , sysvHashSize :: Int
+  , sysvHashBuckets :: Int
+  , sysvHashSymbols :: Int
+  }
+  deriving (Eq, Show)
+
+data DynamicSymbol = DynamicSymbol {
+  dynamicSymbolName :: String
+  , dynamicSymbolInfo :: Word8
+  , dynamicSymbolOther :: Word8
+  , dynamicSymbolSection :: Word16
+  , dynamicSymbolValue :: Word64
+  , dynamicSymbolSize :: Word64
+  }
+  deriving (Eq, Show)
+
+data DynamicSymbols = DynamicSymbols {
+  dynamicSymbolsOffset :: Int
+  , dynamicSymbolsEntSize :: Int
+  , dynamicSymbolEntries :: [DynamicSymbol]
+  }
+  deriving (Eq, Show)
+
+data RelocationTableKind
+  = DynamicRelocations
+  | PltRelocations
+  deriving (Eq, Show)
+
+data RelativeRelocation = RelativeRelocation {
+  relativeOffset :: Word64
+  , relativeAddend :: Word64
+  }
+  deriving (Eq, Show)
+
+data EagerSymbolRelocation = EagerSymbolRelocation {
+  eagerOffset :: Word64
+  , eagerType :: Word32
+  , eagerSymbolIndex :: Word32
+  , eagerSymbolName :: String
+  , eagerAddend :: Word64
+  }
+  deriving (Eq, Show)
+
+data Relocation
+  = RelativeBinding RelativeRelocation
+  | EagerSymbolBinding EagerSymbolRelocation
+  deriving (Eq, Show)
+
+data RelocationTable = RelocationTable {
+  relocationTableKind :: RelocationTableKind
+  , relocationTableOffset :: Int
+  , relocationTableSize :: Int
+  , relocationTableEntSize :: Int
+  , relocationTableEntries :: [Relocation]
+  }
+  deriving (Eq, Show)
+
 data DynInfo = DynInfo {
-  dynNeeded :: [String]
-  , dynRelaOff :: Int
-  , dynRelaSize :: Int
-  , dynRelaEnt :: Int
+  dynPresent :: Bool
+  , dynNeeded :: [String]
+  , dynSoname :: Maybe String
+  , dynHashStyle :: HashStyle
+  , dynBindNow :: Bool
+  , dynFlags1 :: Word64
+  , dynPltGot :: Maybe Word64
   , dynStrOff :: Int
   , dynStrSz :: Int
+  , dynSymbols :: Maybe DynamicSymbols
+  , dynRelocations :: [RelocationTable]
   }
   deriving (Eq, Show)
 
--- | One RELA entry: r_offset is the object VA, r_addend the stored value.
-data Rela = Rela {
-  relaOffset :: Word64
-  , relaType :: Word32
-  , relaAddend :: Word64
-  }
-  deriving (Eq, Show)
-
--- | Validated PT_GNU_RELRO range (subset of one PT_LOAD).
 data RelroRange = RelroRange {
   relroStart :: Word64
   , relroEnd :: Word64
-  }
-  deriving (Eq, Show)
-
--- | Accumulator for the PT_DYNAMIC tag walk.
-data DynAcc = DynAcc {
-  accNeeded :: [Word64]
-  , accStrtab :: Maybe Word64
-  , accStrsz :: Maybe Word64
-  , accRela :: Maybe Word64
-  , accRelasz :: Maybe Word64
-  , accRelaent :: Maybe Word64
-  , accDone :: Bool
   }
   deriving (Eq, Show)
 
@@ -224,16 +326,72 @@ data Elf = Elf {
   , elfIsDyn :: Bool
   , elfInterp :: Maybe String
   , elfDyn :: DynInfo
-  , elfRelas :: [Rela]
   , elfRelro :: Maybe RelroRange
   }
   deriving (Eq, Show)
 
-emptyDynInfo :: DynInfo
-emptyDynInfo = DynInfo [] 0 0 0 0 0
+data DynAcc = DynAcc {
+  accNeeded :: [Word64]
+  , accSoname :: Maybe Word64
+  , accStrtab :: Maybe Word64
+  , accStrsz :: Maybe Word64
+  , accSymtab :: Maybe Word64
+  , accSyment :: Maybe Word64
+  , accHash :: Maybe Word64
+  , accRela :: Maybe Word64
+  , accRelasz :: Maybe Word64
+  , accRelaent :: Maybe Word64
+  , accJmpRel :: Maybe Word64
+  , accPltRelsz :: Maybe Word64
+  , accPltRel :: Maybe Word64
+  , accPltGot :: Maybe Word64
+  , accFlags :: Maybe Word64
+  , accFlags1 :: Maybe Word64
+  , accBindNowTag :: Bool
+  , accDebugTag :: Bool
+  , accDone :: Bool
+  }
+  deriving (Eq, Show)
 
 emptyDynAcc :: DynAcc
-emptyDynAcc = DynAcc [] Nothing Nothing Nothing Nothing Nothing False
+emptyDynAcc =
+  DynAcc {
+    accNeeded = []
+    , accSoname = Nothing
+    , accStrtab = Nothing
+    , accStrsz = Nothing
+    , accSymtab = Nothing
+    , accSyment = Nothing
+    , accHash = Nothing
+    , accRela = Nothing
+    , accRelasz = Nothing
+    , accRelaent = Nothing
+    , accJmpRel = Nothing
+    , accPltRelsz = Nothing
+    , accPltRel = Nothing
+    , accPltGot = Nothing
+    , accFlags = Nothing
+    , accFlags1 = Nothing
+    , accBindNowTag = False
+    , accDebugTag = False
+    , accDone = False
+    }
+
+emptyDynInfo :: DynInfo
+emptyDynInfo =
+  DynInfo {
+    dynPresent = False
+    , dynNeeded = []
+    , dynSoname = Nothing
+    , dynHashStyle = NoHash
+    , dynBindNow = False
+    , dynFlags1 = 0
+    , dynPltGot = Nothing
+    , dynStrOff = 0
+    , dynStrSz = 0
+    , dynSymbols = Nothing
+    , dynRelocations = []
+    }
 
 loadErrorToString :: LoadError -> String
 loadErrorToString e = case e of
@@ -258,7 +416,6 @@ showHex64 w = if w == 0 then "0" else go w
     go n
       | n < 16 = [hexDigit (fromIntegral n)]
       | otherwise = go (n `div` 16) ++ [hexDigit (fromIntegral (n `mod` 16))]
-    -- \| Total nibble render; index reduced mod 16.
     hexDigit :: Int -> Char
     hexDigit n = case n `mod` 16 of
       0 -> '0'
@@ -278,7 +435,6 @@ showHex64 w = if w == 0 then "0" else go w
       14 -> 'e'
       _ -> 'f'
 
--- | Total ELF parser. No head/fromJust/!!.
 loadElf :: [Word8] -> Either LoadError Elf
 loadElf bytes
   | length bytes > maxElfBytes = Left OverlapSize
@@ -293,7 +449,7 @@ loadElf bytes
             Left e -> Left e
             Right () -> case parseSegments bytes phoff phnum phentsz of
               Left e -> Left e
-              Right segs -> case validateSegments segs bytes entry of
+              Right segs -> case validateSegments segs bytes entry isDyn of
                 Left e -> Left e
                 Right validSegs -> case collectRawPhdrs bytes phoff phnum phentsz of
                   Left e -> Left e
@@ -303,13 +459,17 @@ loadElf bytes
                       Left e -> Left e
                       Right relro -> case parseDynamic raws bytes validSegs of
                         Left e -> Left e
-                        Right (dyn, relas) ->
-                          Right (Elf entry validSegs bytes isDyn interp dyn relas relro)
+                        Right dyn -> Right (Elf entry validSegs bytes isDyn interp dyn relro)
+
+validateRunElf :: Elf -> Either LoadError ()
+validateRunElf elf
+  | elfIsDyn elf || isJust (elfInterp elf) || dynPresent (elfDyn elf) = Left (BadDyn "dynamic execution unsupported")
+  | otherwise = Right ()
 
 checkIdent :: [Word8] -> Either LoadError ()
 checkIdent bs = case take 16 bs of
   [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0] -> Right ()
-  [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, _, _, _, _, _, _, _, _, _] -> Right () -- allow padding variants with EI_ABIVERSION 0
+  [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, _, _, _, _, _, _, _, _, _] -> Right ()
   _ -> Left BadMagic
 
 parseHeader :: [Word8] -> Either LoadError (Bool, Word64, Word64, Int, Int)
@@ -333,17 +493,18 @@ validatePhnum n
   | otherwise = Right ()
 
 checkPhoff :: Word64 -> Int -> Int -> [Word8] -> Either LoadError ()
-checkPhoff phoff phnum phentsz bs =
-  let ent = if phentsz == 0 then 56 else phentsz
-      needed = fromIntegral phoff + phnum * ent
-   in if needed > length bs
-        then Left Truncated
-        else
-          if ent /= 56 && phnum > 0
-            then Left (BadSegment "phentsz !=56")
-            else Right ()
+checkPhoff phoff phnum phentsz bs
+  | phoff > fromIntegral (maxBound :: Int) = Left OverlapSize
+  | otherwise =
+      let ent = if phentsz == 0 then 56 else phentsz
+          needed = fromIntegral phoff + phnum * ent
+       in if needed > length bs
+            then Left Truncated
+            else
+              if ent /= 56 && phnum > 0
+                then Left (BadSegment "phentsz !=56")
+                else Right ()
 
--- | Raw phdr row: (p_type, p_flags, p_offset, p_vaddr, p_filesz, p_memsz, p_align).
 type RawPhdr = (Word32, Word32, Word64, Word64, Word64, Word64, Word64)
 
 rawType :: RawPhdr -> Word32
@@ -395,41 +556,48 @@ parseOneSegment bs off = do
   pFilesz <- getWord64LE bs (off + 32)
   pMemsz <- getWord64LE bs (off + 40)
   pAlign <- getWord64LE bs (off + 48)
-  -- Only PT_LOAD (1) is material ; others produce empty segment that will be filtered
-  if pType /= ptLoad
-    then Right (Segment pVaddr (fromIntegral pOff) 0 0 pFlags) -- placeholder to filter
-    else do
-      let foff = fromIntegral pOff :: Int
-          fsz = fromIntegral pFilesz :: Int
-          msz = fromIntegral pMemsz :: Int
-      -- Use Word64 for overflow safe checks before converting
-      if pFilesz > 0xFFFFFFFF || pMemsz > 0xFFFFFFFF then Left OverlapSize else Right ()
-      if fsz > msz then Left (BadSegment "filesz > memsz") else Right ()
-      if msz > maxSegMemSz then Left NoSpace else Right ()
-      if pAlign /= 0 && pAlign /= 4096 then Left Misaligned else Right ()
-      if pAlign == 4096 && (pOff .&. 4095) /= (pVaddr .&. 4095) then Left Misaligned else Right ()
-      Right (Segment pVaddr foff fsz msz pFlags)
+  if pType == ptTls
+    then Left TlsUnsupported
+    else
+      if pType /= ptLoad
+        then Right (Segment pVaddr (fromIntegral pOff) 0 0 pFlags)
+        else do
+          if pFilesz > fromIntegral maxSegMemSz || pMemsz > fromIntegral maxSegMemSz
+            then Left NoSpace
+            else Right ()
+          if pFilesz > pMemsz then Left (BadSegment "filesz > memsz") else Right ()
+          if not (validAlign pAlign) then Left Misaligned else Right ()
+          if pAlign /= 0 && ((pVaddr - pOff) .&. (pAlign - 1)) /= 0
+            then Left Misaligned
+            else Right ()
+          Right (Segment pVaddr (fromIntegral pOff) (fromIntegral pFilesz) (fromIntegral pMemsz) pFlags)
+  where
+    validAlign a = a == 0 || (a >= 4096 && a <= 65536 && isPowerOfTwo a)
+    isPowerOfTwo 0 = False
+    isPowerOfTwo x = (x .&. (x - 1)) == 0
 
-validateSegments :: [Segment] -> [Word8] -> Word64 -> Either LoadError [Segment]
-validateSegments segs bytes entry =
-  let loads = filter (\s -> segMemSz s > 0 || segFileSz s > 0) segs
-      -- But also keep zero-size PT_LOAD? Filter empties from non-PT_LOAD placeholders where both 0
-      -- Our placeholders have memsz 0 and filesz 0, so they are filtered
+validateSegments :: [Segment] -> [Word8] -> Word64 -> Bool -> Either LoadError [Segment]
+validateSegments segs bytes entry isDyn =
+  let loads = sortOn segVaddr (filter (\s -> segMemSz s > 0 || segFileSz s > 0) segs)
       len = length bytes
    in do
-        if entry < minVAddr || entry > maxVAddr then Left (OutOfWindow entry) else Right ()
+        checkVaddr entry
+        if not isDyn && any (\s -> segFileSz s < segMemSz s) loads
+          then Left (BadSegment "static BSS unsupported")
+          else Right ()
         if length loads > maxPhnum then Left TooManyPhdrs else Right ()
-        -- per-segment checks
         mapM_ (checkSeg len) loads
-        -- total pages
+        checkPageOverlap loads
+        checkStackCollision loads
         let pages = sum (map (\s -> (segMemSz s + 4095) `div` 4096) loads)
         if pages > maxTotalPages then Left NoSpace else Right ()
-        -- entry must land inside a PT_LOAD of the same object
-        -- (PIE base-bias rule: file entry is validated pre-slide).
         case filter (entryInSeg entry) loads of
           [] -> Left (BadSegment "entry not in LOAD")
-          _ -> return loads
+          _ -> Right loads
   where
+    checkVaddr v
+      | isDyn = if v > maxVAddr then Left (OutOfWindow v) else Right ()
+      | otherwise = if v < minExecVAddr || v > maxVAddr then Left (OutOfWindow v) else Right ()
     entryInSeg e s =
       let va = segVaddr s
           end = va + fromIntegral (segMemSz s)
@@ -439,20 +607,33 @@ validateSegments segs bytes entry =
           off = segFileOff s
           fsz = segFileSz s
           msz = segMemSz s
-      if va < minVAddr || va > maxVAddr then Left (OutOfWindow va) else Right ()
-      -- overflow: va + msz must not wrap and must be <= maxVAddr+1
+      checkVaddr va
       let vaEnd = va + fromIntegral msz
       if vaEnd < va then Left OverlapSize else Right ()
       if vaEnd > maxVAddr + 1 then Left (OutOfWindow vaEnd) else Right ()
-      if off < 0 || fsz < 0 then Left OverlapSize else Right ()
-      if off > len then Left OverlapSize else Right ()
-      if fsz > len - off then Left OverlapSize else Right ()
+      if off < 0 || fsz < 0 || off > len || fsz > len - off then Left OverlapSize else Right ()
+    pageBounds s =
+      let va = segVaddr s
+          end = va + fromIntegral (segMemSz s)
+       in (va `div` 4096, (end - 1) `div` 4096)
+    checkPageOverlap [] = Right ()
+    checkPageOverlap (s : rest) = do
+      mapM_ (checkPair s) rest
+      checkPageOverlap rest
+    checkPair a b =
+      let (aFirst, aLastPage) = pageBounds a
+          (bFirst, bLastPage) = pageBounds b
+       in if aFirst <= bLastPage && bFirst <= aLastPage
+            then Left (BadSegment "overlapping LOAD pages")
+            else Right ()
+    checkStackCollision = mapM_ checkStack
+    checkStack s =
+      let (first, lastPage) = pageBounds s
+          stackPage = stackPageStart `div` 4096
+       in if first <= stackPage && stackPage <= lastPage
+            then Left (BadSegment "stack page collision")
+            else Right ()
 
--- allow any page offset (alignment already checked above)
-
-{- | PT_INTERP record-only: at most one, filesz<=256, NUL-terminated,
-must equal ldHousePath. Absent is fine (shared libs carry no INTERP).
--}
 parseInterp :: [RawPhdr] -> [Word8] -> Either LoadError (Maybe String)
 parseInterp raws bytes =
   case [r | r <- raws, rawType r == ptInterp] of
@@ -469,27 +650,22 @@ parseOneInterp (_, _, pOff, _, pFilesz, _, _) bytes = do
   if fsz <= 0 then Left (BadDyn "interp empty") else Right ()
   if off < 0 || off > len then Left Truncated else Right ()
   if fsz > len - off then Left Truncated else Right ()
-  let slice = take fsz (drop off bytes)
-  case break (== 0) slice of
+  let raw = take fsz (drop off bytes)
+  case break (== 0) raw of
     (_, []) -> Left (BadDyn "interp not NUL-terminated")
     (name, _ : rest) -> do
-      if any (/= 0) rest
-        then Left (BadDyn "interp trailing bytes")
-        else Right ()
+      if any (/= 0) rest then Left (BadDyn "interp trailing bytes") else Right ()
       if null name then Left (BadDyn "interp empty") else Right ()
       if any (\b -> b < 32 || b > 126) name then Left (BadDyn "interp non-printable") else Right ()
       let s = map (chr . fromIntegral) name
       if s /= ldHousePath then Left (BadDyn ("interp path " ++ s)) else Right (Just s)
 
--- | PT_GNU_RELRO record-only: at most one, must sit inside one PT_LOAD.
 parseRelro :: [RawPhdr] -> [Segment] -> Either LoadError (Maybe RelroRange)
 parseRelro raws loads =
-  case [r | r <- raws, rawType r == ptRelroAlias] of
+  case [r | r <- raws, rawType r == ptGnuRelro] of
     [] -> Right Nothing
     [(_, _, _, vaddr, _, memsz, _)] -> parseOneRelro vaddr memsz loads
     _ -> Left (BadDyn "double-relro")
-  where
-    ptRelroAlias = ptGnuRelro
 
 parseOneRelro :: Word64 -> Word64 -> [Segment] -> Either LoadError (Maybe RelroRange)
 parseOneRelro vaddr memsz loads
@@ -497,26 +673,23 @@ parseOneRelro vaddr memsz loads
   | otherwise = do
       let end = vaddr + memsz
       if end < vaddr then Left OverlapSize else Right ()
-      case filter (contains vaddr end) loads of
-        [] -> Left (BadDyn "relro outside LOAD")
-        _ -> Right (Just (RelroRange vaddr end))
+      if any (contains vaddr end) loads
+        then Right (Just (RelroRange vaddr end))
+        else Left (BadDyn "relro outside LOAD")
   where
     contains s e seg =
       let va = segVaddr seg
           segEnd = va + fromIntegral (segMemSz seg)
        in segEnd >= va && s >= va && s < segEnd && e > va && e <= segEnd
 
-{- | PT_DYNAMIC parse: bounds-checked DT_* walk, VA->file translation via
-LOADs, NEEDED string resolution, RELA entry decode.
--}
-parseDynamic :: [RawPhdr] -> [Word8] -> [Segment] -> Either LoadError (DynInfo, [Rela])
+parseDynamic :: [RawPhdr] -> [Word8] -> [Segment] -> Either LoadError DynInfo
 parseDynamic raws bytes loads =
   case [r | r <- raws, rawType r == ptDynamic] of
-    [] -> Right (emptyDynInfo, [])
+    [] -> Right emptyDynInfo
     [(_, _, pOff, _, pFilesz, _, _)] -> parseOneDynamic pOff pFilesz bytes loads
     _ -> Left (BadDyn "double-dynamic")
 
-parseOneDynamic :: Word64 -> Word64 -> [Word8] -> [Segment] -> Either LoadError (DynInfo, [Rela])
+parseOneDynamic :: Word64 -> Word64 -> [Word8] -> [Segment] -> Either LoadError DynInfo
 parseOneDynamic pOff pFilesz bytes loads = do
   let len = length bytes
       off = fromIntegral pOff :: Int
@@ -528,6 +701,7 @@ parseOneDynamic pOff pFilesz bytes loads = do
   if n > maxDynEnt then Left (BadDyn "dynamic too many") else Right ()
   let arr = toArr bytes
   acc <- walkDyn arr off n 0 emptyDynAcc
+  if not (accDone acc) then Left (BadDyn "missing DT_NULL") else Right ()
   finishDyn arr acc loads len
 
 walkDyn :: Array Int Word8 -> Int -> Int -> Int -> DynAcc -> Either LoadError DynAcc
@@ -544,187 +718,336 @@ stepDyn :: Word64 -> Word64 -> DynAcc -> Either LoadError DynAcc
 stepDyn tag val a
   | tag == dtNull = Right a {accDone = True}
   | tag == dtNeeded = Right a {accNeeded = accNeeded a ++ [val]}
-  | tag == dtStrtab = case accStrtab a of
-      Just _ -> Left (BadDyn "duplicate STRTAB")
-      Nothing -> Right a {accStrtab = Just val}
-  | tag == dtSymtab = Right a
-  | tag == dtRela = case accRela a of
-      Just _ -> Left (BadDyn "duplicate RELA")
-      Nothing -> Right a {accRela = Just val}
-  | tag == dtRelasz = case accRelasz a of
-      Just _ -> Left (BadDyn "duplicate RELASZ")
-      Nothing -> Right a {accRelasz = Just val}
-  | tag == dtRelaent = case accRelaent a of
-      Just _ -> Left (BadDyn "duplicate RELAENT")
-      Nothing -> Right a {accRelaent = Just val}
-  | tag == dtStrsz = case accStrsz a of
-      Just _ -> Left (BadDyn "duplicate STRSZ")
-      Nothing -> Right a {accStrsz = Just val}
-  | tag == dtBindNow = Right a
-  | tag == dtFlags = Right a
+  | tag == dtSoname = setOnce "SONAME" accSoname (\x v -> x {accSoname = v}) val a
+  | tag == dtStrtab = setOnce "STRTAB" accStrtab (\x v -> x {accStrtab = v}) val a
+  | tag == dtStrsz = setOnce "STRSZ" accStrsz (\x v -> x {accStrsz = v}) val a
+  | tag == dtSymtab = setOnce "SYMTAB" accSymtab (\x v -> x {accSymtab = v}) val a
+  | tag == dtSyment = setOnce "SYMENT" accSyment (\x v -> x {accSyment = v}) val a
+  | tag == dtHash = setOnce "HASH" accHash (\x v -> x {accHash = v}) val a
+  | tag == dtRela = setOnce "RELA" accRela (\x v -> x {accRela = v}) val a
+  | tag == dtRelasz = setOnce "RELASZ" accRelasz (\x v -> x {accRelasz = v}) val a
+  | tag == dtRelaent = setOnce "RELAENT" accRelaent (\x v -> x {accRelaent = v}) val a
+  | tag == dtJmpRel = setOnce "JMPREL" accJmpRel (\x v -> x {accJmpRel = v}) val a
+  | tag == dtPltRelsz = setOnce "PLTRELSZ" accPltRelsz (\x v -> x {accPltRelsz = v}) val a
+  | tag == dtPltRel = setOnce "PLTREL" accPltRel (\x v -> x {accPltRel = v}) val a
+  | tag == dtPltGot = setOnce "PLTGOT" accPltGot (\x v -> x {accPltGot = v}) val a
+  | tag == dtFlags = setOnce "FLAGS" accFlags (\x v -> x {accFlags = v}) val a
+  | tag == dtFlags1 = setOnce "FLAGS_1" accFlags1 (\x v -> x {accFlags1 = v}) val a
+  | tag == dtBindNow =
+      if accBindNowTag a
+        then Left (BadDyn "duplicate BIND_NOW")
+        else Right a {accBindNowTag = True}
+  | tag == dtRelaCount = Left (BadDyn "RELACOUNT unsupported")
+  | tag == dtDebug =
+      if accDebugTag a
+        then Left (BadDyn "duplicate DEBUG")
+        else Right a {accDebugTag = True}
+  | tag == dtGnuHash = Left (BadDyn "GNU hash unsupported")
+  | tag `elem` [dtVerSym, dtVerDef, dtVerNeed] = Left (BadDyn "symbol versioning unsupported")
+  | tag == dtTextrel = Left (BadDyn "TEXTREL unsupported")
+  | tag `elem` [dtRel, dtRelsz, dtRelent] = Left (BadDyn "S REL unsupported")
+  | tag `elem` [dtInit, dtFini, dtInitArray, dtFiniArray, dtInitArraySz, dtFiniArraySz, dtPreinitArray, dtPreinitArraySz, dtPreinitArrayEnt] = Left (BadDyn "init/fini arrays unsupported")
+  | tag == dtRunPath || tag == dtSymtabShndx = Left (BadDyn ("unsupported DT_" ++ show tag))
+  | tag `elem` [dtRelr, dtRelrSz, dtRelrEnt] = Left (BadDyn "RELR unsupported")
+  | tag `elem` [dtTlsDescPlt, dtTlsDescGot, dtTlsMod, dtTlsLo, dtTlsHi] = Left TlsUnsupported
   | otherwise = Left (BadDyn ("unsupported DT_" ++ show tag))
+  where
+    setOnce :: String -> (DynAcc -> Maybe Word64) -> (DynAcc -> Maybe Word64 -> DynAcc) -> Word64 -> DynAcc -> Either LoadError DynAcc
+    setOnce name get set value acc = case get acc of
+      Just _ -> Left (BadDyn ("duplicate " ++ name))
+      Nothing -> Right (set acc (Just value))
 
-finishDyn :: Array Int Word8 -> DynAcc -> [Segment] -> Int -> Either LoadError (DynInfo, [Rela])
+finishDyn :: Array Int Word8 -> DynAcc -> [Segment] -> Int -> Either LoadError DynInfo
 finishDyn arr acc loads len = do
-  let mEnt = accRelaent acc
-      mSz = accRelasz acc
-      mRela = accRela acc
-  ent <- case mEnt of
-    Nothing -> case (mRela, mSz) of
-      (Nothing, Nothing) -> Right 0
-      (Nothing, Just 0) -> Right 0
-      _ -> Left (BadDyn "missing RELAENT")
-    Just e
-      | e == 0 -> case mSz of
-          Nothing -> Right 0
-          Just 0 -> Right 0
-          Just _ -> Left (BadDyn "relaent 0 with relasz")
-      | e == 24 -> Right 24
-      | otherwise -> Left (BadDyn "relaent")
-  let sz64 = fromMaybe 0 mSz
-  sz <- if sz64 > fromIntegral (maxBound :: Int) then Left (BadDyn "relasz overrun") else Right (fromIntegral sz64 :: Int)
-  if ent == 0 && sz /= 0 then Left (BadDyn "relaent 0 with relasz") else Right ()
-  if ent /= 0 && sz `mod` ent /= 0 then Left (BadDyn "relasz") else Right ()
-  let count = if ent == 0 then 0 else sz `div` ent
-  if count > maxRelaCount then Left (BadDyn "rela count") else Right ()
   strSz64 <- case accStrsz acc of
     Nothing -> Right 0
-    Just s -> Right s
-  if strSz64 > fromIntegral maxDynStrSz then Left (BadDyn "strsz overrun") else Right ()
-  let neededOffs = accNeeded acc
-  if length neededOffs > maxNeeded then Left (BadDyn "needed too many") else Right ()
-  -- STRTAB translation: required when NEEDED present or STRSZ nonzero.
-  let needStr = not (null neededOffs) || strSz64 /= 0
+    Just n
+      | n > fromIntegral maxDynStrSz -> Left (BadDyn "strsz overrun")
+      | otherwise -> Right n
+  let strSz = fromIntegral strSz64 :: Int
+      needStr =
+        not (null (accNeeded acc))
+          || isJust (accSoname acc)
+          || isJust (accHash acc)
+          || isJust (accSymtab acc)
+          || strSz /= 0
   strOff <- case accStrtab acc of
     Nothing -> if needStr then Left (BadDyn "missing STRTAB") else Right 0
-    Just va -> case vaToFileOff loads va of
-      Nothing -> Left (BadDyn "strtab outside LOAD")
-      Just o -> Right o
-  let strSz = fromIntegral strSz64 :: Int
-  if strOff < 0 || strOff > len then Left (BadDyn "strtab bounds") else Right ()
-  if strSz < 0 || strSz > len - strOff then Left (BadDyn "strtab bounds") else Right ()
-  -- RELA translation.
-  relaOff <- case (mRela, count) of
-    (Nothing, 0) -> Right 0
-    (Nothing, _) -> Left (BadDyn "missing RELA")
-    (Just va, _) -> case vaToFileOff loads va of
-      Nothing -> Left (BadDyn "rela outside LOAD")
-      Just o -> Right o
-  if relaOff < 0 || relaOff > len then Left (BadDyn "rela bounds") else Right ()
-  if sz < 0 || sz > len - relaOff then Left (BadDyn "rela bounds") else Right ()
+    Just va -> do
+      (off, _) <- vaTableOff loads va strSz
+      if off < 0 || off > len || strSz > len - off then Left (BadDyn "strtab bounds") else Right off
   strSlice <- sliceA arr strOff strSz
-  needed <- mapM (resolveNeeded strSlice strSz) neededOffs
-  relas <- parseRelas arr relaOff count loads len
-  let dyn =
-        DynInfo {
-          dynNeeded = needed
-          , dynRelaOff = relaOff
-          , dynRelaSize = sz
-          , dynRelaEnt = ent
-          , dynStrOff = strOff
-          , dynStrSz = strSz
-          }
-  return (dyn, relas)
+  needed <- mapM (resolveNeeded strSlice strSz) (accNeeded acc)
+  soname <- traverse (resolveString "soname" maxSymbolNameLen strSlice strSz) (accSoname acc)
+  (hashStyle, symbols) <- parseHashAndSymbols arr acc strSlice strSz loads
+  bindNow <- dynamicBindNow acc
+  mainTable <- parseMainRelocations arr acc loads symbols bindNow
+  pltTable <- parsePltRelocations arr acc loads symbols bindNow
+  pltGot <- traverse (validatePltGot loads) (accPltGot acc)
+  let tables = maybe [] pure mainTable ++ maybe [] pure pltTable
+      totalCount = sum (map (\t -> relocationTableSize t `div` relocationTableEntSize t) tables)
+  if totalCount > maxRelaCount then Left (BadDyn "rela count") else Right ()
+  let flags1 = fromMaybe 0 (accFlags1 acc)
+  Right
+    DynInfo {
+      dynPresent = True
+      , dynNeeded = needed
+      , dynSoname = soname
+      , dynHashStyle = hashStyle
+      , dynBindNow = bindNow
+      , dynFlags1 = flags1
+      , dynPltGot = pltGot
+      , dynStrOff = strOff
+      , dynStrSz = strSz
+      , dynSymbols = symbols
+      , dynRelocations = tables
+      }
+
+dynamicBindNow :: DynAcc -> Either LoadError Bool
+dynamicBindNow acc
+  | (flags .&. dfTextrel) /= 0 = Left (BadDyn "TEXTREL unsupported")
+  | otherwise = Right (accBindNowTag acc || (flags .&. dfBindNow) /= 0 || (flags1 .&. df1Now) /= 0)
+  where
+    flags = fromMaybe 0 (accFlags acc)
+    flags1 = fromMaybe 0 (accFlags1 acc)
+
+parseHashAndSymbols :: Array Int Word8 -> DynAcc -> [Word8] -> Int -> [Segment] -> Either LoadError (HashStyle, Maybe DynamicSymbols)
+parseHashAndSymbols arr acc strSlice strSz loads =
+  case (accHash acc, accSymtab acc) of
+    (Nothing, Nothing)
+      | isJust (accSyment acc) -> Left (BadDyn "SYMENT without symbol metadata")
+      | otherwise -> Right (NoHash, Nothing)
+    (Just hashVa, Just symVa) -> do
+      hash <- parseSysvHash arr hashVa loads
+      syment <- case accSyment acc of
+        Nothing -> Right 24
+        Just n
+          | n == 24 -> Right 24
+          | otherwise -> Left (BadDyn "syment")
+      symbols <- parseDynamicSymbols arr symVa (sysvHashSymbols hash) syment strSlice strSz loads
+      Right (SysVHash hash, Just symbols)
+    _ -> Left (BadDyn "incomplete symbol metadata")
+
+parseSysvHash :: Array Int Word8 -> Word64 -> [Segment] -> Either LoadError SysvHash
+parseSysvHash arr hashVa loads = do
+  (off, _) <- vaTableOff loads hashVa 8
+  buckets <- getU32A arr off
+  symbols <- getU32A arr (off + 4)
+  if buckets == 0 then Left (BadDyn "hash buckets") else Right ()
+  if buckets > fromIntegral maxDynHashBuckets then Left (BadDyn "hash buckets") else Right ()
+  if symbols == 0 || symbols > fromIntegral maxDynSymbols then Left (BadDyn "symbol count") else Right ()
+  let total = 8 + 4 * (fromIntegral buckets + fromIntegral symbols)
+  (tableOff, tableSize) <- vaTableOff loads hashVa total
+  if tableSize /= total then Left (BadDyn "hash bounds") else Right ()
+  mapM_ (checkBucket off symbols) [0 .. fromIntegral buckets - 1]
+  mapM_ (checkChain off (fromIntegral buckets) symbols) [0 .. fromIntegral symbols - 1]
+  Right (SysvHash tableOff tableSize (fromIntegral buckets) (fromIntegral symbols))
+  where
+    checkBucket tableOff count i = do
+      bucketIndex <- getU32A arr (tableOff + 8 + 4 * i)
+      if bucketIndex >= count then Left (BadDyn "hash bucket index") else Right ()
+    checkChain tableOff bucketCount count i = do
+      chainIndex <- getU32A arr (tableOff + 8 + 4 * bucketCount + 4 * i)
+      if chainIndex /= 0 && chainIndex >= count then Left (BadDyn "hash chain index") else Right ()
+
+parseDynamicSymbols :: Array Int Word8 -> Word64 -> Int -> Int -> [Word8] -> Int -> [Segment] -> Either LoadError DynamicSymbols
+parseDynamicSymbols arr symVa count syment strSlice strSz loads = do
+  let total = count * 24
+  (off, tableSize) <- vaTableOff loads symVa total
+  if tableSize /= total then Left (BadDyn "symtab bounds") else Right ()
+  parsed <- mapM (parseOne off) [0 .. count - 1]
+  let entries = catMaybes parsed
+  Right (DynamicSymbols off syment entries)
+  where
+    parseOne tableOff i = do
+      let base = tableOff + i * 24
+      nameOff <- getU32A arr base
+      info <- getU8A arr (base + 4)
+      other <- getU8A arr (base + 5)
+      shndx <- getU16A arr (base + 6)
+      value <- getU64A arr (base + 8)
+      symbolSize <- getU64A arr (base + 16)
+      name <- resolveMaybeSymbolName strSlice strSz nameOff
+      if (info .&. 0x0F) == sttTls then Left (BadDyn "TLS symbol unsupported") else Right ()
+      Right (Just (DynamicSymbol name info other shndx value symbolSize))
+
+resolveMaybeSymbolName :: [Word8] -> Int -> Word32 -> Either LoadError String
+resolveMaybeSymbolName strSlice strSz nameOff
+  | fromIntegral nameOff >= strSz = Left (BadDyn "symbol name offset")
+  | otherwise = resolvePrintable "symbol" maxSymbolNameLen strSlice strSz (fromIntegral nameOff)
 
 resolveNeeded :: [Word8] -> Int -> Word64 -> Either LoadError String
 resolveNeeded strSlice strSz off64 = do
   if off64 >= fromIntegral strSz then Left (BadDyn "needed off") else Right ()
   let off = fromIntegral off64 :: Int
-      rest = drop off strSlice
-  case break (== 0) rest of
-    (_, []) -> Left (BadDyn "needed not NUL")
-    (name, _) -> do
-      if null name then Left (BadDyn "needed empty") else Right ()
-      if length name > maxNeededNameLen then Left (BadDyn "needed too long") else Right ()
-      if 47 `elem` name then Left (BadDyn "needed slash") else Right ()
-      if any (\b -> b < 32 || b > 126) name then Left (BadDyn "needed non-printable") else Right ()
-      Right (map (chr . fromIntegral) name)
+  name <- resolvePrintable "needed" maxNeededNameLen strSlice strSz off
+  if null name then Left (BadDyn "needed empty") else Right ()
+  if '/' `elem` name then Left (BadDyn "needed slash") else Right name
 
-parseRelas :: Array Int Word8 -> Int -> Int -> [Segment] -> Int -> Either LoadError [Rela]
-parseRelas arr relaOff count loads len = go 0 []
+resolveString :: String -> Int -> [Word8] -> Int -> Word64 -> Either LoadError String
+resolveString label limit strSlice strSz off = do
+  name <- resolvePrintable label limit strSlice strSz (fromIntegral off)
+  if null name then Left (BadDyn (label ++ " empty")) else Right name
+
+resolvePrintable :: String -> Int -> [Word8] -> Int -> Int -> Either LoadError String
+resolvePrintable label limit strSlice strSz off
+  | off < 0 || off >= strSz = Left (BadDyn (label ++ " offset"))
+  | otherwise =
+      let rest = drop off strSlice
+       in case break (== 0) rest of
+            (_, []) -> Left (BadDyn (label ++ " not NUL"))
+            (name, _)
+              | length name > limit -> Left (BadDyn (label ++ " too long"))
+              | any (\b -> b < 32 || b > 126) name -> Left (BadDyn (label ++ " non-printable"))
+              | otherwise -> Right (map (chr . fromIntegral) name)
+
+parseMainRelocations :: Array Int Word8 -> DynAcc -> [Segment] -> Maybe DynamicSymbols -> Bool -> Either LoadError (Maybe RelocationTable)
+parseMainRelocations arr acc loads symbols bindNow = do
+  count <- tableCount "RELA" (accRela acc) (accRelasz acc) (accRelaent acc)
+  case (count, accRela acc) of
+    (0, _) -> Right Nothing
+    (_, Nothing) -> Left (BadDyn "missing RELA")
+    (_, Just va) -> Just <$> parseRelaTable DynamicRelocations arr va count loads symbols bindNow
+
+parsePltRelocations :: Array Int Word8 -> DynAcc -> [Segment] -> Maybe DynamicSymbols -> Bool -> Either LoadError (Maybe RelocationTable)
+parsePltRelocations arr acc loads symbols bindNow =
+  case (accJmpRel acc, accPltRelsz acc, accPltRel acc) of
+    (Nothing, Nothing, Nothing) -> Right Nothing
+    (Just va, Just size, Just kind) -> do
+      if kind /= dtRela then Left (BadDyn "PLTREL unsupported") else Right ()
+      count <- tableCount "PLT" (Just va) (Just size) (Just 24)
+      if count == 0
+        then Right Nothing
+        else Just <$> parseRelaTable PltRelocations arr va count loads symbols bindNow
+    _ -> Left (BadDyn "incomplete PLT relocation metadata")
+
+tableCount :: String -> Maybe Word64 -> Maybe Word64 -> Maybe Word64 -> Either LoadError Int
+tableCount label address size entry = do
+  let hasMetadata = isJust address || isJust size || isJust entry
+  if not hasMetadata
+    then Right 0
+    else case (address, size, entry) of
+      (Just _, Just sizeN, Just entryN)
+        | entryN == 24 && sizeN `mod` 24 == 0 ->
+            let count = sizeN `div` 24
+             in if count > fromIntegral maxRelaCount
+                  then Left (BadDyn "rela count")
+                  else Right (fromIntegral count)
+      _ -> Left (BadDyn ("incomplete " ++ label ++ " metadata"))
+
+parseRelaTable :: RelocationTableKind -> Array Int Word8 -> Word64 -> Int -> [Segment] -> Maybe DynamicSymbols -> Bool -> Either LoadError RelocationTable
+parseRelaTable kind arr va count loads symbols bindNow = do
+  let size = count * 24
+  (off, tableSize) <- vaTableOff loads va size
+  if tableSize /= size then Left (BadDyn "rela bounds") else Right ()
+  parsed <- mapM (parseOne off) [0 .. count - 1]
+  let entries = catMaybes parsed
+  Right (RelocationTable kind off size 24 entries)
   where
-    go j acc
-      | j >= count = Right (reverse acc)
-      | otherwise = do
-          let base = relaOff + j * 24
-          rOff <- getU64A arr base
-          rInfo <- getU64A arr (base + 8)
-          rAdd <- getU64A arr (base + 16)
-          let typ = fromIntegral (rInfo .&. 0xFFFFFFFF) :: Word32
-              sym = rInfo `shiftR` 32
-          r <- checkRela typ sym rOff rAdd loads len
-          case r of
-            Nothing -> go (j + 1) acc
-            Just rela -> go (j + 1) (rela : acc)
+    parseOne tableOff i = do
+      let base = tableOff + i * 24
+      rOff <- getU64A arr base
+      info <- getU64A arr (base + 8)
+      add <- getU64A arr (base + 16)
+      let typ = fromIntegral (info .&. 0xFFFFFFFF) :: Word32
+          sym = fromIntegral (info `shiftR` 32) :: Word32
+      parseRelocation typ sym rOff add loads symbols bindNow
 
--- | Classify one RELA entry fail-closed. Nothing = R_NONE skip.
-checkRela :: Word32 -> Word64 -> Word64 -> Word64 -> [Segment] -> Int -> Either LoadError (Maybe Rela)
-checkRela typ sym rOff rAdd loads len
-  | typ == 0 = Right Nothing
-  | typ == rAarch64Relative =
-      if sym /= 0
-        then Left (UnsupportedReloc typ)
-        else case vaToFileOff loads rOff of
-          Nothing -> Left (BadDyn "rela outside LOAD")
-          Just foff ->
-            if foff < 0 || foff + 8 > len
-              then Left (BadDyn "rela outside LOAD")
-              else Right (Just (Rela rOff typ rAdd))
-  | typ == rAarch64GlobDat = Left (UnsupportedReloc typ)
-  | typ == rAarch64JumpSlot = Left (UnsupportedReloc typ)
-  | typ >= rAarch64TlsFirst = Left TlsUnsupported
+parseRelocation :: Word32 -> Word32 -> Word64 -> Word64 -> [Segment] -> Maybe DynamicSymbols -> Bool -> Either LoadError (Maybe Relocation)
+parseRelocation typ sym rOff add loadsRequired symbols bindNow
+  | typ == 0 = if sym == 0 then Right Nothing else Left (BadDyn "R_NONE symbol index")
+  | typ == rAarch64Relative = do
+      if sym /= 0 then Left (UnsupportedReloc typ) else Right ()
+      if not (relocTargetIn loadsRequired rOff False) then Left (BadDyn "rela outside LOAD") else Right ()
+      Right (Just (RelativeBinding (RelativeRelocation rOff add)))
+  | typ == rAarch64GlobDat || typ == rAarch64JumpSlot = do
+      if not bindNow then Left (BadDyn "eager relocation without bind-now") else Right ()
+      if sym == 0 then Left (BadDyn "eager relocation symbol zero") else Right ()
+      if not (relocTargetIn loadsRequired rOff True) then Left (BadDyn "rela target not writable") else Right ()
+      name <- case symbols of
+        Nothing -> Left (BadDyn "eager relocation without SYMTAB")
+        Just table -> case drop (fromIntegral sym) (dynamicSymbolEntries table) of
+          [] -> Left (BadDyn "eager relocation symbol index")
+          symbol : _ -> Right (dynamicSymbolName symbol)
+      if null name
+        then Left (BadDyn "eager relocation symbol name")
+        else Right ()
+      Right (Just (EagerSymbolBinding (EagerSymbolRelocation rOff typ sym name add)))
+  | typ >= rAarch64TlsFirst && typ /= rAarch64IRelative = Left TlsUnsupported
+  | typ == rAarch64IRelative = Left (BadDyn "IRELATIVE unsupported")
   | otherwise = Left (UnsupportedReloc typ)
 
--- helpers: total, bounds-checked LE reads
+relocTargetIn :: [Segment] -> Word64 -> Bool -> Bool
+relocTargetIn loads target requireWritable =
+  any inside loads
+  where
+    inside seg =
+      let start = segVaddr seg
+          end = start + fromIntegral (segMemSz seg)
+          writable = (segFlags seg .&. pfW) /= 0
+       in segMemSz seg >= 8
+            && end >= start
+            && target >= start
+            && target <= end - 8
+            && (not requireWritable || writable)
+
+validatePltGot :: [Segment] -> Word64 -> Either LoadError Word64
+validatePltGot loads va
+  | any (\s -> va >= segVaddr s && va < segVaddr s + fromIntegral (segMemSz s)) loads = Right va
+  | otherwise = Left (BadDyn "PLTGOT outside LOAD")
+
+vaToFileOff :: [Segment] -> Word64 -> Maybe Int
+vaToFileOff loads va = case vaTableFileRange loads va 8 of
+  Right (off, _) -> Just off
+  Left _ -> Nothing
+
+vaTableOff :: [Segment] -> Word64 -> Int -> Either LoadError (Int, Int)
+vaTableOff loads va size = do
+  (off, available) <- vaTableFileRange loads va size
+  if available < size then Left (BadDyn "table outside LOAD") else Right (off, size)
+
+vaTableFileRange :: [Segment] -> Word64 -> Int -> Either LoadError (Int, Int)
+vaTableFileRange _loads _va size
+  | size < 0 || size > maxElfBytes = Left OverlapSize
+vaTableFileRange loads va size = case findFileSegment loads va size of
+  Nothing -> Left (BadDyn "table outside LOAD")
+  Just (seg, delta) -> Right (segFileOff seg + delta, segFileSz seg - delta)
+  where
+    findFileSegment [] _ _ = Nothing
+    findFileSegment (seg : rest) address _size
+      | address < segVaddr seg = Nothing
+      | otherwise =
+          let delta = address - segVaddr seg
+              fileSize = fromIntegral (segFileSz seg)
+           in if delta < fileSize || (size == 0 && delta == fileSize)
+                then Just (seg, fromIntegral delta)
+                else findFileSegment rest address size
+
 getWord16LE :: [Word8] -> Int -> Either LoadError Word64
 getWord16LE bs off
-  | off < 0 || off + 2 > length bs = Left Truncated
+  | off < 0 || off > length bs - 2 = Left Truncated
   | otherwise = do
       b0 <- index bs off
       b1 <- index bs (off + 1)
-      let w0 = fromIntegral b0 :: Word64
-          w1 = fromIntegral b1 :: Word64
-      Right (w0 .|. (w1 `shiftL` 8))
+      Right (fromIntegral b0 + fromIntegral b1 * 256)
 
 getWord32LE :: [Word8] -> Int -> Either LoadError Word32
 getWord32LE bs off
-  | off < 0 || off + 4 > length bs = Left Truncated
+  | off < 0 || off > length bs - 4 = Left Truncated
   | otherwise = do
       b0 <- index bs off
       b1 <- index bs (off + 1)
       b2 <- index bs (off + 2)
       b3 <- index bs (off + 3)
-      let w0 = fromIntegral b0 :: Word32
-          w1 = fromIntegral b1 :: Word32
-          w2 = fromIntegral b2 :: Word32
-          w3 = fromIntegral b3 :: Word32
-      Right (w0 .|. (w1 `shiftL` 8) .|. (w2 `shiftL` 16) .|. (w3 `shiftL` 24))
+      Right (fromIntegral b0 .|. (fromIntegral b1 `shiftL` 8) .|. (fromIntegral b2 `shiftL` 16) .|. (fromIntegral b3 `shiftL` 24))
 
 getWord64LE :: [Word8] -> Int -> Either LoadError Word64
 getWord64LE bs off
-  | off < 0 || off + 8 > length bs = Left Truncated
+  | off < 0 || off > length bs - 8 = Left Truncated
   | otherwise = do
-      b0 <- index bs off
-      b1 <- index bs (off + 1)
-      b2 <- index bs (off + 2)
-      b3 <- index bs (off + 3)
-      b4 <- index bs (off + 4)
-      b5 <- index bs (off + 5)
-      b6 <- index bs (off + 6)
-      b7 <- index bs (off + 7)
-      let w0 = fromIntegral b0 :: Word64
-          w1 = fromIntegral b1 :: Word64
-          w2 = fromIntegral b2 :: Word64
-          w3 = fromIntegral b3 :: Word64
-          w4 = fromIntegral b4 :: Word64
-          w5 = fromIntegral b5 :: Word64
-          w6 = fromIntegral b6 :: Word64
-          w7 = fromIntegral b7 :: Word64
-      Right (w0 .|. (w1 `shiftL` 8) .|. (w2 `shiftL` 16) .|. (w3 `shiftL` 24) .|. (w4 `shiftL` 32) .|. (w5 `shiftL` 40) .|. (w6 `shiftL` 48) .|. (w7 `shiftL` 56))
+      bytes <- mapM (index bs) [off .. off + 7]
+      Right (foldr (\b acc -> fromIntegral b + acc * 256) 0 bytes)
 
-{- | Total index; Left Truncated on out-of-range (callers pre-check bounds,
-so Left is unreachable in practice but typed, never ErrorCall).
--}
 index :: [Word8] -> Int -> Either LoadError Word8
 index = go
   where
@@ -734,11 +1057,6 @@ index = go
       | n < 0 = Left Truncated
       | otherwise = go ys (n - 1)
 
-{- | Dependency-cycle check over a DT_NEEDED adjacency map
-(M2 resolves deps via VFS; M1 parses + validates single objects, and
-this pure helper pins the fail-closed cycle rule with hostile vectors).
-Path-local DFS: diamonds revisit nodes off-path without a false cycle.
--}
 findNeededCycle :: [(String, [String])] -> Either LoadError ()
 findNeededCycle graph = mapM_ (visit [] . fst) graph
   where
@@ -748,7 +1066,6 @@ findNeededCycle graph = mapM_ (visit [] . fst) graph
           Nothing -> Right ()
           Just deps -> mapM_ (visit (n : path)) deps
 
--- | Array view of file bytes for O(1) dynamic/reloc reads.
 toArr :: [Word8] -> Array Int Word8
 toArr [] = listArray (0, -1) []
 toArr bs = listArray (0, length bs - 1) bs
@@ -758,81 +1075,58 @@ arrLen arr =
   let (lo, hi) = bounds arr
    in if hi < lo then 0 else hi - lo + 1
 
-getU64A :: Array Int Word8 -> Int -> Either LoadError Word64
-getU64A arr off
-  | off < 0 || off + 8 > arrLen arr = Left Truncated
+getU8A :: Array Int Word8 -> Int -> Either LoadError Word8
+getU8A arr off
+  | off < 0 || off >= arrLen arr = Left Truncated
   | otherwise =
-      let b i = fromIntegral (arr ! (lo0 + off + i)) :: Word64
-          (lo0, _) = bounds arr
-       in Right
-            ( b 0
-                .|. (b 1 `shiftL` 8)
-                .|. (b 2 `shiftL` 16)
-                .|. (b 3 `shiftL` 24)
-                .|. (b 4 `shiftL` 32)
-                .|. (b 5 `shiftL` 40)
-                .|. (b 6 `shiftL` 48)
-                .|. (b 7 `shiftL` 56)
-            )
+      let (lo, _) = bounds arr
+       in Right (arr ! (lo + off))
+
+getU16A :: Array Int Word8 -> Int -> Either LoadError Word16
+getU16A arr off = do
+  b0 <- getU8A arr off
+  b1 <- getU8A arr (off + 1)
+  Right (fromIntegral b0 .|. (fromIntegral b1 `shiftL` 8))
+
+getU32A :: Array Int Word8 -> Int -> Either LoadError Word32
+getU32A arr off = do
+  b0 <- getU16A arr off
+  b1 <- getU16A arr (off + 2)
+  Right (fromIntegral b0 .|. (fromIntegral b1 `shiftL` 16))
+
+getU64A :: Array Int Word8 -> Int -> Either LoadError Word64
+getU64A arr off = do
+  b0 <- getU32A arr off
+  b1 <- getU32A arr (off + 4)
+  Right (fromIntegral b0 .|. (fromIntegral b1 `shiftL` 32))
 
 sliceA :: Array Int Word8 -> Int -> Int -> Either LoadError [Word8]
-sliceA arr off sz
-  | off < 0 || sz < 0 || off + sz > arrLen arr = Left Truncated
+sliceA arr off size
+  | off < 0 || size < 0 || off > arrLen arr - size = Left Truncated
   | otherwise =
-      let (lo0, _) = bounds arr
-       in Right [arr ! (lo0 + i) | i <- [off .. off + sz - 1]]
+      let (lo, _) = bounds arr
+       in Right [arr ! (lo + i) | i <- [off .. off + size - 1]]
 
--- | VA -> file offset via the containing PT_LOAD (first hit wins).
-vaToFileOff :: [Segment] -> Word64 -> Maybe Int
-vaToFileOff loads va = go loads
-  where
-    go [] = Nothing
-    go (s : rest) =
-      let sv = segVaddr s
-          end = sv + fromIntegral (segMemSz s)
-       in if end >= sv && va >= sv && va < end
-            then
-              let delta = va - sv
-               in if delta > fromIntegral maxSegMemSz
-                    then go rest
-                    else Just (segFileOff s + fromIntegral delta)
-            else go rest
-
--- | Checked u64 add for RELATIVE slides (overflow is a hostile input).
 checkedAdd :: Word64 -> Word64 -> Either LoadError Word64
 checkedAdd base add
   | add > maxBound - base = Left OverlapSize
   | otherwise = Right (base + add)
 
 leBytes :: Word64 -> [Word8]
-leBytes w =
-  [ fromIntegral w
-  , fromIntegral (w `shiftR` 8)
-  , fromIntegral (w `shiftR` 16)
-  , fromIntegral (w `shiftR` 24)
-  , fromIntegral (w `shiftR` 32)
-  , fromIntegral (w `shiftR` 40)
-  , fromIntegral (w `shiftR` 48)
-  , fromIntegral (w `shiftR` 56)
-  ]
+leBytes w = [fromIntegral (w `shiftR` s) | s <- [0, 8, 16, 24, 32, 40, 48, 56]]
 
 patchAt :: Array Int Word8 -> Int -> Word64 -> Either LoadError (Array Int Word8)
 patchAt arr idx val
-  | idx < 0 || idx + 8 > arrLen arr = Left (BadDyn "rela outside image")
+  | idx < 0 || idx > arrLen arr - 8 = Left (BadDyn "rela outside image")
   | otherwise =
-      let (lo0, _) = bounds arr
-          ups = zip [lo0 + idx .. lo0 + idx + 7] (leBytes val)
+      let (lo, _) = bounds arr
+          ups = zip [lo + idx .. lo + idx + 7] (leBytes val)
        in Right (arr // ups)
 
-{- | Pure RELATIVE-only RELA application over a memory image based at @base@
-(bytes[i] covers VA base+i). Re-checks types fail-closed so a caller
-can never smuggle JUMP_SLOT/GLOB_DAT/TLS through a prebuilt list.
--}
-applyRelativeRelocs :: Word64 -> [Rela] -> [Word8] -> Either LoadError [Word8]
-applyRelativeRelocs base relas bytes = do
-  let len = length bytes
-      arr0 = toArr bytes
-  arrN <- go len arr0 relas
+applyRelativeRelocs :: Word64 -> [Relocation] -> [Word8] -> Either LoadError [Word8]
+applyRelativeRelocs base relocs bytes = do
+  let arr0 = toArr bytes
+  arrN <- go (length bytes) arr0 relocs
   return (elemsOf arrN)
   where
     elemsOf arr = case bounds arr of
@@ -840,39 +1134,25 @@ applyRelativeRelocs base relas bytes = do
         | hi < lo -> []
         | otherwise -> [arr ! i | i <- [lo .. hi]]
     go _ arr [] = Right arr
-    go n arr (r : rest) = do
-      let typ = relaType r
-      val <- case typ of
-        t
-          | t == 0 -> Right Nothing
-          | t == rAarch64Relative -> do
-              v <- checkedAdd base (relaAddend r)
-              Right (Just v)
-          | t == rAarch64GlobDat -> Left (UnsupportedReloc t)
-          | t == rAarch64JumpSlot -> Left (UnsupportedReloc t)
-          | t >= rAarch64TlsFirst -> Left TlsUnsupported
-          | otherwise -> Left (UnsupportedReloc t)
-      case val of
-        Nothing -> go n arr rest
-        Just v -> do
-          let roff = relaOffset r
-          if roff < base
-            then Left (BadDyn "rela below base")
-            else do
-              let diff = roff - base
-              if diff > fromIntegral n
-                then Left (BadDyn "rela outside image")
-                else do
-                  let idx = fromIntegral diff :: Int
-                  arr2 <- patchAt arr idx v
-                  go n arr2 rest
+    go n arr (rel : rest) = case rel of
+      RelativeBinding r -> do
+        val <- checkedAdd base (relativeAddend r)
+        let roff = relativeOffset r
+        if roff < base
+          then Left (BadDyn "rela below base")
+          else
+            let diff = roff - base
+             in if diff > fromIntegral n
+                  then Left (BadDyn "rela outside image")
+                  else do
+                    arr2 <- patchAt arr (fromIntegral diff) val
+                    go n arr2 rest
+      EagerSymbolBinding r -> Left (UnsupportedReloc (eagerType r))
 
--- | File-image RELA application with per-object LOAD containment.
-applyRelocsToFile :: [Segment] -> Word64 -> [Rela] -> [Word8] -> Either LoadError [Word8]
-applyRelocsToFile segs base relas bytes = do
-  let len = length bytes
-      arr0 = toArr bytes
-  arrN <- go len arr0 relas
+applyRelocsToFile :: [Segment] -> Word64 -> [Relocation] -> [Word8] -> Either LoadError [Word8]
+applyRelocsToFile segs base relocs bytes = do
+  let arr0 = toArr bytes
+  arrN <- go (length bytes) arr0 relocs
   return (elemsOf arrN)
   where
     elemsOf arr = case bounds arr of
@@ -880,25 +1160,14 @@ applyRelocsToFile segs base relas bytes = do
         | hi < lo -> []
         | otherwise -> [arr ! i | i <- [lo .. hi]]
     go _ arr [] = Right arr
-    go n arr (r : rest) = do
-      let typ = relaType r
-      v <- case typ of
-        t
-          | t == 0 -> Right Nothing
-          | t == rAarch64Relative -> do
-              x <- checkedAdd base (relaAddend r)
-              Right (Just x)
-          | t == rAarch64GlobDat -> Left (UnsupportedReloc t)
-          | t == rAarch64JumpSlot -> Left (UnsupportedReloc t)
-          | t >= rAarch64TlsFirst -> Left TlsUnsupported
-          | otherwise -> Left (UnsupportedReloc t)
-      case v of
-        Nothing -> go n arr rest
-        Just patched -> case vaToFileOff segs (relaOffset r) of
+    go n arr (rel : rest) = case rel of
+      RelativeBinding r -> do
+        val <- checkedAdd base (relativeAddend r)
+        case vaToFileOff segs (relativeOffset r) of
           Nothing -> Left (BadDyn "rela outside LOAD")
-          Just foff -> do
-            if foff < 0 || foff + 8 > n
-              then Left (BadDyn "rela outside LOAD")
-              else do
-                arr2 <- patchAt arr foff patched
+          Just off
+            | off < 0 || off > n - 8 -> Left (BadDyn "rela outside LOAD")
+            | otherwise -> do
+                arr2 <- patchAt arr off val
                 go n arr2 rest
+      EagerSymbolBinding r -> Left (UnsupportedReloc (eagerType r))

@@ -33,7 +33,7 @@ expect {
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt" }
+    -re "> ?" { puts "\nPASS: prompt" }
     timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before prompt"; exit 1 }
 }
@@ -44,7 +44,7 @@ expect {
     eof { puts "\nFAIL: eof before free"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after free" }
+    -re "> ?" { puts "\nPASS: prompt after free" }
     timeout { puts "\nFAIL: prompt after free timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after free"; exit 1 }
 }
@@ -55,7 +55,7 @@ expect {
     eof { puts "\nFAIL: eof before detect"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after detect" }
+    -re "> ?" { puts "\nPASS: prompt after detect" }
     timeout { puts "\nFAIL: prompt after detect timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after detect"; exit 1 }
 }
@@ -71,7 +71,7 @@ expect {
     eof { puts "\nFAIL: eof before ok exit"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after first run" }
+    -re "> ?" { puts "\nPASS: prompt after first run" }
     timeout { puts "\nFAIL: prompt after first run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after first run"; exit 1 }
 }
@@ -87,7 +87,7 @@ expect {
     eof { puts "\nFAIL: eof before second ok exit"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after second run" }
+    -re "> ?" { puts "\nPASS: prompt after second run" }
     timeout { puts "\nFAIL: prompt after second run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after second run"; exit 1 }
 }
@@ -108,7 +108,7 @@ expect {
     eof { puts "\nFAIL: eof before argenv ok exit"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after argenv" }
+    -re "> ?" { puts "\nPASS: prompt after argenv" }
     timeout { puts "\nFAIL: prompt after argenv timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after argenv"; exit 1 }
 }
@@ -119,7 +119,7 @@ expect {
     eof { puts "\nFAIL: eof before free after runs"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after free2" }
+    -re "> ?" { puts "\nPASS: prompt after free2" }
     timeout { puts "\nFAIL: prompt after free2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after free2"; exit 1 }
 }
@@ -130,7 +130,7 @@ expect {
     eof { puts "\nFAIL: eof before ls"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after ls" }
+    -re "> ?" { puts "\nPASS: prompt after ls" }
     timeout { puts "\nFAIL: prompt after ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after ls"; exit 1 }
 }
@@ -142,7 +142,7 @@ expect {
     eof { puts "\nFAIL: eof before ENOENT"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after bad run" }
+    -re "> ?" { puts "\nPASS: prompt after bad run" }
     timeout { puts "\nFAIL: prompt after bad run timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after bad run"; exit 1 }
 }

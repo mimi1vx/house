@@ -25,7 +25,8 @@ import Data.Bits (complement, shiftR, (.&.))
 import Data.Char (chr, ord)
 import Data.IORef (atomicModifyIORef')
 import Data.Int (Int64)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Word (Word32, Word64, Word8)
 import Foreign.C.Types (CInt (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
@@ -33,19 +34,19 @@ import H.AdHocMem (allocaArray, peek, peekElemOff, poke, pokeElemOff)
 import H.Concurrency (MVar, forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
-import qualified H.Pages as HPages
+import H.Pages qualified as HPages
 import H.PhysicalMemory (fromPhysPage, toPhysPage)
 import H.Unsafe (unsafePerformH)
 import H.Utils (ptrFromWord64, ptrToWord64)
-import qualified H.VirtualMemory as VM
-import qualified Kernel.FileSystem.Vfs as Vfs
-import qualified Kernel.IPC.Endpoint as IPC
+import H.VirtualMemory qualified as VM
+import Kernel.FileSystem.Vfs qualified as Vfs
+import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
-import qualified Kernel.Userspace.Fd as Fd
-import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf)
-import qualified Kernel.Userspace.Sched as Sched
+import Kernel.Userspace.Fd qualified as Fd
+import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateRunElf)
+import Kernel.Userspace.Sched qualified as Sched
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
-import qualified System.Timeout as T
+import System.Timeout qualified as T
 
 foreign import ccall unsafe "house_enter_el0" c_enter_el0 :: Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO ()
 
@@ -90,7 +91,16 @@ foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
 
 stackTop :: Word64
-stackTop = 0x3FFFE000
+stackTop = stackPageStart + 4096
+
+installStackPage :: VM.PageMap -> Ptr Word8 -> H Bool
+installStackPage pdir stk = do
+  let stackBase = stackTop - 4096
+  occupied <- VM.getPage pdir stackBase
+  case occupied of
+    Just _ -> return False
+    Nothing ->
+      VM.setPage pdir stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
 
 {- | Request parked by an EL0 trap (svc #imm). Yield plus brk/fd
 0x03..0x07/0x0A plus fork 0x08/wait 0x09/exec 0x0B plus dir 0x0C..0x0F
@@ -185,7 +195,30 @@ pfW :: Word32
 pfW = 2
 
 runElf :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
-runElf elf argv envp = withQSem userSem $ do
+runElf elf argv envp = case validateRunElf elf of
+  Left err -> return (Left err)
+  Right () -> case validateStackSegments (elfSegs elf) of
+    Left err -> return (Left err)
+    Right () -> runElfValidated elf argv envp
+
+validateStackSegments :: [Segment] -> Either LoadError ()
+validateStackSegments = mapM_ check
+  where
+    stackPage = stackTop - 4096
+    check segment
+      | segMemSz segment == 0 = Right ()
+      | otherwise =
+          let start = segVaddr segment
+              end = start + fromIntegral (segMemSz segment)
+              firstPage = start `div` 4096
+              lastPage = (end - 1) `div` 4096
+              stackPageIndex = stackPage `div` 4096
+           in if firstPage <= stackPageIndex && stackPageIndex <= lastPage
+                then Left (BadSegment "stack page collision")
+                else Right ()
+
+runElfValidated :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
+runElfValidated elf argv envp = withQSem userSem $ do
   pidInt <- readRef pidNext
   writeRef pidNext (pidInt + 1)
   _ <- Vfs.vfsEnsurePid pidInt
@@ -212,8 +245,7 @@ runElf elf argv envp = withQSem userSem $ do
               case eSp of
                 Left err -> do HPages.freePage stk; freePDir pdir; return (Left err)
                 Right sp -> do
-                  let stackBase = stackTop - 4096
-                  okStk <- VM.setPage pdir stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
+                  okStk <- installStackPage pdir stk
                   if not okStk
                     then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
                     else do
@@ -506,37 +538,43 @@ execReplace pid@(Pid pidInt) pdir path = do
     Left _ -> return (Left (BadSegment "enoent"))
     Right bytes -> case loadElf bytes of
       Left le -> return (Left le)
-      Right elf -> withQSem userSem $ do
-        mp <- readRef procMap
-        case Map.lookup pid mp of
-          Nothing -> return (Left (BadSegment "no such pid"))
-          Just pr -> do
-            let oldHi = max (procBrk pr) stackTop
-            freeUserPages (procPdir pr) oldHi
-            mapped <- mapSegments (procPdir pr) elf
-            case mapped of
-              Left err -> return (Left err)
-              Right () -> do
-                let initBrk = initBreak elf
-                mStack <- HPages.allocPage :: H (Maybe (Ptr Word8))
-                case mStack of
-                  Nothing -> return (Left NoSpace)
-                  Just stk -> do
-                    HPages.zeroPage stk
-                    eSp <- setupArgStack stk [path] ["HOUSE=1", "PATH=/bin"]
-                    case eSp of
-                      Left err -> do HPages.freePage stk; return (Left err)
-                      Right sp -> do
-                        let stackBase = stackTop - 4096
-                        okStk <- VM.setPage (procPdir pr) stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
-                        if not okStk
-                          then do HPages.freePage stk; return (Left NoSpace)
-                          else do
-                            writeRef procMap (Map.insert pid pr {procEntry = elfEntry elf, procBrk = initBrk} mp)
-                            setRc <- liftIO (c_el0_set_entry pdir (elfEntry elf) sp)
-                            if setRc /= 0
-                              then return (Left (BadSegment "exec redirect"))
-                              else return (Right (elfEntry elf, sp))
+      Right elf -> case validateRunElf elf of
+        Left le -> return (Left le)
+        Right () -> case validateStackSegments (elfSegs elf) of
+          Left le -> return (Left le)
+          Right () -> execReplaceValidated pid pdir path elf
+
+execReplaceValidated :: Pid -> Ptr Word64 -> String -> Elf -> H (Either LoadError (Word64, Word64))
+execReplaceValidated pid pdir path elf = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup pid mp of
+    Nothing -> return (Left (BadSegment "no such pid"))
+    Just pr -> do
+      let oldHi = max (procBrk pr) stackTop
+      freeUserPages (procPdir pr) oldHi
+      mapped <- mapSegments (procPdir pr) elf
+      case mapped of
+        Left err -> return (Left err)
+        Right () -> do
+          let initBrk = initBreak elf
+          mStack <- HPages.allocPage :: H (Maybe (Ptr Word8))
+          case mStack of
+            Nothing -> return (Left NoSpace)
+            Just stk -> do
+              HPages.zeroPage stk
+              eSp <- setupArgStack stk [path] ["HOUSE=1", "PATH=/bin"]
+              case eSp of
+                Left err -> do HPages.freePage stk; return (Left err)
+                Right sp -> do
+                  okStk <- installStackPage (procPdir pr) stk
+                  if not okStk
+                    then do HPages.freePage stk; return (Left NoSpace)
+                    else do
+                      writeRef procMap (Map.insert pid pr {procEntry = elfEntry elf, procBrk = initBrk} mp)
+                      setRc <- liftIO (c_el0_set_entry pdir (elfEntry elf) sp)
+                      if setRc /= 0
+                        then return (Left (BadSegment "exec redirect"))
+                        else return (Right (elfEntry elf, sp))
 
 -- | EL1 lookup for the forktest isolation check (caller holds no locks).
 procInfo :: Pid -> H (Maybe Process)
@@ -1214,15 +1252,19 @@ procBrkGrow pid newBrk = withQSem userSem $ do
     growPages pdir lo hi
       | lo >= hi = return (Right ())
       | otherwise = do
-          mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
-          case mp of
-            Nothing -> return (Left NoSpace)
-            Just pg -> do
-              HPages.zeroPage pg
-              ok <- VM.setPage pdir lo (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
-              if not ok
-                then do HPages.freePage pg; return (Left NoSpace)
-                else growPages pdir (lo + 4096) hi
+          occupied <- VM.getPage pdir lo
+          if isJust occupied
+            then return (Left (BadSegment "occupied brk page"))
+            else do
+              mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
+              case mp of
+                Nothing -> return (Left NoSpace)
+                Just pg -> do
+                  HPages.zeroPage pg
+                  ok <- VM.setPage pdir lo (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
+                  if not ok
+                    then do HPages.freePage pg; return (Left NoSpace)
+                    else growPages pdir (lo + 4096) hi
 
 mapSegments :: VM.PageMap -> Elf -> H (Either LoadError ())
 mapSegments pdir elf = go (elfSegs elf) []
@@ -1260,21 +1302,25 @@ mapOneSegment pdir bytes seg =
         | idx >= pages = return (Right (reverse acc))
         | otherwise = do
             let curVa = vaddr + fromIntegral (idx * 4096)
-            mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
-            case mp of
-              Nothing -> return (Left NoSpace)
-              Just pg -> do
-                HPages.zeroPage pg
-                let pageFileStart = idx * 4096
-                let remainingFile = fsz - pageFileStart
-                let copyLen = if remainingFile <= 0 then 0 else min 4096 remainingFile
-                mapM_ (\i -> let srcIdx = foff + pageFileStart + i; b = indexBytes bytes srcIdx in poke (pg `plusPtr` i) b) [0 .. copyLen - 1]
-                ok <- VM.setPage pdir curVa (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = writable, VM.dirty = False, VM.accessed = False, VM.cow = False}))
-                if not ok
-                  then do
-                    HPages.freePage pg
-                    return (Left NoSpace)
-                  else loop (idx + 1) (curVa : acc)
+            occupied <- VM.getPage pdir curVa
+            if isJust occupied
+              then return (Left (BadSegment "overlapping LOAD page"))
+              else do
+                mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                case mp of
+                  Nothing -> return (Left NoSpace)
+                  Just pg -> do
+                    HPages.zeroPage pg
+                    let pageFileStart = idx * 4096
+                    let remainingFile = fsz - pageFileStart
+                    let copyLen = if remainingFile <= 0 then 0 else min 4096 remainingFile
+                    mapM_ (\i -> let srcIdx = foff + pageFileStart + i; b = indexBytes bytes srcIdx in poke (pg `plusPtr` i) b) [0 .. copyLen - 1]
+                    ok <- VM.setPage pdir curVa (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = writable, VM.dirty = False, VM.accessed = False, VM.cow = False}))
+                    if not ok
+                      then do
+                        HPages.freePage pg
+                        return (Left NoSpace)
+                      else loop (idx + 1) (curVa : acc)
    in if pages == 0
         then return (Right [])
         else loop 0 []

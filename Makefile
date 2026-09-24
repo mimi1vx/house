@@ -212,10 +212,11 @@ house-virtio-con-check: house-build initrd
 # EL0 userspace + initramfs (pid1 slice): assemble userspace/*.s +
 # build-probe/*.s in the container, pack the cpio on the host.
 # File-tracked: repeat runs skip the rebuild and boot straight in.
-USERSPACE_SRCS := $(wildcard userspace/*.s userspace/*.ld build-probe/*.s build-probe/*.ld)
+DYNAMIC_PROBE_SRCS := build-probe/hello-dyn.s
+USERSPACE_SRCS := $(filter-out $(DYNAMIC_PROBE_SRCS),$(wildcard userspace/*.s userspace/*.ld build-probe/*.s build-probe/*.ld))
 STAGING_STATIC := initramfs-staging/etc/house-servers initramfs-staging/probe.txt
 initrd: build/initramfs.cpio
-build/initramfs.cpio: $(USERSPACE_SRCS) build-probe/repack.py scripts/mk-userspace.sh scripts/mkinitramfs.sh $(STAGING_STATIC) | volumes
+build/initramfs.cpio: $(USERSPACE_SRCS) build-probe/repack.py scripts/mk-userspace.sh scripts/mkinitramfs.sh scripts/static-userspace.sha256 $(STAGING_STATIC) | volumes
 	$(RUN_IN_CONTAINER) sh scripts/mk-userspace.sh
 	sh scripts/mkinitramfs.sh
 	file build/initramfs.cpio
@@ -336,6 +337,11 @@ haskell-check:
 el0tiny-check: volumes
 	$(RUN_IN_CONTAINER) sh scripts/el0tiny-check.sh
 
+# M2.0 artifact compatibility only: reproducible ET_DYN probes, bounded
+# Loader inspection, and repacker parity. No initramfs or QEMU runtime leg.
+dynamic-elf-check: volumes
+	$(RUN_IN_CONTAINER) sh scripts/dynamic-elf-check.sh
+
 check:
 	$(MAKE) spike-check
 	$(MAKE) irq-check
@@ -344,8 +350,9 @@ check:
 	$(MAKE) house-posix-check
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
-	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust) =="
+	$(MAKE) dynamic-elf-check
+	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust, dynamic ELF) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check

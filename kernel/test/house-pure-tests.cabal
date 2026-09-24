@@ -70,3 +70,15 @@ test-suite house-pure
     QuickCheck >= 2.14 && < 3
   default-language: GHC2024
   ghc-options: -Wall
+
+executable house-loader-check
+  main-is: LoaderCheck.hs
+  hs-source-dirs: . ..
+  other-modules:
+    Kernel.Userspace.Loader
+  build-depends:
+    array,
+    base >= 4.18 && < 5,
+    bytestring
+  default-language: GHC2024
+  ghc-options: -Wall

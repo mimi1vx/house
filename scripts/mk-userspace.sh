@@ -57,7 +57,7 @@ build_user_one() {
 mkdir -p initramfs-staging/bin initramfs-staging/sbin
 
 # Tiny EL0 archive + sysroot rlibs for the userspace link (EL0 only).
-cargo build --manifest-path rust/Cargo.toml --target aarch64-unknown-none -p house-el0-tiny
+cargo build --locked --offline --manifest-path rust/Cargo.toml --target aarch64-unknown-none -p house-el0-tiny
 TINY_A="rust/target/aarch64-unknown-none/debug/libhouse_el0_tiny.a"
 SYSROOT=$(rustc --print sysroot)
 CORE_A=$(echo "$SYSROOT"/lib/rustlib/aarch64-unknown-none/lib/libcore-*.rlib)
@@ -106,5 +106,17 @@ build_one userspace/init.s userspace/userspace.ld initramfs-staging/sbin/init
 for prog in argenv brk exec fork ipc_pp spin yield; do
 	build_one "build-probe/$prog.s" "build-probe/$prog.ld" "initramfs-staging/bin/$prog"
 done
+
+static_manifest=$(mktemp)
+trap 'rm -f "$static_manifest"' EXIT
+find initramfs-staging/bin initramfs-staging/sbin -type f -print | LC_ALL=C sort |
+	while IFS= read -r path; do sha256sum "$path"; done >"$static_manifest"
+if ! cmp -s scripts/static-userspace.sha256 "$static_manifest"; then
+	echo "static userspace manifest drift" >&2
+	diff -u scripts/static-userspace.sha256 "$static_manifest" >&2 || true
+	exit 1
+fi
+rm -f "$static_manifest"
+trap - EXIT
 
 ls initramfs-staging/bin initramfs-staging/sbin

@@ -26,7 +26,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM, unless)
-import Data.Bits (shiftR)
+import Data.Bits (shiftL, shiftR, (.|.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.Either (isLeft)
@@ -601,10 +601,46 @@ main = do
       , -- M1 dynamic linking: ET_DYN + RELATIVE-only RELA + hostile vectors
         check "elf ET_EXEC min parses" (isDynRight elfExecMin False)
       , check "elf ET_DYN good parses" (isDynRight elfDynGood True)
+      , check "elf ET_DYN low zero-entry parses" (isDynRight elfDynLow True)
+      , assertLoadLeft "elf exec PT_TLS reject" elfExecTls Ldr.TlsUnsupported
+      , assertLoadLeft "elf dyn PT_TLS reject" elfDynTls Ldr.TlsUnsupported
+      , assertLoadLeft "elf overlapping LOAD pages reject" elfOverlapLoads (Ldr.BadSegment "overlapping LOAD pages")
+      , assertLoadLeft "elf stack page collision reject" elfStackCollision (Ldr.BadSegment "stack page collision")
+      , assertLoadLeft "elf bad EI_VERSION reject" elfBadVersion Ldr.BadMagic
+      , assertLoadLeft "elf static BSS reject" elfStaticBss (Ldr.BadSegment "static BSS unsupported")
+      , check "elf zero phentsize parses" (isDynRight elfPhentZero True)
+      , check "elf 8K align parses" (isDynRight elfDynAlign8192 True)
+      , check "elf unsorted dynamic loads parse" (isDynRight elfDynUnsorted True)
       , check "elf dyn interp pin" (dynInterpIs elfDynGood (Just "/lib/ld-house.so.0"))
       , check "elf dyn one rela" (dynRelaCountIs elfDynGood 1)
       , check "elf dyn relro pin" (dynRelroIs elfDynGood (Just (Ldr.RelroRange 0x01000000 0x01000010)))
       , check "elf dyn two needed" (dynNeededIs elfNeededTwo ["libc-house.so.0", "libm-house.so.0"])
+      , -- M2.0 artifact compatibility: SysV symbols + eager relocations, never executed
+        check "elf m2 zero-entry bss dso parses" (isDynRight elfM2Dso True)
+      , check "elf m2 soname parsed" (dynSonameIs elfM2Dso (Just "libc-house.so.0"))
+      , check "elf m2 sysv hash parsed" (isSysvHash elfJumpSlot)
+      , check "elf m2 jump-slot parsed" (hasEagerType elfJumpSlot 1026)
+      , check "elf m2 glob-dat parsed" (hasEagerType elfGlobDat 1025)
+      , check "elf m2 dual relocation tables" (hasTableKind elfJumpSlot Ldr.DynamicRelocations && hasTableKind elfJumpSlot Ldr.PltRelocations)
+      , check "elf m2 run guard rejects dyn" (validateElf elfJumpSlot == Left (Ldr.BadDyn "dynamic execution unsupported"))
+      , check "elf run guard rejects exec interp" (validateElf elfExecInterp == Left (Ldr.BadDyn "dynamic execution unsupported"))
+      , check "elf run guard accepts exec" (validateElf elfExecMin == Right ())
+      , assertLoadLeft "elf m2 missing bind-now" elfM2NoBind (Ldr.BadDyn "eager relocation without bind-now")
+      , assertLoadLeft "elf m2 bad symbol index" elfM2BadSymIndex (Ldr.BadDyn "eager relocation symbol index")
+      , assertLoadLeft "elf m2 bad symbol offset" elfM2BadSymbolOffset (Ldr.BadDyn "symbol name offset")
+      , assertLoadLeft "elf m2 bad symbol name" elfM2BadSymbolName (Ldr.BadDyn "symbol non-printable")
+      , assertLoadLeft "elf m2 non-writable target" elfM2NonWritable (Ldr.BadDyn "rela target not writable")
+      , assertLoadLeft "elf m2 hash bucket cap" elfM2HashBuckets (Ldr.BadDyn "hash buckets")
+      , assertLoadLeft "elf m2 symbol count cap" elfM2SymbolCount (Ldr.BadDyn "symbol count")
+      , assertLoadLeft "elf m2 GNU hash reject" elfM2GnuHash (Ldr.BadDyn "GNU hash unsupported")
+      , assertLoadLeft "elf m2 versioning reject" elfM2Version (Ldr.BadDyn "symbol versioning unsupported")
+      , assertLoadLeft "elf m2 init array reject" elfM2Init (Ldr.BadDyn "init/fini arrays unsupported")
+      , assertLoadLeft "elf m2 TEXTREL reject" elfM2Textrel (Ldr.BadDyn "TEXTREL unsupported")
+      , assertLoadLeft "elf m2 flags TEXTREL reject" elfM2FlagsTextrel (Ldr.BadDyn "TEXTREL unsupported")
+      , assertLoadLeft "elf m2 strsz without strtab" elfM2StrszNoStrtab (Ldr.BadDyn "missing STRTAB")
+      , assertLoadLeft "elf m2 RELACOUNT reject" elfM2RelaCount (Ldr.BadDyn "RELACOUNT unsupported")
+      , assertLoadLeft "elf m2 RELR reject" elfM2Relr (Ldr.BadDyn "RELR unsupported")
+      , assertLoadLeft "elf m2 IRELATIVE reject" elfM2Irelative (Ldr.BadDyn "IRELATIVE unsupported")
       , assertLoadLeft "elf bad type" elfBadType Ldr.BadType
       , assertLoadLeft "elf entry outside LOAD" elfEntryOutside (Ldr.BadSegment "entry not in LOAD")
       , assertLoadLeft "elf interp wrong path" elfInterpWrong (Ldr.BadDyn "interp path /lib/ld-linux.so.2")
@@ -614,17 +650,17 @@ main = do
       , assertLoadLeft "elf strsz overrun" elfStrszOverrun (Ldr.BadDyn "strsz overrun")
       , assertLoadLeft "elf rela outside LOAD" elfRelaOutside (Ldr.BadDyn "rela outside LOAD")
       , assertLoadLeft "elf rela count cap" elfRelaCount (Ldr.BadDyn "rela count")
-      , check "elf jump-slot reject" (Ldr.loadElf elfJumpSlot == Left (Ldr.UnsupportedReloc 1026))
+      , check "elf jump-slot accepted" (isDynRight elfJumpSlot True)
       , check "elf tls reject" (Ldr.loadElf elfTls == Left Ldr.TlsUnsupported)
       , assertLoadLeft "elf relro outside LOAD" elfRelroOutside (Ldr.BadDyn "relro outside LOAD")
       , check "needed cycle a->b->a" (Ldr.findNeededCycle [("a", ["b"]), ("b", ["a"])] == Left Ldr.NeededCycle)
       , check "needed self cycle" (Ldr.findNeededCycle [("a", ["a"])] == Left Ldr.NeededCycle)
       , check "needed acyclic" (Ldr.findNeededCycle [("a", ["b"]), ("b", [])] == Right ())
       , check "needed diamond ok" (Ldr.findNeededCycle [("a", ["b", "c"]), ("b", ["d"]), ("c", ["d"]), ("d", [])] == Right ())
-      , check "rela slide good" (Ldr.applyRelativeRelocs 0x01000000 [Ldr.Rela 0x01000008 1027 0x2000] (replicate 16 0) == Right (replicate 8 0 ++ put64le 0x01002000))
-      , check "rela slide overflow" (Ldr.applyRelativeRelocs 0x01000000 [Ldr.Rela 0x01000008 1027 (maxBound :: Word64)] (replicate 16 0) == Left Ldr.OverlapSize)
-      , check "rela slide jump reject" (Ldr.applyRelativeRelocs 0x01000000 [Ldr.Rela 0x01000008 1026 0] (replicate 16 0) == Left (Ldr.UnsupportedReloc 1026))
-      , check "rela file slide good" (Ldr.applyRelocsToFile [Ldr.Segment 0x01000000 288 512 512 5] 0x01000000 [Ldr.Rela 0x01000008 1027 0x2000] (replicate 512 0) == Right (replicate 296 0 ++ put64le 0x01002000 ++ replicate 208 0))
+      , check "rela slide good" (Ldr.applyRelativeRelocs 0x01000000 [relativeRelocation 0x01000008 0x2000] (replicate 16 0) == Right (replicate 8 0 ++ put64le 0x01002000))
+      , check "rela slide overflow" (Ldr.applyRelativeRelocs 0x01000000 [relativeRelocation 0x01000008 maxBound] (replicate 16 0) == Left Ldr.OverlapSize)
+      , check "rela slide jump reject" (Ldr.applyRelativeRelocs 0x01000000 [eagerRelocation 0x01000008 1026 1 "strlen" 0] (replicate 16 0) == Left (Ldr.UnsupportedReloc 1026))
+      , check "rela file slide good" (Ldr.applyRelocsToFile [Ldr.Segment 0x01000000 288 512 512 5] 0x01000000 [relativeRelocation 0x01000008 0x2000] (replicate 512 0) == Right (replicate 296 0 ++ put64le 0x01002000 ++ replicate 208 0))
       , checkIO "loader vs repack parity" parityCheck
       ]
   unless (and results) exitFailure
@@ -713,6 +749,97 @@ mkDynArr ents = concatMap (\(t, v) -> put64le t ++ put64le v) (ents ++ [(0, 0)])
 mkRelaEnt :: Word64 -> Word32 -> Word64 -> [Word8]
 mkRelaEnt off typ add = put64le off ++ put64le (fromIntegral typ) ++ put64le add
 
+-- | One RELA entry with an explicit symbol-table index.
+mkRelaEntSym :: Word64 -> Word32 -> Word32 -> Word64 -> [Word8]
+mkRelaEntSym off typ sym add =
+  put64le off
+    ++ put64le ((fromIntegral sym `shiftL` 32) .|. fromIntegral typ)
+    ++ put64le add
+
+mkSymEnt :: Word32 -> Word8 -> Word64 -> Word64 -> [Word8]
+mkSymEnt nameOff info value size =
+  put32le nameOff
+    ++ [info, 0]
+    ++ put16le 1
+    ++ put64le value
+    ++ put64le size
+
+mkSysvHash :: Word32 -> Word32 -> Word32 -> [Word32] -> [Word8]
+mkSysvHash buckets symbols firstBucket chains =
+  put32le buckets
+    ++ put32le symbols
+    ++ concatMap put32le (firstBucket : chains)
+
+patchMany :: [(Int, [Word8])] -> [Word8] -> [Word8]
+patchMany patches bytes = foldl (\current (off, replacement) -> patchAt current off replacement) bytes patches
+
+m2Strings :: [Word8]
+m2Strings = map (fromIntegral . ord) "\0libc-house.so.0\0strlen\0"
+
+m2StrlenOffset :: Int
+m2StrlenOffset = 1 + length "libc-house.so.0" + 1
+
+m2JumpEnts :: [(Word64, Word64)]
+m2JumpEnts =
+  [ (1, 1)
+  , (14, 1)
+  , (2, 24)
+  , (3, 0x338)
+  , (20, 7)
+  , (23, 0x280)
+  , (24, 0)
+  , (30, 8)
+  , (4, 0x1C0)
+  , (5, 0x200)
+  , (6, 0x180)
+  , (7, 0x240)
+  , (8, 24)
+  , (9, 24)
+  , (10, fromIntegral (length m2Strings))
+  , (11, 24)
+  , (0x6FFFFFFB, 1)
+  ]
+
+m2DsoEnts :: [(Word64, Word64)]
+m2DsoEnts =
+  [ (14, 1)
+  , (24, 0)
+  , (30, 8)
+  , (4, 0x1C0)
+  , (5, 0x200)
+  , (6, 0x180)
+  , (10, fromIntegral (length m2Strings))
+  , (11, 24)
+  , (0x6FFFFFFB, 1)
+  ]
+
+m2Blob :: [(Word64, Word64)] -> Word32 -> Word32 -> [Word8]
+m2Blob ents relType relSym =
+  patchMany
+    [ (0x40, mkDynArr ents)
+    , (0x180, mkSymEnt 0 0 0 0 ++ mkSymEnt (fromIntegral m2StrlenOffset) 0x12 0x100 1)
+    , (0x1C0, mkSysvHash 1 2 1 [0, 0])
+    , (0x200, m2Strings)
+    , (0x240, mkRelaEntSym 0x310 1027 0 0)
+    , (0x280, mkRelaEntSym 0x338 relType relSym 0)
+    , (0x340, interpGoodBs)
+    ]
+    (replicate 0x400 0)
+
+mkM2ElfFromBlob :: Word64 -> Word32 -> Word64 -> Bool -> Bool -> Int -> [Word8] -> [Word8]
+mkM2ElfFromBlob entry flags memSize withInterp withRelro dynSize blob =
+  let n = 2 + (if withInterp then 1 else 0) + (if withRelro then 1 else 0)
+      fileBase = 64 + 56 * n
+      pLoad = mkPhdr 1 flags (fromIntegral fileBase) 0 0x400 memSize 0
+      pDyn = mkPhdr 2 6 (fromIntegral (fileBase + 0x40)) 0x40 (fromIntegral dynSize) (fromIntegral dynSize) 8
+      pInterp = [mkPhdr 3 4 (fromIntegral (fileBase + 0x340)) 0x340 (fromIntegral (length interpGoodBs)) (fromIntegral (length interpGoodBs)) 1 | withInterp]
+      pRelro = [mkPhdr 0x6474E552 4 0 0x40 0x300 0x300 1 | withRelro]
+   in mkEhdr 3 entry n ++ pLoad ++ pDyn ++ concat pInterp ++ concat pRelro ++ blob
+
+mkM2Elf :: [(Word64, Word64)] -> Word32 -> Word32 -> Word32 -> Word64 -> Bool -> Bool -> [Word8]
+mkM2Elf ents relType relSym flags memSize withInterp withRelro =
+  mkM2ElfFromBlob 0x80 flags memSize withInterp withRelro (length (mkDynArr ents)) (m2Blob ents relType relSym)
+
 {- | 512-byte LOAD blob: code at 0, interp at 0x10, dynamic at 0x100,
 RELA at 0x180 (VAs 0x01000000 + offset).
 -}
@@ -750,6 +877,46 @@ elfExecMin = mkEhdr 2 0x01000000 1 ++ mkPhdr 1 5 120 0x01000000 16 16 0 ++ dynCo
 elfDynGood :: [Word8]
 elfDynGood = mkDynElf 3 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 64)] [(0x01000000, 0x10)] []
 
+elfExecInterp :: [Word8]
+elfExecInterp = mkDynElf 2 0x01000000 (mkDynBlob interpGoodBs [] (0, 0, 0)) [(0x10, 19)] [] [] []
+
+elfExecTls :: [Word8]
+elfExecTls = mkDynElf 2 0x01000000 (mkDynBlob interpGoodBs [] (0, 0, 0)) [] [] [] [mkPhdr 7 4 0 0x01000000 0 16 1]
+
+elfDynTls :: [Word8]
+elfDynTls = mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [] (0, 0, 0)) [] [] [] [mkPhdr 7 4 0 0x01000000 0 16 1]
+
+elfOverlapLoads :: [Word8]
+elfOverlapLoads =
+  let base = 64 + 56 * 2
+      p1 = mkPhdr 1 5 (fromIntegral base) 0x01000000 0x100 0x100 0
+      p2 = mkPhdr 1 6 (fromIntegral (base + 0x100)) 0x01000800 0x100 0x100 0
+   in mkEhdr 2 0x01000000 2 ++ p1 ++ p2 ++ replicate (base + 0x200) 0
+
+elfStackCollision :: [Word8]
+elfStackCollision = mkEhdr 2 0x3FFFD000 1 ++ mkPhdr 1 5 120 0x3FFFD000 0x1000 0x1000 0 ++ replicate 0x1000 0
+
+elfBadVersion :: [Word8]
+elfBadVersion = patchAt elfExecMin 6 [2]
+
+elfPhentZero :: [Word8]
+elfPhentZero = patchAt elfDynGood 54 [0, 0]
+
+elfDynAlign8192 :: [Word8]
+elfDynAlign8192 = patchMany [(72, put64le 0), (112, put64le 8192)] elfDynGood
+
+elfStaticBss :: [Word8]
+elfStaticBss = patchMany [(104, put64le 0x1000)] elfExecMin
+
+elfDynUnsorted :: [Word8]
+elfDynUnsorted =
+  let blob = patchAt goodBlob 0x100 (mkDynArr [(5, 0x00200000), (7, 0x00200180), (8, 24), (9, 24)])
+      extraLoad = mkPhdr 1 6 288 0x00200000 0x200 0x200 0
+   in mkDynElf 3 0x01000000 blob [(0x10, 19)] [(0x100, 0x00200100, 80)] [] [extraLoad]
+
+elfDynLow :: [Word8]
+elfDynLow = mkEhdr 3 0 1 ++ mkPhdr 1 6 120 0 16 16 0 ++ dynCode16
+
 elfBadType :: [Word8]
 elfBadType = mkDynElf 7 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 64)] [(0x01000000, 0x10)] []
 
@@ -782,8 +949,93 @@ elfRelaCount =
   mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [(7, 0x01000180), (8, 120000), (9, 24)] (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
 
 elfJumpSlot :: [Word8]
-elfJumpSlot =
-  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs goodDynEnts (1026, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
+elfJumpSlot = mkM2Elf m2JumpEnts 1026 1 6 0x500 True True
+
+elfM2Dso :: [Word8]
+elfM2Dso = mkM2ElfFromBlob 0 6 0x500 False False (length (mkDynArr m2DsoEnts)) (m2Blob m2DsoEnts 1026 1)
+
+elfGlobDat :: [Word8]
+elfGlobDat = mkM2Elf m2JumpEnts 1025 1 6 0x500 True True
+
+elfM2NoBind :: [Word8]
+elfM2NoBind = mkM2Elf [(tag, val) | (tag, val) <- m2JumpEnts, tag /= 24, tag /= 30, tag /= 0x6FFFFFFB] 1026 1 6 0x500 True True
+
+elfM2BadSymIndex :: [Word8]
+elfM2BadSymIndex = mkM2Elf m2JumpEnts 1026 2 6 0x500 True True
+
+elfM2NonWritable :: [Word8]
+elfM2NonWritable = mkM2Elf m2JumpEnts 1026 1 4 0x500 True True
+
+elfM2GnuHash :: [Word8]
+elfM2GnuHash = mkM2Elf ((0x6FFFFEF5, 0) : filter ((/= 4) . fst) m2JumpEnts) 1026 1 6 0x500 True True
+
+elfM2Version :: [Word8]
+elfM2Version = mkM2Elf ((0x6FFFFFF0, 0) : m2JumpEnts) 1026 1 6 0x500 True True
+
+elfM2Init :: [Word8]
+elfM2Init = mkM2Elf ((25, 0x240) : m2JumpEnts) 1026 1 6 0x500 True True
+
+elfM2Textrel :: [Word8]
+elfM2Textrel = mkM2Elf ((22, 0) : m2JumpEnts) 1026 1 6 0x500 True True
+
+elfM2FlagsTextrel :: [Word8]
+elfM2FlagsTextrel = mkM2Elf ((30, 4) : [(tag, value) | (tag, value) <- m2JumpEnts, tag /= 30]) 1026 1 6 0x500 True True
+
+elfM2StrszNoStrtab :: [Word8]
+elfM2StrszNoStrtab = mkM2Elf [(10, 24)] 1027 0 6 0x500 True True
+
+elfM2RelaCount :: [Word8]
+elfM2RelaCount = mkM2Elf ((0x6FFFFFF9, 1) : m2JumpEnts) 1026 1 6 0x500 True True
+
+elfM2Irelative :: [Word8]
+elfM2Irelative = mkM2Elf m2JumpEnts 1037 1 6 0x500 True True
+
+elfM2Relr :: [Word8]
+elfM2Relr = mkM2Elf ((36, 0) : m2JumpEnts) 1026 1 6 0x500 True True
+
+elfM2HashBuckets :: [Word8]
+elfM2HashBuckets =
+  mkM2ElfFromBlob
+    0x80
+    6
+    0x500
+    True
+    True
+    (length (mkDynArr m2JumpEnts))
+    (patchAt (m2Blob m2JumpEnts 1026 1) 0x1C0 (put32le (fromIntegral (Ldr.maxDynHashBuckets + 1)) ++ put32le 2))
+
+elfM2SymbolCount :: [Word8]
+elfM2SymbolCount =
+  mkM2ElfFromBlob
+    0x80
+    6
+    0x500
+    True
+    True
+    (length (mkDynArr m2JumpEnts))
+    (patchAt (m2Blob m2JumpEnts 1026 1) 0x1C0 (put32le 1 ++ put32le (fromIntegral (Ldr.maxDynSymbols + 1))))
+
+elfM2BadSymbolName :: [Word8]
+elfM2BadSymbolName =
+  mkM2ElfFromBlob
+    0x80
+    6
+    0x500
+    True
+    True
+    (length (mkDynArr m2JumpEnts))
+    (patchAt (m2Blob m2JumpEnts 1026 1) (0x200 + m2StrlenOffset) [1])
+
+elfM2BadSymbolOffset :: [Word8]
+elfM2BadSymbolOffset =
+  mkM2ElfFromBlob
+    0x80
+    6
+    0x500
+    True
+    True
+    (length (mkDynArr m2JumpEnts))
+    (patchAt (m2Blob m2JumpEnts 1026 1) (0x180 + 24) (put32le (fromIntegral (length m2Strings + 1))))
 
 elfTls :: [Word8]
 elfTls =
@@ -798,11 +1050,22 @@ elfNeededTwo =
       blob = patchAt (mkDynBlob interpGoodBs [(1, 0), (1, 16), (5, 0x010001A0), (10, 32)] (1027, 0x01000008, 0x2000)) 0x1A0 strtab
    in mkDynElf 3 0x01000000 blob [(0x10, 19)] [(0x100, 0x01000100, 80)] [] []
 
+relativeRelocation :: Word64 -> Word64 -> Ldr.Relocation
+relativeRelocation off add = Ldr.RelativeBinding (Ldr.RelativeRelocation off add)
+
+eagerRelocation :: Word64 -> Word32 -> Word32 -> String -> Word64 -> Ldr.Relocation
+eagerRelocation off typ sym name add = Ldr.EagerSymbolBinding (Ldr.EagerSymbolRelocation off typ sym name add)
+
 -- | Total field probes over a parsed fixture (Left counts as mismatch).
 isDynRight :: [Word8] -> Bool -> Bool
 isDynRight bytes wantDyn = case Ldr.loadElf bytes of
   Right e -> Ldr.elfIsDyn e == wantDyn
   Left _ -> False
+
+validateElf :: [Word8] -> Either Ldr.LoadError ()
+validateElf bytes = case Ldr.loadElf bytes of
+  Left err -> Left err
+  Right elf -> Ldr.validateRunElf elf
 
 dynInterpIs :: [Word8] -> Maybe String -> Bool
 dynInterpIs bytes want = case Ldr.loadElf bytes of
@@ -811,7 +1074,7 @@ dynInterpIs bytes want = case Ldr.loadElf bytes of
 
 dynRelaCountIs :: [Word8] -> Int -> Bool
 dynRelaCountIs bytes n = case Ldr.loadElf bytes of
-  Right e -> length (Ldr.elfRelas e) == n
+  Right e -> sum (map (length . Ldr.relocationTableEntries) (Ldr.dynRelocations (Ldr.elfDyn e))) == n
   Left _ -> False
 
 dynRelroIs :: [Word8] -> Maybe Ldr.RelroRange -> Bool
@@ -824,11 +1087,46 @@ dynNeededIs bytes want = case Ldr.loadElf bytes of
   Right e -> Ldr.dynNeeded (Ldr.elfDyn e) == want
   Left _ -> False
 
+dynSonameIs :: [Word8] -> Maybe String -> Bool
+dynSonameIs bytes want = case Ldr.loadElf bytes of
+  Right e -> Ldr.dynSoname (Ldr.elfDyn e) == want
+  Left _ -> False
+
+isSysvHash :: [Word8] -> Bool
+isSysvHash bytes = case Ldr.loadElf bytes of
+  Right e -> case Ldr.dynHashStyle (Ldr.elfDyn e) of
+    Ldr.SysVHash _ -> True
+    Ldr.NoHash -> False
+  Left _ -> False
+
+hasEagerType :: [Word8] -> Word32 -> Bool
+hasEagerType bytes want = case Ldr.loadElf bytes of
+  Right e -> any (any (isEager want) . Ldr.relocationTableEntries) (Ldr.dynRelocations (Ldr.elfDyn e))
+  Left _ -> False
+  where
+    isEager typ relocation = case relocation of
+      Ldr.EagerSymbolBinding eager -> Ldr.eagerType eager == typ
+      Ldr.RelativeBinding _ -> False
+
+hasTableKind :: [Word8] -> Ldr.RelocationTableKind -> Bool
+hasTableKind bytes want = case Ldr.loadElf bytes of
+  Right e -> any ((== want) . Ldr.relocationTableKind) (Ldr.dynRelocations (Ldr.elfDyn e))
+  Left _ -> False
+
 -- Differential parity: every vector must agree accept/reject ------------------
 
 parityVectors :: [(String, [Word8])]
 parityVectors =
   [ ("static-min", elfExecMin)
+  , ("static-bss", elfStaticBss)
+  , ("overlap-loads", elfOverlapLoads)
+  , ("stack-collision", elfStackCollision)
+  , ("bad-version", elfBadVersion)
+  , ("zero-phentsize", elfPhentZero)
+  , ("align-8k", elfDynAlign8192)
+  , ("unsorted-dynamic", elfDynUnsorted)
+  , ("exec-pt-tls", elfExecTls)
+  , ("dyn-pt-tls", elfDynTls)
   , ("dyn-good", elfDynGood)
   , ("dyn-needed-two", elfNeededTwo)
   , ("bad-type", elfBadType)
@@ -841,6 +1139,24 @@ parityVectors =
   , ("rela-outside", elfRelaOutside)
   , ("rela-count", elfRelaCount)
   , ("jump-slot", elfJumpSlot)
+  , ("m2-dso", elfM2Dso)
+  , ("glob-dat", elfGlobDat)
+  , ("m2-no-bind", elfM2NoBind)
+  , ("m2-bad-symbol-index", elfM2BadSymIndex)
+  , ("m2-bad-symbol-name", elfM2BadSymbolName)
+  , ("m2-bad-symbol-offset", elfM2BadSymbolOffset)
+  , ("m2-non-writable", elfM2NonWritable)
+  , ("m2-hash-buckets", elfM2HashBuckets)
+  , ("m2-symbol-count", elfM2SymbolCount)
+  , ("m2-gnu-hash", elfM2GnuHash)
+  , ("m2-version", elfM2Version)
+  , ("m2-init", elfM2Init)
+  , ("m2-textrel", elfM2Textrel)
+  , ("m2-flags-textrel", elfM2FlagsTextrel)
+  , ("m2-strsz-no-strtab", elfM2StrszNoStrtab)
+  , ("m2-relacount", elfM2RelaCount)
+  , ("m2-relr", elfM2Relr)
+  , ("m2-irelative", elfM2Irelative)
   , ("tls", elfTls)
   , ("relro-outside", elfRelroOutside)
   ]
