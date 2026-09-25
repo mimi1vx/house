@@ -13,7 +13,8 @@ direct 'runH' calls.
 -}
 module Kernel.Shell.Loop (
   loop,
-) where
+)
+where
 
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -182,6 +183,7 @@ loop = do
       ["palloc"] -> handlePalloc
       ["fdtest"] -> handleFdtest
       ["forktest"] -> handleForktest
+      ["loaderrefs"] -> handleLoaderRefs
       ["run"] -> withCString "usage: run <path> [args...]\n" c_uart_puts
       ("run" : p : args) -> handleRun p args
       ["spawn"] -> withCString "usage: spawn <path> [args...]\n" c_uart_puts
@@ -558,6 +560,35 @@ loop = do
         Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
     defaultEnv = ["HOUSE=1", "PATH=/bin"]
+    handleLoaderRefs = do
+      r <- runH $ do
+        baseline <- U.cowLiveCount
+        mBytes <- FS.vfsRead FS.defaultNamespace "/bin/hello-dyn"
+        case mBytes of
+          Left e -> return (Left (showFsError e))
+          Right bytes -> case ULdr.loadElf bytes of
+            Left le -> return (Left (toExecError le))
+            Right elf -> do
+              first <- U.runElf elf ["/bin/hello-dyn"] defaultEnv
+              case first of
+                Left le -> return (Left (toExecError le))
+                Right pidA -> do
+                  second <- U.runElf elf ["/bin/hello-dyn"] defaultEnv
+                  case second of
+                    Left le -> do
+                      _ <- U.killPid pidA
+                      return (Left (toExecError le))
+                    Right pidB -> do
+                      during <- U.cowLiveCount
+                      codeA <- U.waitPid pidA
+                      codeB <- U.waitPid pidB
+                      after <- U.cowLiveCount
+                      if during > baseline && codeA == 0 && codeB == 0 && after == baseline
+                        then return (Right ())
+                        else return (Left ("refs=" ++ show baseline ++ "->" ++ show during ++ "->" ++ show after ++ " exits=" ++ show (codeA, codeB)))
+      case r of
+        Left e -> withCString ("loaderrefs fail " ++ e ++ "\n") c_uart_puts
+        Right () -> withCString "loaderrefs ok\n" c_uart_puts
     handleForktest = do
       r <- runH $ do
         refs0 <- U.cowLiveCount
@@ -760,6 +791,7 @@ loop = do
         , "       quantum <ticks> -- preempt quantum in timer ticks (0..1000000, 0 means 1; default 10)"
         , "       fdtest -- per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)"
         , "       forktest -- EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)"
+        , "       loaderrefs -- launch two dynamic images, verify finalized DSO page sharing, then drain refs"
         ]
     seqFib :: Int -> Int
     seqFib n

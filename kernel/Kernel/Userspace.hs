@@ -18,6 +18,7 @@ module Kernel.Userspace (
 
   -- * Types
   Kernel.Userspace.Types.Pid (..),
+  Kernel.Userspace.Types.SharedObject (..),
   Kernel.Userspace.Types.Process (..),
 
   -- * Process

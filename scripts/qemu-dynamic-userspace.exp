@@ -1,6 +1,6 @@
 #!/usr/bin/expect -f
-# Dynamic EL0 runtime probe: initial load, missing dependency, dynamic exec,
-# failed-exec preservation, and static non-regression.
+# Dynamic EL0 runtime probe: initial load, shared finalized DSO pages, missing
+# dependency, dynamic exec, failed-exec preservation, and static non-regression.
 # Usage: expect scripts/qemu-dynamic-userspace.exp <kernel.bin> [timeout] [accel] [mem] [smp]
 set kernel [lindex $argv 0]
 set timeout_arg [lindex $argv 1]
@@ -52,6 +52,12 @@ expect_prompt "dynamic initial after exit"
 send "jobs\r"
 expect_stage "jobs:" "dynamic jobs"
 expect_prompt "dynamic jobs prompt"
+
+run_and_expect "loaderrefs" "loaderrefs ok" "dynamic shared pages"
+expect_prompt "dynamic shared pages prompt"
+
+run_and_expect "forktest" "forktest ok" "static COW regression"
+expect_prompt "static COW regression prompt"
 
 run_and_expect "run /bin/hello-dyn-missing" "ENOENT: missing dependency libc-missing.so.0" "missing dependency"
 expect_prompt "missing dependency prompt"

@@ -28,7 +28,7 @@ import Data.IORef (atomicModifyIORef')
 import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (catMaybes, isJust)
 import Data.Set qualified as Set
 import Data.Word (Word32, Word64, Word8)
 import Foreign.C.Types (CInt (..))
@@ -50,7 +50,7 @@ import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateStaticRunElf)
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Sched qualified as Sched
-import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
+import Kernel.Userspace.Types (Pid (..), Process (..), SharedObject (..), pidNext, procExitMap, procMap, processExitVar, userSem)
 import System.Timeout qualified as T
 
 foreign import ccall unsafe "house_enter_el0" c_enter_el0 :: Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO ()
@@ -217,6 +217,147 @@ data RuntimeObject = RuntimeObject {
   , runtimeElf :: Elf
   }
 
+data DynamicPage = DynamicPage {
+  dynamicPageVa :: VM.VAddr
+  , dynamicPageInfo :: VM.PageInfo
+  }
+
+collectDynamicRO :: VM.PageMap -> [(Word64, Linker.PageAccess)] -> H (Either LoadError [DynamicPage])
+collectDynamicRO pdir accesses = do
+  collected <- mapM collect [address | (address, Linker.PageRO) <- accesses]
+  return (sequence collected)
+  where
+    collect address = do
+      mapped <- VM.getPage pdir address
+      case mapped of
+        Just info
+          | not (VM.writable info) && not (VM.cow info) ->
+              return (Right (DynamicPage address info))
+        _ -> return (Left (BadDyn "dynamic share page is not finalized read-only"))
+
+sameDynamicPage :: DynamicPage -> VM.PageInfo -> H Bool
+sameDynamicPage current source = go 0
+  where
+    go offset
+      | offset >= 4096 = return True
+      | otherwise = do
+          l <- peek (fromPhysPage (VM.physPage (dynamicPageInfo current)) `plusPtr` offset) :: H Word8
+          r <- peek (fromPhysPage (VM.physPage source) `plusPtr` offset) :: H Word8
+          if l == r then go (offset + 1) else return False
+
+sourceMatches :: VM.PageMap -> SharedObject -> [DynamicPage] -> H Bool
+sourceMatches sourcePdir shared current = do
+  let expected = sharedObjectPages shared
+      currentByVa = Map.fromList [(dynamicPageVa page, page) | page <- current]
+      expectedByVa = Map.fromList expected
+      sameAddresses =
+        Map.keys currentByVa == Map.keys expectedByVa
+          && Map.size currentByVa == length current
+          && Map.size expectedByVa == length expected
+  if not sameAddresses
+    then return False
+    else do
+      let check (address, expectedPhys) = case Map.lookup address currentByVa of
+            Nothing -> return False
+            Just currentPage -> do
+              mapped <- VM.getPage sourcePdir address
+              case mapped of
+                Just source
+                  | VM.physPage source == expectedPhys
+                  , not (VM.writable source)
+                  , not (VM.cow source) ->
+                      sameDynamicPage currentPage source
+                _ -> return False
+      checks <- mapM check (Map.toList expectedByVa)
+      return (and checks)
+
+rewireDynamicPages :: VM.PageMap -> [DynamicPage] -> [(VM.VAddr, VM.PageInfo)] -> H (Either LoadError ())
+rewireDynamicPages pdir current source = go current source []
+  where
+    go [] [] replaced = do
+      mapM_ releaseOld replaced
+      return (Right ())
+    go ((DynamicPage address oldInfo) : currentRest) ((sourceVa, sourceInfo) : sourceRest) replaced
+      | address /= sourceVa = rollback replaced >> return (Left (BadDyn "dynamic shared page address mismatch"))
+      | VM.physPage oldInfo == VM.physPage sourceInfo = rollback replaced >> return (Left (BadDyn "dynamic shared page aliases current page"))
+      | otherwise = do
+          let sharedInfo = sourceInfo {VM.writable = False, VM.cow = False}
+          ok <- VM.setPage pdir address (Just sharedInfo)
+          if not ok
+            then rollback replaced >> return (Left (BadDyn "dynamic shared remap failed"))
+            else do
+              shareBump (ptrToWord64 (fromPhysPage (VM.physPage sourceInfo)))
+              go currentRest sourceRest ((address, oldInfo, sourceInfo) : replaced)
+    go _ _ replaced = do
+      rollback replaced
+      return (Left (BadDyn "dynamic shared page count mismatch"))
+    rollback [] = return ()
+    rollback ((address, oldInfo, sourceInfo) : rest) = do
+      _ <- VM.setPage pdir address (Just oldInfo)
+      unshareBump (ptrToWord64 (fromPhysPage (VM.physPage sourceInfo)))
+      rollback rest
+    releaseOld (_, oldInfo, _) = releaseBacking (fromPhysPage (VM.physPage oldInfo))
+
+findDynamicSource :: VM.PageMap -> String -> Word64 -> [DynamicPage] -> H (Maybe (Process, SharedObject))
+findDynamicSource target name base current = do
+  processes <- readRef procMap
+  try [pr | (_, pr) <- Map.toList processes, procPdir pr /= target]
+  where
+    try [] = return Nothing
+    try (pr : rest) =
+      case [shared | shared <- procSharedObjects pr, sharedObjectName shared == name, sharedObjectBase shared == base] of
+        [] -> try rest
+        shared : _ -> do
+          matches <- sourceMatches (procPdir pr) shared current
+          if matches then return (Just (pr, shared)) else try rest
+
+shareDependency :: VM.PageMap -> RuntimeObject -> [(Word64, Linker.PageAccess)] -> H (Either LoadError (Maybe SharedObject))
+shareDependency pdir object accesses
+  | Linker.placedObjectName placed == "main" = return (Right Nothing)
+  | otherwise = do
+      collected <- collectDynamicRO pdir accesses
+      case collected of
+        Left err -> return (Left err)
+        Right current
+          | null current -> return (Right Nothing)
+          | otherwise -> do
+              let name = Linker.placedObjectName placed
+                  base = Linker.placedObjectBase placed
+                  candidate = SharedObject name base [(dynamicPageVa page, VM.physPage (dynamicPageInfo page)) | page <- current]
+              source <- findDynamicSource pdir name base current
+              case source of
+                Nothing -> return (Right (Just candidate))
+                Just (pr, shared) -> do
+                  sourcePages <- mapM (readSourcePage (procPdir pr)) (sharedObjectPages shared)
+                  case sequence sourcePages of
+                    Nothing -> return (Right (Just candidate))
+                    Just pages -> do
+                      rewired <- rewireDynamicPages pdir current pages
+                      case rewired of
+                        Left err -> return (Left err)
+                        Right () -> return (Right (Just shared))
+  where
+    placed = runtimePlaced object
+    readSourcePage sourcePdir (address, expectedPhys) = do
+      mapped <- VM.getPage sourcePdir address
+      case mapped of
+        Just info
+          | VM.physPage info == expectedPhys
+          , not (VM.writable info)
+          , not (VM.cow info) ->
+              return (Just (address, info))
+        _ -> return Nothing
+
+shareDynamicObjects :: VM.PageMap -> [RuntimeObject] -> [(String, [(Word64, Linker.PageAccess)])] -> H (Either LoadError [SharedObject])
+shareDynamicObjects pdir objects accesses = do
+  results <- mapM shareOne objects
+  return (catMaybes <$> sequence results)
+  where
+    accessByName = Map.fromList accesses
+    shareOne object = case Map.lookup (Linker.placedObjectName (runtimePlaced object)) accessByName of
+      Nothing -> return (Left (BadDyn "dynamic shared object metadata missing"))
+      Just objectAccesses -> shareDependency pdir object objectAccesses
+
 -- | A fully preflighted image. Effectful mapping is deliberately private.
 data PreparedImage
   = StaticImage Elf
@@ -227,6 +368,7 @@ data MappedImage = MappedImage {
   mappedEntry :: Word64
   , mappedBreak :: Word64
   , mappedObjects :: [(String, [VM.VAddr])]
+  , mappedSharedObjects :: [SharedObject]
   }
 
 -- | Dynamic mappings are writable only while unpublished in the page map.
@@ -376,7 +518,7 @@ runPreparedBound pidInt image argv envp = do
                         else do
                           exitVar <- newEmptyMVar
                           modifyRef procExitMap (Map.insert pid exitVar)
-                          modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk))
+                          modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage)))
                           Sched.schedRegister pid
                           _ <- forkH $ do
                             liftIO (c_set_pdir pdirPtr)
@@ -414,7 +556,7 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
               pidInt <- readRef pidNext
               writeRef pidNext (pidInt + 1)
               let child = Pid pidInt
-              modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent)))
+              modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
               Vfs.vfsForkPid parentInt pidInt
               Fd.fdFork parentPid child
               return (Right child)
@@ -570,7 +712,7 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                 else do
                   exitVar <- newEmptyMVar
                   modifyRef procExitMap (Map.insert child exitVar)
-                  modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent)))
+                  modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
                   Sched.schedRegister child
                   Vfs.vfsForkPid parentInt pidInt
                   Fd.fdFork parentPid child
@@ -706,7 +848,7 @@ execReplaceValidated pid pdir path image = withQSem userSem $ do
                           cleanupMappedImage (procPdir pr) mappedImage
                           return (Left (BadSegment "exec redirect"))
                         else do
-                          writeRef procMap (Map.insert pid pr {procEntry = entry, procBrk = initBrk} mp)
+                          writeRef procMap (Map.insert pid pr {procEntry = entry, procBrk = initBrk, procSharedObjects = mappedSharedObjects mappedImage} mp)
                           return (Right (entry, sp))
 
 -- | EL1 lookup for the forktest isolation check (caller holds no locks).
@@ -1411,6 +1553,7 @@ mapPreparedImage pdir image = case image of
           mappedEntry = elfEntry elf
           , mappedBreak = initBreak elf
           , mappedObjects = [("static", sortOn id pages)]
+          , mappedSharedObjects = []
           }
   DynamicImage plan objects -> do
     case mapM plannedAccessFor objects of
@@ -1431,20 +1574,27 @@ mapPreparedImage pdir image = case image of
                   Left err -> do
                     cleanupPages pdir (concatMap snd objectPages)
                     return (Left err)
-                  Right () ->
+                  Right () -> do
                     case dynamicEntryBreak objects of
                       Left err -> do
                         cleanupPages pdir (concatMap snd objectPages)
                         return (Left err)
-                      Right (entry, brk) ->
-                        return
-                          ( Right
-                              MappedImage {
-                                mappedEntry = entry
-                                , mappedBreak = brk
-                                , mappedObjects = objectPages
-                                }
-                          )
+                      Right (entry, brk) -> do
+                        shared <- shareDynamicObjects pdir objects accesses
+                        case shared of
+                          Left err -> do
+                            cleanupPages pdir (concatMap snd objectPages)
+                            return (Left err)
+                          Right sharedObjects ->
+                            return
+                              ( Right
+                                  MappedImage {
+                                    mappedEntry = entry
+                                    , mappedBreak = brk
+                                    , mappedObjects = objectPages
+                                    , mappedSharedObjects = sharedObjects
+                                    }
+                              )
 
 plannedAccess :: RuntimeObject -> Either LoadError [(Word64, Linker.PageAccess)]
 plannedAccess object =
