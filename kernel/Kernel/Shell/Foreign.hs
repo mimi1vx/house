@@ -41,7 +41,7 @@ import Foreign.Ptr (Ptr)
 import H.Monad (runH)
 import H.Mutable (Ref, newRef, readRef)
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Virtio.Con as Con
+import Kernel.Driver.Virtio.Con qualified as Con
 
 foreign import ccall unsafe "uart_puts" c_uart_puts_raw :: Ptr CChar -> IO ()
 

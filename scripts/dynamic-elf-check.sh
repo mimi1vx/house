@@ -1,7 +1,8 @@
 #!/bin/sh
-# M2.0 dynamic-ELF compatibility gate. Runs inside house-port:latest on
-# linux/arm64; builds twice, audits both artifacts, and checks the bounded
-# Haskell loader before and after repacking.
+# M2.0/M2.1 dynamic-ELF compatibility and pure-link gate. Runs inside
+# house-port:latest on linux/arm64; builds twice, audits both artifacts, checks
+# the bounded loader before and after repacking, and compares deterministic
+# logical link plans without mapping or executing either object.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -164,6 +165,64 @@ sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/hello.loader" >"$WORK/he
 sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/hello.repacked.loader" >"$WORK/hello.repacked.normalized"
 cmp "$WORK/hello.normalized" "$WORK/hello.repacked.normalized"
 
+"$LOADER_CHECK" link "$A/hello-dyn" "$A/$SONAME" >"$WORK/link-a"
+"$LOADER_CHECK" link "$B/hello-dyn" "$B/$SONAME" >"$WORK/link-b"
+"$LOADER_CHECK" link "$WORK/hello-dyn.repacked" "$WORK/libc-house.repacked" >"$WORK/link-repacked"
+cmp "$WORK/link-a" "$WORK/link-b"
+cmp "$WORK/link-a" "$WORK/link-repacked"
+cat >"$WORK/expected-link" <<'EOF'
+object=main base=0x1000000 entry=0x1010290
+object=libc-house.so.0 base=0x1030000 entry=0x1030000
+relocation object=main provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x10203f8 resolved=0x10404b4
+EOF
+cmp "$WORK/expected-link" "$WORK/link-a"
+
+printf 'not an elf\n' >"$WORK/malformed"
+if "$LOADER_CHECK" link "$WORK/malformed" >"$WORK/malformed.link.out" 2>"$WORK/malformed.link.err"; then
+	echo "dynamic-elf-check: malformed link input was not rejected" >&2
+	exit 1
+fi
+grep -q 'Truncated' "$WORK/malformed.link.err"
+if "$LOADER_CHECK" link "$A/hello-dyn" >"$WORK/missing.link.out" 2>"$WORK/missing.link.err"; then
+	echo "dynamic-elf-check: missing link dependency was not rejected" >&2
+	exit 1
+fi
+grep -q 'missing dependency libc-house.so.0' "$WORK/missing.link.err"
+
+cat >"$WORK/leaf.s" <<'EOF'
+.arch armv8-a
+.text
+.global leaf
+.type leaf,%function
+leaf:
+    ret
+.section .note.GNU-stack,"",%progbits
+EOF
+cat >"$WORK/mid.s" <<'EOF'
+.arch armv8-a
+.text
+.global strlen
+.type strlen,%function
+strlen:
+    bl leaf
+    ret
+.section .note.GNU-stack,"",%progbits
+EOF
+gcc -fPIC -c "$WORK/leaf.s" -o "$WORK/leaf.o"
+gcc -fPIC -c "$WORK/mid.s" -o "$WORK/mid.o"
+SOURCE_DATE_EPOCH=0 ld.lld -shared --soname=libleaf.so.0 --hash-style=sysv \
+	-z now -z relro -z noseparate-code --build-id=none \
+	-o "$WORK/libleaf.so.0" "$WORK/leaf.o"
+SOURCE_DATE_EPOCH=0 ld.lld -shared --soname="$SONAME" --hash-style=sysv \
+	-z now -z relro -z noseparate-code --build-id=none --no-as-needed \
+	-L"$WORK" -l:libleaf.so.0 -o "$WORK/libmid.so.0" "$WORK/mid.o"
+readelf -dW "$WORK/libmid.so.0" | grep -q '(NEEDED).*libleaf.so.0'
+if "$LOADER_CHECK" link "$A/hello-dyn" "$WORK/libmid.so.0" >"$WORK/incomplete.link.out" 2>"$WORK/incomplete.link.err"; then
+	echo "dynamic-elf-check: incomplete transitive link was not rejected" >&2
+	exit 1
+fi
+grep -q 'missing dependency libleaf.so.0' "$WORK/incomplete.link.err"
+
 cat >"$WORK/bad-u.s" <<'EOF'
 .arch armv8-a
 .text
@@ -191,12 +250,17 @@ if python3 build-probe/repack.py "$WORK/oversized" "$WORK/oversized.repacked" >/
 	echo "dynamic-elf-check: oversized repacker input was not rejected" >&2
 	exit 1
 fi
+if "$LOADER_CHECK" link "$WORK/oversized" "$A/$SONAME" >"$WORK/oversized.link.out" 2>"$WORK/oversized.link.err"; then
+	echo "dynamic-elf-check: oversized link input was not rejected" >&2
+	exit 1
+fi
+grep -q 'file exceeds maxElfBytes' "$WORK/oversized.link.err"
 
 if find initramfs-staging -type f \( -name 'ld-house.so*' -o -name 'libc-house.so*' -o -name 'hello-dyn*' \) -print -quit | grep -q .; then
-	echo "dynamic-elf-check: M2.0 must not ship dynamic probe/library files" >&2
+	echo "dynamic-elf-check: M2.1 must not ship dynamic probe/library files" >&2
 	exit 1
 fi
 
 printf '%s  %s\n' "$(sha256sum "$A/$SONAME" | cut -d' ' -f1)" "$SONAME"
 printf '%s  %s\n' "$(sha256sum "$A/hello-dyn" | cut -d' ' -f1)" "hello-dyn"
-echo "dynamic-elf-check: reproducible artifacts, bounded parser, and repacker agree"
+echo "dynamic-elf-check: reproducible artifacts, bounded parser, repacker, and pure link plan agree"

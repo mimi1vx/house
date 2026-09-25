@@ -337,8 +337,9 @@ haskell-check:
 el0tiny-check: volumes
 	$(RUN_IN_CONTAINER) sh scripts/el0tiny-check.sh
 
-# M2.0 artifact compatibility only: reproducible ET_DYN probes, bounded
-# Loader inspection, and repacker parity. No initramfs or QEMU runtime leg.
+# M2.0/M2.1 artifact compatibility: reproducible ET_DYN probes, bounded
+# Loader inspection, repacker parity, and pure link planning. No initramfs or
+# QEMU dynamic-runtime leg.
 dynamic-elf-check: volumes
 	$(RUN_IN_CONTAINER) sh scripts/dynamic-elf-check.sh
 
@@ -351,7 +352,7 @@ check:
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust, dynamic ELF) =="
+	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust, dynamic ELF/link plan) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \

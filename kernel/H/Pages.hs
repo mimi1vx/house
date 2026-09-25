@@ -14,7 +14,7 @@ import H.Monad (liftIO)
 import H.Mutable
 import H.Unsafe (unsafePerformH)
 import H.Utils (alignedPtr, validPtr)
-import qualified System.Mem.Weak as W
+import System.Mem.Weak qualified as W
 
 --------------------------INTERFACE-------------------
 

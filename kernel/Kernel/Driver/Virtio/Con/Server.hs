@@ -19,7 +19,7 @@ import Control.Monad (forM_, when)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.Char (chr)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Word (Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, plusPtr)
@@ -29,17 +29,17 @@ import H.Interrupts (spi)
 import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Dmesg as Dmesg
-import qualified Kernel.Driver.GIC as DGIC
-import qualified Kernel.Driver.IRQ as DIRQ
-import qualified Kernel.Driver.Registry as DrvReg
+import Kernel.Driver.Dmesg qualified as Dmesg
+import Kernel.Driver.GIC qualified as DGIC
+import Kernel.Driver.IRQ qualified as DIRQ
+import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Con.Device (conInvalidate, conPollUsed, conProbe, conSaveCtrlQueues, conSaveQueues, conSetPortQueues, conSubmitCtrlRx, conSubmitCtrlTx, conSubmitRx, conSubmitTx)
 import Kernel.Driver.Virtio.Con.Types (ConDevice (..), ConError (..), ConKind (..), decodeCtrlEvent, portQueuesFor)
 import Kernel.Driver.Virtio.Queue (VirtQueue (..), allocQueue, freeQueue, queueAvailPa, queueDescPa, queueSize, queueUsedPa)
-import qualified Kernel.IPC.Endpoint as IPC
-import qualified Kernel.IPC.Grant as G
-import qualified Kernel.IPC.Nameservice as NS
+import Kernel.IPC.Endpoint qualified as IPC
+import Kernel.IPC.Grant qualified as G
+import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (Grant (..), Message (..))
 
 foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int

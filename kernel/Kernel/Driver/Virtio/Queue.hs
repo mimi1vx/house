@@ -19,7 +19,7 @@ import Control.Monad (when)
 import Data.Word (Word32, Word64, Word8)
 import Foreign.Ptr (Ptr)
 import H.Monad (H)
-import qualified H.Pages as P
+import H.Pages qualified as P
 
 -- | Virtqueue backed by H.Pages.
 data VirtQueue = VirtQueue {

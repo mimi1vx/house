@@ -25,12 +25,13 @@ any FFI (foreign symbols are stubbed at link time, never called):
 module Main (main) where
 
 import Control.Exception (SomeException, evaluate, try)
-import Control.Monad (forM, unless)
+import Control.Monad (foldM, forM, unless)
 import Data.Bits (shiftL, shiftR, (.|.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
-import Data.Either (isLeft)
+import Data.Either (fromRight, isLeft)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.Int (Int64)
 import Data.Ix qualified as Ix
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -44,6 +45,7 @@ import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
+import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader qualified as Ldr
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..), exitFailure)
@@ -94,6 +96,15 @@ assertLoadLeft name bytes want = do
   case r of
     Left _ -> check name False
     Right (Left got) -> check name (got == want)
+    Right (Right _) -> check name False
+
+-- | Assert pure link planning fails without throwing.
+assertLinkLeft :: String -> Either Ldr.LoadError Linker.LinkPlan -> IO Bool
+assertLinkLeft name result = do
+  r <- try (evaluate result) :: IO (Either SomeException (Either Ldr.LoadError Linker.LinkPlan))
+  case r of
+    Left _ -> check name False
+    Right (Left _) -> check name True
     Right (Right _) -> check name False
 
 -- Generators ---------------------------------------------------------------
@@ -598,7 +609,7 @@ main = do
       , assertThrows "word12 succ maxBound" (succ (maxBound :: Word12))
       , assertThrows "word12 pred minBound" (pred (minBound :: Word12))
       , assertThrows "word12 ix OOB" (Ix.index (0, 3 :: Word12) 4)
-      , -- M1 dynamic linking: ET_DYN + RELATIVE-only RELA + hostile vectors
+      , -- M1/M2.0 dynamic ELF: hostile vectors and landed eager-relocation metadata
         check "elf ET_EXEC min parses" (isDynRight elfExecMin False)
       , check "elf ET_DYN good parses" (isDynRight elfDynGood True)
       , check "elf ET_DYN low zero-entry parses" (isDynRight elfDynLow True)
@@ -661,6 +672,301 @@ main = do
       , check "rela slide overflow" (Ldr.applyRelativeRelocs 0x01000000 [relativeRelocation 0x01000008 maxBound] (replicate 16 0) == Left Ldr.OverlapSize)
       , check "rela slide jump reject" (Ldr.applyRelativeRelocs 0x01000000 [eagerRelocation 0x01000008 1026 1 "strlen" 0] (replicate 16 0) == Left (Ldr.UnsupportedReloc 1026))
       , check "rela file slide good" (Ldr.applyRelocsToFile [Ldr.Segment 0x01000000 288 512 512 5] 0x01000000 [relativeRelocation 0x01000008 0x2000] (replicate 512 0) == Right (replicate 296 0 ++ put64le 0x01002000 ++ replicate 208 0))
+      , -- M2.1 pure dependency, placement, symbol, and relocation planner
+        check
+          "link JUMP_SLOT resolves"
+          ( linkPatchMatches
+              Linker.LinkJumpSlot
+              "libc-house.so.0"
+              (Just "strlen")
+              0x01000338
+              0x01010100
+              (defaultLink elfLinkMain)
+          )
+      , check
+          "link GLOB_DAT resolves"
+          ( linkPatchMatches
+              Linker.LinkGlobDat
+              "libc-house.so.0"
+              (Just "strlen")
+              0x01000338
+              0x01010100
+              (defaultLink elfLinkGlobMain)
+          )
+      , check
+          "link RELATIVE resolves"
+          ( linkPatchMatches
+              Linker.LinkRelative
+              "main"
+              Nothing
+              0x01000310
+              0x01000020
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [relativeBinding 0x310 0x20] . setMainNeeded [])
+                  []
+              )
+          )
+      , check
+          "link negative RELATIVE addend"
+          ( linkPatchMatches
+              Linker.LinkRelative
+              "main"
+              Nothing
+              0x01000310
+              0x00FFFFE0
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [relativeBinding 0x310 (fromIntegral (-0x20 :: Int64))] . setMainNeeded [])
+                  []
+              )
+          )
+      , check
+          "link negative JUMP_SLOT addend"
+          ( linkPatchMatches
+              Linker.LinkJumpSlot
+              "libc-house.so.0"
+              (Just "strlen")
+              0x01000338
+              0x01010000
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" (fromIntegral (-0x100 :: Int64))] . setMainNeeded ["libc-house.so.0"])
+                  [("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1])]
+              )
+          )
+      , check
+          "link DFS discovery order"
+          ( linkNamesAre
+              ["main", "liba.so.0", "libc.so.0", "libb.so.0"]
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [] . setMainNeeded ["liba.so.0", "libb.so.0"])
+                  [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" ["libc.so.0"] [])
+                  , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" ["libc.so.0"] [])
+                  , ("libc.so.0", elfLinkDep, validDependency "libc.so.0" [] [])
+                  ]
+              )
+          )
+      , check
+          "link duplicate NEEDED dedup"
+          ( linkNamesAre
+              ["main", "liba.so.0"]
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [] . setMainNeeded ["liba.so.0", "liba.so.0"])
+                  [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [])]
+              )
+          )
+      , check
+          "link placement non-overlap"
+          ( linkBasesAre
+              [0x01000000, 0x01010000, 0x01020000]
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [] . setMainNeeded ["liba.so.0", "libb.so.0"])
+                  [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [])
+                  , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" [] [])
+                  ]
+              )
+          )
+      , check
+          "link patch order deterministic"
+          ( linkPatchTargetsAre
+              [0x01000300, 0x01000308, 0x01000310]
+              ( linkWith
+                  elfLinkMain
+                  ( Right
+                      . setMainRelocations
+                        [relativeBinding 0x300 1, relativeBinding 0x308 2, relativeBinding 0x310 3]
+                      . setMainNeeded []
+                  )
+                  []
+              )
+          )
+      , check
+          "link relocation table order"
+          (linkPatchTargetsAre [0x01000310, 0x01000338] (defaultLink elfLinkMain))
+      , check
+          "link does not unlock dynamic run"
+          ( case defaultLink elfLinkMain of
+              Left _ -> False
+              Right _ -> validateElf elfLinkMain == Left (Ldr.BadDyn "dynamic execution unsupported")
+          )
+      , assertLinkLeft
+          "link missing dependency"
+          (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
+      , assertLinkLeft
+          "link incomplete transitive dependency"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" ["libmissing.so.0"] [])]
+          )
+      , assertLinkLeft
+          "link dependency cycle"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
+              [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" ["libb.so.0"] [])
+              , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" ["liba.so.0"] [])
+              ]
+          )
+      , assertLinkLeft
+          "link SONAME mismatch"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "actual.so.0" [] [])]
+          )
+      , assertLinkLeft
+          "link dependency INTERP rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, setDependencyInterp (validDependency "liba.so.0" [] []))]
+          )
+      , assertLinkLeft
+          "link dependency RELRO required"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, clearDependencyRelro (validDependency "liba.so.0" [] []))]
+          )
+      , assertLinkLeft
+          "link dependency object cap"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [])
+              [ ("lib" ++ show index ++ ".so.0", elfLinkDep, validDependency ("lib" ++ show index ++ ".so.0") [] [])
+              | index <- ([0 .. 9] :: [Int])
+              ]
+          )
+      , assertLinkLeft
+          "link total page cap"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["lib0.so.0", "lib1.so.0", "lib2.so.0", "lib3.so.0"])
+              [ ("lib" ++ show index ++ ".so.0", elfLinkDepLarge, validDependency ("lib" ++ show index ++ ".so.0") [] [])
+              | index <- ([0 .. 3] :: [Int])
+              ]
+          )
+      , assertLinkLeft
+          "link placed stack collision"
+          (linkWith elfLinkMain setMainForStack [])
+      , assertLinkLeft
+          "link unresolved relocation"
+          ( linkWith
+              elfLinkMain
+              ( Right
+                  . setMainRelocations [eagerBinding 0x338 1026 1 "missing" 0]
+                  . setMainSymbolTable [undefinedSymbol "missing"]
+                  . setMainNeeded []
+              )
+              []
+          )
+      , assertLinkLeft
+          "link duplicate export"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["liba.so.0", "libb.so.0"])
+              [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "dup" 0x100 1])
+              , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" [] [definedSymbol "dup" 0x100 1])
+              ]
+          )
+      , assertLinkLeft
+          "link provider outside LOAD"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x1000 1])]
+          )
+      , assertLinkLeft
+          "link symbol size overflow"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 maxBound])]
+          )
+      , assertLinkLeft
+          "link relocation target overflow"
+          (linkWith elfLinkMain (Right . setMainRelocations [eagerBinding maxBound 1026 1 "strlen" 0] . setMainNeeded []) [])
+      , assertLinkLeft
+          "link relocation value overflow"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0x110000] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, setDependencyNearTop (validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1]))]
+          )
+      , assertLinkLeft
+          "link relocation addend underflow"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0x8000000000000000] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1])]
+          )
+      , assertLinkLeft
+          "link duplicate relocation target"
+          ( linkWith
+              elfLinkMain
+              ( Right
+                  . setMainRelocations
+                    [eagerBinding 0x338 1026 1 "strlen" 0, eagerBinding 0x338 1026 1 "strlen" 0]
+                  . setMainNeeded ["liba.so.0"]
+              )
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1])]
+          )
+      , assertLinkLeft
+          "link weak symbol rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [weakSymbol "strlen"])]
+          )
+      , assertLinkLeft
+          "link protected visibility rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [protectedSymbol "strlen"])]
+          )
+      , assertLinkLeft
+          "link IFUNC rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [ifuncSymbol "strlen"])]
+          )
+      , assertLinkLeft
+          "link SHN_COMMON rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["libc-house.so.0"])
+              [("libc-house.so.0", elfLinkDepCommon, Right)]
+          )
+      , assertLinkLeft
+          "link SHN_ABS rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["libc-house.so.0"])
+              [("libc-house.so.0", elfLinkDepAbsolute, Right)]
+          )
+      , assertLinkLeft
+          "link SHN_XINDEX rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["libc-house.so.0"])
+              [("libc-house.so.0", elfLinkDepXIndex, Right)]
+          )
+      , assertLinkLeft
+          "link main bind-now required"
+          (linkWith elfLinkMain (Right . setMainBindNow False . setMainRelocations []) [])
+      , assertLinkLeft
+          "link main RELRO required"
+          (linkWith elfLinkMain (Right . clearMainRelro . setMainRelocations []) [])
+      , assertLinkLeft
+          "link main SysV required"
+          (linkWith elfLinkMain (Right . setMainHash Ldr.NoHash . setMainRelocations []) [])
       , checkIO "loader vs repack parity" parityCheck
       ]
   unless (and results) exitFailure
@@ -1049,6 +1355,206 @@ elfNeededTwo =
   let strtab = map (fromIntegral . ord) "libc-house.so.0\0libm-house.so.0\0" :: [Word8]
       blob = patchAt (mkDynBlob interpGoodBs [(1, 0), (1, 16), (5, 0x010001A0), (10, 32)] (1027, 0x01000008, 0x2000)) 0x1A0 strtab
    in mkDynElf 3 0x01000000 blob [(0x10, 19)] [(0x100, 0x01000100, 80)] [] []
+
+-- M2.1 linker fixtures ------------------------------------------------------
+
+elfLinkDepCommon :: [Word8]
+elfLinkDepCommon = patchAt elfLinkDep 0x286 (put16le 0xFFF2)
+
+elfLinkDepAbsolute :: [Word8]
+elfLinkDepAbsolute = patchAt elfLinkDep 0x286 (put16le 0xFFF1)
+
+elfLinkDepXIndex :: [Word8]
+elfLinkDepXIndex = patchAt elfLinkDep 0x286 (put16le 0xFFFF)
+
+elfLinkMain :: [Word8]
+elfLinkMain = patchAt elfJumpSlot 0x2BE (put16le 0)
+
+elfLinkGlobMain :: [Word8]
+elfLinkGlobMain = patchAt elfGlobDat 0x2BE (put16le 0)
+
+elfLinkDep :: [Word8]
+elfLinkDep =
+  mkM2ElfFromBlob
+    0
+    6
+    0x500
+    False
+    True
+    (length (mkDynArr m2DsoEnts))
+    (m2Blob m2DsoEnts 1026 1)
+
+elfLinkDepLarge :: [Word8]
+elfLinkDepLarge =
+  mkM2ElfFromBlob
+    0
+    6
+    0x40000
+    False
+    True
+    (length (mkDynArr m2DsoEnts))
+    (m2Blob m2DsoEnts 1026 1)
+
+type ElfEdit = Ldr.Elf -> Either Ldr.LoadError Ldr.Elf
+
+linkWith :: [Word8] -> ElfEdit -> [(String, [Word8], ElfEdit)] -> Either Ldr.LoadError Linker.LinkPlan
+linkWith mainBytes editMain dependencyEdits = do
+  mainElf <- Ldr.loadElf mainBytes >>= editMain
+  dependencies <- foldM addDependency Map.empty dependencyEdits
+  Linker.linkDynamic mainElf dependencies
+  where
+    addDependency dependencies (name, bytes, edit) = do
+      elf <- Ldr.loadElf bytes
+      edited <- edit elf
+      pure (Map.insert name edited dependencies)
+
+defaultLink :: [Word8] -> Either Ldr.LoadError Linker.LinkPlan
+defaultLink mainBytes =
+  linkWith
+    mainBytes
+    Right
+    [("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1])]
+
+validDependency :: String -> [String] -> [Ldr.DynamicSymbol] -> ElfEdit
+validDependency name needed exports elf = do
+  withSymbols <- setSymbols exports elf
+  let dynInfo = Ldr.elfDyn withSymbols
+  pure
+    withSymbols {
+      Ldr.elfDyn =
+        dynInfo {
+          Ldr.dynSoname = Just name
+          , Ldr.dynNeeded = needed
+          , Ldr.dynRelocations = []
+          }
+      }
+
+setSymbols :: [Ldr.DynamicSymbol] -> ElfEdit
+setSymbols named elf = case (Ldr.dynSymbols dynInfo, Ldr.dynHashStyle dynInfo) of
+  (Just symbols, Ldr.SysVHash hash) ->
+    let entries = nullDynamicSymbol : named
+        newSymbols = symbols {Ldr.dynamicSymbolEntries = entries}
+        newHash = hash {Ldr.sysvHashSymbols = length entries}
+     in Right
+          elf {
+            Ldr.elfDyn =
+              dynInfo {
+                Ldr.dynSymbols = Just newSymbols
+                , Ldr.dynHashStyle = Ldr.SysVHash newHash
+                }
+            }
+  _ -> Left (Ldr.BadDyn "link fixture has no SysV symbols")
+  where
+    dynInfo = Ldr.elfDyn elf
+
+setMainNeeded :: [String] -> Ldr.Elf -> Ldr.Elf
+setMainNeeded needed = updateDyn (\dynInfo -> dynInfo {Ldr.dynNeeded = needed})
+
+setMainRelocations :: [Ldr.Relocation] -> Ldr.Elf -> Ldr.Elf
+setMainRelocations relocations =
+  updateDyn
+    ( \dynInfo ->
+        dynInfo {
+          Ldr.dynRelocations =
+            [ Ldr.RelocationTable Ldr.DynamicRelocations 0 (24 * length relocations) 24 relocations
+            | not (null relocations)
+            ]
+          }
+    )
+
+setMainSymbolTable :: [Ldr.DynamicSymbol] -> Ldr.Elf -> Ldr.Elf
+setMainSymbolTable names elf = fromRight elf (setSymbols names elf)
+
+setMainBindNow :: Bool -> Ldr.Elf -> Ldr.Elf
+setMainBindNow bindNow = updateDyn (\dynInfo -> dynInfo {Ldr.dynBindNow = bindNow})
+
+setMainHash :: Ldr.HashStyle -> Ldr.Elf -> Ldr.Elf
+setMainHash style = updateDyn (\dynInfo -> dynInfo {Ldr.dynHashStyle = style})
+
+clearMainRelro :: Ldr.Elf -> Ldr.Elf
+clearMainRelro elf = elf {Ldr.elfRelro = Nothing}
+
+setMainForStack :: ElfEdit
+setMainForStack elf =
+  let vaddr = Ldr.stackPageStart - 0x01000000
+      segments = [segment {Ldr.segVaddr = vaddr} | segment <- Ldr.elfSegs elf]
+      relro = fmap (\range -> range {Ldr.relroStart = vaddr + Ldr.relroStart range, Ldr.relroEnd = vaddr + Ldr.relroEnd range}) (Ldr.elfRelro elf)
+      cleaned = elf {Ldr.elfSegs = segments, Ldr.elfRelro = relro, Ldr.elfEntry = vaddr + Ldr.elfEntry elf}
+   in Right (setMainNeeded [] (setMainRelocations [] cleaned))
+
+setDependencyNearTop :: ElfEdit -> ElfEdit
+setDependencyNearTop edit elf = do
+  edited <- edit elf
+  case Ldr.elfSegs edited of
+    [] -> Left (Ldr.BadDyn "link fixture has no LOAD")
+    first : _ ->
+      let target = 0xFEEE0000
+          delta = target - Ldr.segVaddr first
+          segments = [segment {Ldr.segVaddr = Ldr.segVaddr segment + delta} | segment <- Ldr.elfSegs edited]
+          relro = fmap (\range -> range {Ldr.relroStart = Ldr.relroStart range + delta, Ldr.relroEnd = Ldr.relroEnd range + delta}) (Ldr.elfRelro edited)
+          symbols = fmap (\table -> table {Ldr.dynamicSymbolEntries = [symbol {Ldr.dynamicSymbolValue = Ldr.dynamicSymbolValue symbol + delta} | symbol <- Ldr.dynamicSymbolEntries table]}) (Ldr.dynSymbols (Ldr.elfDyn edited))
+          dynInfo = (Ldr.elfDyn edited) {Ldr.dynSymbols = symbols}
+       in Right edited {Ldr.elfSegs = segments, Ldr.elfRelro = relro, Ldr.elfEntry = Ldr.elfEntry edited + delta, Ldr.elfDyn = dynInfo}
+
+setDependencyInterp :: ElfEdit -> ElfEdit
+setDependencyInterp edit elf = do
+  edited <- edit elf
+  pure edited {Ldr.elfInterp = Just Ldr.ldHousePath}
+
+clearDependencyRelro :: ElfEdit -> ElfEdit
+clearDependencyRelro edit elf = do
+  edited <- edit elf
+  pure edited {Ldr.elfRelro = Nothing}
+
+updateDyn :: (Ldr.DynInfo -> Ldr.DynInfo) -> Ldr.Elf -> Ldr.Elf
+updateDyn update elf = elf {Ldr.elfDyn = update (Ldr.elfDyn elf)}
+
+nullDynamicSymbol :: Ldr.DynamicSymbol
+nullDynamicSymbol = Ldr.DynamicSymbol "" 0 0 0 0 0
+
+undefinedSymbol :: String -> Ldr.DynamicSymbol
+undefinedSymbol name = Ldr.DynamicSymbol name 0x12 0 0 0 0
+
+definedSymbol :: String -> Word64 -> Word64 -> Ldr.DynamicSymbol
+definedSymbol name = Ldr.DynamicSymbol name 0x12 0 1
+
+weakSymbol :: String -> Ldr.DynamicSymbol
+weakSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolInfo = 0x22}
+
+protectedSymbol :: String -> Ldr.DynamicSymbol
+protectedSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolOther = 2}
+
+ifuncSymbol :: String -> Ldr.DynamicSymbol
+ifuncSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolInfo = 0x1A}
+
+relativeBinding :: Word64 -> Word64 -> Ldr.Relocation
+relativeBinding offset addend = Ldr.RelativeBinding (Ldr.RelativeRelocation offset addend)
+
+eagerBinding :: Word64 -> Word32 -> Word32 -> String -> Word64 -> Ldr.Relocation
+eagerBinding offset relocationType symbolIndex name addend =
+  Ldr.EagerSymbolBinding (Ldr.EagerSymbolRelocation offset relocationType symbolIndex name addend)
+
+linkPatchMatches :: Linker.LinkRelocation -> String -> Maybe String -> Word64 -> Word64 -> Either Ldr.LoadError Linker.LinkPlan -> Bool
+linkPatchMatches relocation provider symbol target value result = case result of
+  Left _ -> False
+  Right plan ->
+    [patch | patch <- Linker.linkPatches plan, Linker.patchRelocation patch == relocation]
+      == [Linker.RelocationPatch "main" provider symbol relocation target value]
+
+linkNamesAre :: [String] -> Either Ldr.LoadError Linker.LinkPlan -> Bool
+linkNamesAre expected result = case result of
+  Left _ -> False
+  Right plan -> map Linker.placedObjectName (Linker.linkObjects plan) == expected
+
+linkBasesAre :: [Word64] -> Either Ldr.LoadError Linker.LinkPlan -> Bool
+linkBasesAre expected result = case result of
+  Left _ -> False
+  Right plan -> map Linker.placedObjectBase (Linker.linkObjects plan) == expected
+
+linkPatchTargetsAre :: [Word64] -> Either Ldr.LoadError Linker.LinkPlan -> Bool
+linkPatchTargetsAre expected result = case result of
+  Left _ -> False
+  Right plan -> map Linker.patchTarget (Linker.linkPatches plan) == expected
 
 relativeRelocation :: Word64 -> Word64 -> Ldr.Relocation
 relativeRelocation off add = Ldr.RelativeBinding (Ldr.RelativeRelocation off add)

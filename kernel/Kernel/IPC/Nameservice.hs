@@ -14,12 +14,12 @@ module Kernel.IPC.Nameservice (
 where
 
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Dmesg as Dmesg
+import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.IPC.Endpoint (CapToken, checkCap)
 import Kernel.IPC.Types (Endpoint, IpcError (..))
 

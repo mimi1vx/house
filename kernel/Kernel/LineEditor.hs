@@ -12,7 +12,7 @@ import H.Concurrency
 import H.Monad (H)
 import Kernel.Console
 import Kernel.Driver.Keyboard (KMod (..), KModSide (..), Key (..), KeyPress (..))
-import qualified Kernel.FileSystem.Vfs as VFS
+import Kernel.FileSystem.Vfs qualified as VFS
 import Kernel.Types.Console (VideoAttributes)
 
 {---

@@ -2,7 +2,7 @@
 module H.Mutable (module H.Mutable, H, MArray, Ix) where
 
 import Data.Array.IO (IOArray, IOUArray, Ix, MArray)
-import qualified Data.Array.IO as IO (newArray, readArray, writeArray)
+import Data.Array.IO qualified as IO (newArray, readArray, writeArray)
 import Data.IORef
 import H.Monad (H, liftIO)
 

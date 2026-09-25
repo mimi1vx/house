@@ -11,16 +11,16 @@ module Kernel.Driver.Registry (
 where
 
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Interrupts (IntId)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Types (DriverError (..), DriverInfo (..), DriverKind)
-import qualified Kernel.IPC.Nameservice as NS
+import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (Endpoint)
-import qualified Kernel.IPC.Types as IPC
+import Kernel.IPC.Types qualified as IPC
 
 {-# NOINLINE drvMap #-}
 drvMap :: Ref (Map String DriverInfo)

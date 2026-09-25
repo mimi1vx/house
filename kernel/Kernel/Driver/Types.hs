@@ -10,7 +10,7 @@ where
 
 import H.Interrupts (IntId)
 import Kernel.IPC.Types (Endpoint, IpcError)
-import qualified Kernel.IPC.Types as IPC
+import Kernel.IPC.Types qualified as IPC
 
 -- | Kind of driver (informational for @lsdev@).
 data DriverKind

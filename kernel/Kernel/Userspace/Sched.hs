@@ -32,10 +32,10 @@ module Kernel.Userspace.Sched (
 where
 
 import Control.Concurrent (tryPutMVar)
-import qualified Control.Concurrent as IO (getNumCapabilities)
+import Control.Concurrent qualified as IO (getNumCapabilities)
 import Control.Monad (forM_, void, when)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
 import Data.Word (Word64)
 import H.Concurrency (MVar, QSem, newMVar, newQSem, takeMVar, withQSem)
@@ -43,7 +43,7 @@ import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Userspace.Types (Pid (..), procMap, userSem)
-import qualified System.Timeout as T
+import System.Timeout qualified as T
 
 foreign import ccall unsafe "house_sched_set_runnable" c_sched_set_runnable :: Word64 -> IO ()
 

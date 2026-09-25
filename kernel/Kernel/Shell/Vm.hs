@@ -14,9 +14,9 @@ import Foreign.C.Types (CInt, CSize)
 import Foreign.Ptr (Ptr, castPtr, intPtrToPtr, nullPtr, plusPtr, ptrToIntPtr)
 import Foreign.Storable (peek, poke)
 import H.Monad (runH)
-import qualified H.Pages as HPages
-import qualified H.PhysicalMemory as HPhys
-import qualified H.VirtualMemory as VM
+import H.Pages qualified as HPages
+import H.PhysicalMemory qualified as HPhys
+import H.VirtualMemory qualified as VM
 import Kernel.Shell.Foreign (
   c_asid_for,
   c_demand_100,

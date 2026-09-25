@@ -17,7 +17,7 @@ import Prelude hiding (putStrLn)
 import Control.Monad (mplus)
 import Data.Char
 import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
 import Data.Word
 import H.Concurrency
 import H.Monad (H)

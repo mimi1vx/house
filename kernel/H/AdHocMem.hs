@@ -28,10 +28,10 @@ import Data.Word (
   Word8,
  )
 import Foreign.Marshal (advancePtr)
-import qualified Foreign.Marshal as IO (allocaArray, copyArray, moveBytes, withArray)
-import qualified Foreign.Marshal.Alloc as IO (free, mallocBytes)
+import Foreign.Marshal qualified as IO (allocaArray, copyArray, moveBytes, withArray)
+import Foreign.Marshal.Alloc qualified as IO (free, mallocBytes)
 import Foreign.Ptr (Ptr, alignPtr, castPtr, minusPtr, nullPtr, plusPtr)
-import qualified Foreign.Storable as IO
+import Foreign.Storable qualified as IO
 import H.Monad (H, liftIO, runH)
 
 mallocBytes :: Int -> H (Ptr a)

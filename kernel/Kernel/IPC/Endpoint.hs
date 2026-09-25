@@ -22,18 +22,18 @@ module Kernel.IPC.Endpoint (
 where
 
 import Control.Concurrent (MVar, tryPutMVar)
-import qualified Control.Concurrent as C
+import Control.Concurrent qualified as C
 import Control.Exception (bracketOnError)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Word (Word64)
 import H.Concurrency (QSem, newQSem, withQSem)
-import qualified H.Concurrency as HC
+import H.Concurrency qualified as HC
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
-import qualified H.Pages as P
+import H.Pages qualified as P
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Dmesg as Dmesg
+import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.IPC.Types (
   Endpoint (..),
   EndpointId (..),
@@ -41,7 +41,7 @@ import Kernel.IPC.Types (
   IpcError (..),
   Message (..),
  )
-import qualified System.Timeout as T
+import System.Timeout qualified as T
 
 -- | Maximum rendezvous queued per endpoint (HIGH OOM bound).
 maxQueueDepth :: Int

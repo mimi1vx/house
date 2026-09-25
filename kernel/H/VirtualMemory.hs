@@ -21,7 +21,7 @@ import Control.Monad
 import Data.Bits
 import H.AdHocMem
 import H.Monad (liftIO)
-import qualified H.Pages as P
+import H.Pages qualified as P
 import H.PhysicalMemory (PhysPage, fromPhysPage, toPhysPage)
 import H.Utils
 

@@ -2,7 +2,7 @@
 module H.Concurrency (module H.Concurrency {- H,-}, Chan, MVar, QSem, ThreadId) where
 
 import Control.Concurrent (Chan, MVar, QSem, ThreadId)
-import qualified Control.Concurrent as IO
+import Control.Concurrent qualified as IO
 import Control.Exception (bracket_)
 import H.Monad (H, liftIO, runH, trappedRunH)
 

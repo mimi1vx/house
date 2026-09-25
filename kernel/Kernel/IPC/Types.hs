@@ -16,7 +16,7 @@ module Kernel.IPC.Types (
 where
 
 import Data.Word (Word64, Word8)
-import qualified H.Pages as P
+import H.Pages qualified as P
 
 -- | Maximum inline words per message (header copy, bulk via grant).
 maxMsgWords :: Int

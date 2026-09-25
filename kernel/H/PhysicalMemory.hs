@@ -18,7 +18,7 @@ import H.AdHocMem (peek, plusPtr, poke)
 
 -- import Kernel.Debug(putStrLn)
 import H.Monad (H)
-import qualified H.Pages as P (Page, allocPage, freePage, pageSize, registerPage)
+import H.Pages qualified as P (Page, allocPage, freePage, pageSize, registerPage)
 import Util.Word12
 
 ------------------------------- INTERFACE --------------------------------------

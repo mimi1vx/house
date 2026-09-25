@@ -18,7 +18,7 @@ where
 
 import Control.Monad (when)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Word (
   Word32,
   Word64,
@@ -27,18 +27,18 @@ import Data.Word (
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
-import qualified H.Concurrency as HC
+import H.Concurrency qualified as HC
 import H.Interrupts (IntId)
 import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Dmesg as Dmesg
-import qualified Kernel.Driver.Registry as DrvReg
+import Kernel.Driver.Dmesg qualified as Dmesg
+import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Blk.Device (blkPollUsed, blkProbeCapacity, blkSubmitRead, blkSubmitWrite)
 import Kernel.Driver.Virtio.Blk.Types (BlkError (..), validateLba)
-import qualified Kernel.Driver.Virtio.Transport as VTrans
-import qualified Kernel.IPC.Grant as G
+import Kernel.Driver.Virtio.Transport qualified as VTrans
+import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Types (Endpoint, Grant (..))
 
 foreign import ccall unsafe "house_uptime_ns" c_uptime_ns :: IO Word64

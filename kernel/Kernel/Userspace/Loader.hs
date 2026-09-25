@@ -10,7 +10,7 @@ ET_EXEC retains the 0x01000000-0xFFFFFFFF window; ET_DYN accepts standard
 low relative virtual addresses and BSS. Dynamic metadata is limited to
 SysV hash, eager AArch64 symbol relocations, relative relocations, and
 RELRO. PT_INTERP is pinned to /lib/ld-house.so.0 and recorded only.
-Runtime execution rejects dynamic objects until M2.1 implements binding.
+Runtime execution rejects dynamic objects until M2.2 maps and applies a pure link plan.
 -}
 module Kernel.Userspace.Loader (
   LoadError (..),

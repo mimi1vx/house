@@ -19,7 +19,7 @@ where
 import Control.Monad (forM_)
 import Data.Bits ((.&.), (.|.))
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Word (Word32, Word64)
 import Foreign.C.Types (CInt (..))
 import Foreign.Marshal.Alloc (alloca)
@@ -30,13 +30,13 @@ import H.Interrupts (IntId, spi)
 import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Dmesg as Dmesg
-import qualified Kernel.Driver.GIC as DGIC
-import qualified Kernel.Driver.IRQ as DIRQ
+import Kernel.Driver.Dmesg qualified as Dmesg
+import Kernel.Driver.GIC qualified as DGIC
+import Kernel.Driver.IRQ qualified as DIRQ
 import Kernel.Driver.Virtio.Queue (VirtQueue, allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
 import Kernel.Driver.Virtio.Types (VirtioError (..), VirtioFeature (..), cErrToVirtioError, virtioFeatureMask)
-import qualified Kernel.IPC.Endpoint as IPC
-import qualified Kernel.IPC.Nameservice as NS
+import Kernel.IPC.Endpoint qualified as IPC
+import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (Endpoint)
 
 -- | Device record kept in transport map.

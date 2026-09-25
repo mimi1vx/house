@@ -10,7 +10,7 @@ module Kernel.IPC.Grant (
 where
 
 import H.Monad (H)
-import qualified H.Pages as P
+import H.Pages qualified as P
 import Kernel.IPC.Types (Grant (..), IpcError (..), Message (..), Perm (..), isValidGrant)
 
 -- | Allocate one zeroed page as RW grant. ENOSPC maps to BadGrant/QueueFull.

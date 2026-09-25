@@ -9,8 +9,8 @@ module Kernel.Shell.Format (
 where
 
 import Data.Word (Word64)
-import qualified Kernel.FileSystem.Vfs as FS
-import qualified Kernel.Userspace.Loader as ULdr
+import Kernel.FileSystem.Vfs qualified as FS
+import Kernel.Userspace.Loader qualified as ULdr
 
 -- | Total hex digit; the index is always reduced mod 16.
 hexDigit :: Int -> Char

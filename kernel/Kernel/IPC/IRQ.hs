@@ -13,7 +13,7 @@ import H.Interrupts (IntId (..), installHandler)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import qualified Kernel.Driver.Dmesg as Dmesg
+import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.IPC.Endpoint (trySend)
 import Kernel.IPC.Types (Endpoint, Message (..))
 

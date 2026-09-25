@@ -14,8 +14,8 @@ import Foreign.Ptr (Ptr, castPtr, intPtrToPtr, ptrToIntPtr)
 import Foreign.Storable (peek)
 import GHC.Conc (getNumCapabilities, getNumProcessors)
 import H.Monad (runH)
-import qualified H.Pages as HPages
-import qualified Kernel.FileSystem.RamFs as RamFs
+import H.Pages qualified as HPages
+import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.Shell.Foreign (
   c_bank_count,
   c_bank_get,

@@ -89,6 +89,7 @@ library
     Kernel.Types.Console
     Kernel.Userspace
     Kernel.Userspace.Fd
+    Kernel.Userspace.Linker
     Kernel.Userspace.Loader
     Kernel.Userspace.Process
     Kernel.Userspace.Sched

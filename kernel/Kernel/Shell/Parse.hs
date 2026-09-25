@@ -5,7 +5,7 @@ module Kernel.Shell.Parse (
 )
 where
 
-import qualified Kernel.Driver.Virtio.Net.Types as NetTypes
+import Kernel.Driver.Virtio.Net.Types qualified as NetTypes
 
 -- | IPv4 parse failure; carries the offending input.
 data Ipv4Error = BadIpv4 String

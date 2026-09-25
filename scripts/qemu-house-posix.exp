@@ -22,7 +22,7 @@ expect {
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: saw prompt" }
+    -re "> ?" { puts "\nPASS: saw prompt" }
     timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before prompt"; exit 1 }
 }
@@ -79,7 +79,7 @@ expect {
     eof { puts "\nFAIL: eof before second welcome (shutdown -r)"; exit 1 }
 }
 expect {
-    -re "> " { puts "\nPASS: prompt after reboot" }
+    -re "> ?" { puts "\nPASS: prompt after reboot" }
     timeout { puts "\nFAIL: prompt after reboot timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after reboot"; exit 1 }
 }
