@@ -43,7 +43,7 @@ import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
 import Kernel.Userspace.Fd qualified as Fd
-import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateRunElf)
+import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateStaticRunElf)
 import Kernel.Userspace.Sched qualified as Sched
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
 import System.Timeout qualified as T
@@ -195,7 +195,7 @@ pfW :: Word32
 pfW = 2
 
 runElf :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
-runElf elf argv envp = case validateRunElf elf of
+runElf elf argv envp = case validateStaticRunElf elf of
   Left err -> return (Left err)
   Right () -> case validateStackSegments (elfSegs elf) of
     Left err -> return (Left err)
@@ -538,7 +538,7 @@ execReplace pid@(Pid pidInt) pdir path = do
     Left _ -> return (Left (BadSegment "enoent"))
     Right bytes -> case loadElf bytes of
       Left le -> return (Left le)
-      Right elf -> case validateRunElf elf of
+      Right elf -> case validateStaticRunElf elf of
         Left le -> return (Left le)
         Right () -> case validateStackSegments (elfSegs elf) of
           Left le -> return (Left le)

@@ -10,7 +10,7 @@ ET_EXEC retains the 0x01000000-0xFFFFFFFF window; ET_DYN accepts standard
 low relative virtual addresses and BSS. Dynamic metadata is limited to
 SysV hash, eager AArch64 symbol relocations, relative relocations, and
 RELRO. PT_INTERP is pinned to /lib/ld-house.so.0 and recorded only.
-Runtime execution rejects dynamic objects until M2.2 maps and applies a pure link plan.
+The pure parser accepts dynamic metadata; effectful execution requires a link plan and mapping.
 -}
 module Kernel.Userspace.Loader (
   LoadError (..),
@@ -30,7 +30,7 @@ module Kernel.Userspace.Loader (
   ldHousePath,
   stackPageStart,
   loadElf,
-  validateRunElf,
+  validateStaticRunElf,
   loadErrorToString,
   applyRelativeRelocs,
   applyRelocsToFile,
@@ -220,6 +220,7 @@ data LoadError
   | OutOfWindow Word64
   | Truncated
   | BadDyn String
+  | DependencyMissing String
   | UnsupportedReloc Word32
   | TlsUnsupported
   | NeededCycle
@@ -406,6 +407,7 @@ loadErrorToString e = case e of
   OutOfWindow v -> "OutOfWindow: 0x" ++ showHex64 v
   Truncated -> "Truncated"
   BadDyn s -> "BadDyn: " ++ s
+  DependencyMissing s -> "DependencyMissing: " ++ s
   UnsupportedReloc t -> "UnsupportedReloc: " ++ show t
   TlsUnsupported -> "TlsUnsupported"
   NeededCycle -> "NeededCycle"
@@ -461,9 +463,9 @@ loadElf bytes
                         Left e -> Left e
                         Right dyn -> Right (Elf entry validSegs bytes isDyn interp dyn relro)
 
-validateRunElf :: Elf -> Either LoadError ()
-validateRunElf elf
-  | elfIsDyn elf || isJust (elfInterp elf) || dynPresent (elfDyn elf) = Left (BadDyn "dynamic execution unsupported")
+validateStaticRunElf :: Elf -> Either LoadError ()
+validateStaticRunElf elf
+  | elfIsDyn elf || isJust (elfInterp elf) || dynPresent (elfDyn elf) = Left (BadDyn "dynamic ELF rejected for static execution")
   | otherwise = Right ()
 
 checkIdent :: [Word8] -> Either LoadError ()

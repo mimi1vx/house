@@ -107,6 +107,23 @@ assertLinkLeft name result = do
     Right (Left _) -> check name True
     Right (Right _) -> check name False
 
+-- | Assert a pure operation fails with an exact Loader error.
+assertLinkError :: String -> Either Ldr.LoadError Linker.LinkPlan -> Ldr.LoadError -> IO Bool
+assertLinkError name result expected = do
+  r <- try (evaluate result) :: IO (Either SomeException (Either Ldr.LoadError Linker.LinkPlan))
+  case r of
+    Left _ -> check name False
+    Right (Left got) -> check name (got == expected)
+    Right (Right _) -> check name False
+
+assertPageAccessError :: String -> Either Ldr.LoadError [(Word64, Linker.PageAccess)] -> Ldr.LoadError -> IO Bool
+assertPageAccessError name result expected = do
+  r <- try (evaluate result) :: IO (Either SomeException (Either Ldr.LoadError [(Word64, Linker.PageAccess)]))
+  case r of
+    Left _ -> check name False
+    Right (Left got) -> check name (got == expected)
+    Right (Right _) -> check name False
+
 -- Generators ---------------------------------------------------------------
 
 instance Arbitrary NT.Mac where
@@ -633,9 +650,10 @@ main = do
       , check "elf m2 jump-slot parsed" (hasEagerType elfJumpSlot 1026)
       , check "elf m2 glob-dat parsed" (hasEagerType elfGlobDat 1025)
       , check "elf m2 dual relocation tables" (hasTableKind elfJumpSlot Ldr.DynamicRelocations && hasTableKind elfJumpSlot Ldr.PltRelocations)
-      , check "elf m2 run guard rejects dyn" (validateElf elfJumpSlot == Left (Ldr.BadDyn "dynamic execution unsupported"))
-      , check "elf run guard rejects exec interp" (validateElf elfExecInterp == Left (Ldr.BadDyn "dynamic execution unsupported"))
-      , check "elf run guard accepts exec" (validateElf elfExecMin == Right ())
+      , check "elf static validator rejects dyn" (validateElf elfJumpSlot == Left (Ldr.BadDyn "dynamic ELF rejected for static execution"))
+      , check "elf static validator rejects exec interp" (validateElf elfExecInterp == Left (Ldr.BadDyn "dynamic ELF rejected for static execution"))
+      , check "elf static validator rejects exec dynamic" (validateElf elfExecDynamic == Left (Ldr.BadDyn "dynamic ELF rejected for static execution"))
+      , check "elf static validator accepts exec" (validateElf elfExecMin == Right ())
       , assertLoadLeft "elf m2 missing bind-now" elfM2NoBind (Ldr.BadDyn "eager relocation without bind-now")
       , assertLoadLeft "elf m2 bad symbol index" elfM2BadSymIndex (Ldr.BadDyn "eager relocation symbol index")
       , assertLoadLeft "elf m2 bad symbol offset" elfM2BadSymbolOffset (Ldr.BadDyn "symbol name offset")
@@ -787,12 +805,52 @@ main = do
       , check
           "link relocation table order"
           (linkPatchTargetsAre [0x01000310, 0x01000338] (defaultLink elfLinkMain))
-      , check
-          "link does not unlock dynamic run"
-          ( case defaultLink elfLinkMain of
-              Left _ -> False
-              Right _ -> validateElf elfLinkMain == Left (Ldr.BadDyn "dynamic execution unsupported")
+      , assertLinkError
+          "link unaligned relocation target"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x339 1026 1 "strlen" 0] . setMainNeeded ["libc-house.so.0"])
+              [("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1])]
           )
+          (Ldr.BadDyn "link: main relocation target is unaligned")
+      , check
+          "link final page access"
+          ( finalPageAccess
+              == Right
+                [ (0x01000000, Linker.PageRO)
+                , (0x01001000, Linker.PageRO)
+                , (0x01002000, Linker.PageRO)
+                , (0x01003000, Linker.PageRW)
+                , (0x01010000, Linker.PageRO)
+                , (0x01011000, Linker.PageRO)
+                , (0x01012000, Linker.PageRO)
+                , (0x01013000, Linker.PageRW)
+                ]
+          )
+      , assertPageAccessError
+          "link page count mismatch rejects"
+          (plannedAccessFor 0x01000000 3 (accessSegments, accessRelro))
+          (Ldr.BadDyn "link: main page count mismatch")
+      , assertPageAccessError
+          "link page count excess rejects"
+          (plannedAccessFor 0x01000000 5 (accessSegments, accessRelro))
+          (Ldr.BadDyn "link: main page count mismatch")
+      , assertPageAccessError
+          "link page overlap rejects"
+          (plannedAccessFor 0x01000000 3 (overlapSegments, overlapRelro))
+          (Ldr.BadDyn "link: main mapped pages overlap")
+      , assertPageAccessError
+          "link non-base page start rejects"
+          (plannedAccessFor 0x01000001 2 (boundarySegments, boundaryRelro))
+          (Ldr.BadDyn "link: main does not start at object base")
+      , check
+          "link RELRO boundary rounding"
+          ( plannedAccessFor 0x01000000 2 (boundarySegments, boundaryRelro)
+              == Right [(0x01000000, Linker.PageRO), (0x01001000, Linker.PageRW)]
+          )
+      , check
+          "missing dependency renders soname"
+          (Ldr.loadErrorToString (Ldr.DependencyMissing "libmissing.so.0") == "DependencyMissing: libmissing.so.0")
       , assertLinkLeft
           "link missing dependency"
           (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
@@ -833,15 +891,13 @@ main = do
               (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
               [("liba.so.0", elfLinkDep, clearDependencyRelro (validDependency "liba.so.0" [] []))]
           )
-      , assertLinkLeft
-          "link dependency object cap"
-          ( linkWith
-              elfLinkMain
-              (Right . setMainRelocations [])
-              [ ("lib" ++ show index ++ ".so.0", elfLinkDep, validDependency ("lib" ++ show index ++ ".so.0") [] [])
-              | index <- ([0 .. 9] :: [Int])
-              ]
-          )
+      , check
+          "link dependency cap accepts eight"
+          (linkNamesAre ("main" : dependencyNames 8) (dependencyCapPlan 8))
+      , assertLinkError
+          "link dependency cap rejects nine"
+          (dependencyCapPlan 9)
+          (Ldr.BadDyn "link: dependency object cap exceeded")
       , assertLinkLeft
           "link total page cap"
           ( linkWith
@@ -1186,6 +1242,9 @@ elfDynGood = mkDynElf 3 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 64
 elfExecInterp :: [Word8]
 elfExecInterp = mkDynElf 2 0x01000000 (mkDynBlob interpGoodBs [] (0, 0, 0)) [(0x10, 19)] [] [] []
 
+elfExecDynamic :: [Word8]
+elfExecDynamic = mkDynElf 2 0x01000000 goodBlob [] [(0x100, 0x01000100, 64)] [] []
+
 elfExecTls :: [Word8]
 elfExecTls = mkDynElf 2 0x01000000 (mkDynBlob interpGoodBs [] (0, 0, 0)) [] [] [] [mkPhdr 7 4 0 0x01000000 0 16 1]
 
@@ -1415,6 +1474,63 @@ defaultLink mainBytes =
     Right
     [("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1])]
 
+dependencyNames :: Int -> [String]
+dependencyNames count = ["lib" ++ show index ++ ".so.0" | index <- ([0 .. count - 1] :: [Int])]
+
+dependencyCapPlan :: Int -> Either Ldr.LoadError Linker.LinkPlan
+dependencyCapPlan count =
+  let names = dependencyNames count
+   in linkWith
+        elfLinkMain
+        (Right . setMainRelocations [] . setMainNeeded names)
+        [(name, elfLinkDep, validDependency name [] []) | name <- names]
+
+plannedAccessFor :: Word64 -> Word64 -> ([Ldr.Segment], Ldr.RelroRange) -> Either Ldr.LoadError [(Word64, Linker.PageAccess)]
+plannedAccessFor base pages (segments, relro) = do
+  elf <- Ldr.loadElf elfLinkMain
+  Linker.plannedPageAccess
+    (Linker.PlacedObject "main" base 0x01000080 pages)
+    elf {Ldr.elfSegs = segments, Ldr.elfRelro = Just relro}
+
+accessSegments :: [Ldr.Segment]
+accessSegments =
+  [ Ldr.Segment 0 0 0x400 0x1000 5
+  , Ldr.Segment 0x1000 0x400 0x400 0x2000 6
+  , Ldr.Segment 0x3000 0x800 0x400 0x1000 6
+  ]
+
+accessRelro :: Ldr.RelroRange
+accessRelro = Ldr.RelroRange 0x1001 0x2FFF
+
+overlapSegments :: [Ldr.Segment]
+overlapSegments =
+  [ Ldr.Segment 0 0 0x400 0x1000 5
+  , Ldr.Segment 0x800 0x400 0x400 0x1000 6
+  ]
+
+overlapRelro :: Ldr.RelroRange
+overlapRelro = Ldr.RelroRange 0x100 0x200
+
+boundarySegments :: [Ldr.Segment]
+boundarySegments = [Ldr.Segment 1 0 0x400 0x1000 6]
+
+boundaryRelro :: Ldr.RelroRange
+boundaryRelro = Ldr.RelroRange 0x801 0x1000
+
+finalPageAccess :: Either Ldr.LoadError [(Word64, Linker.PageAccess)]
+finalPageAccess = do
+  mainElf <- Ldr.loadElf elfLinkMain
+  let mainEdited = setAccessLayout (setMainRelocations [eagerBinding 0x1138 1026 1 "strlen" 0] (setMainNeeded ["libc-house.so.0"] mainElf))
+  depElf <- Ldr.loadElf elfLinkDep >>= validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1]
+  let depEdited = setAccessLayout depElf
+  plan <- Linker.linkDynamic mainEdited (Map.singleton "libc-house.so.0" depEdited)
+  let objects = Map.fromList [("main", mainEdited), ("libc-house.so.0", depEdited)]
+  concat <$> mapM (accessFor objects) (Linker.linkObjects plan)
+  where
+    accessFor objects placed = case Map.lookup (Linker.placedObjectName placed) objects of
+      Nothing -> Left (Ldr.BadDyn "access fixture object missing")
+      Just elf -> Linker.plannedPageAccess placed elf
+
 validDependency :: String -> [String] -> [Ldr.DynamicSymbol] -> ElfEdit
 validDependency name needed exports elf = do
   withSymbols <- setSymbols exports elf
@@ -1473,6 +1589,13 @@ setMainHash style = updateDyn (\dynInfo -> dynInfo {Ldr.dynHashStyle = style})
 
 clearMainRelro :: Ldr.Elf -> Ldr.Elf
 clearMainRelro elf = elf {Ldr.elfRelro = Nothing}
+
+setAccessLayout :: Ldr.Elf -> Ldr.Elf
+setAccessLayout elf =
+  elf {
+    Ldr.elfSegs = accessSegments
+    , Ldr.elfRelro = Just accessRelro
+    }
 
 setMainForStack :: ElfEdit
 setMainForStack elf =
@@ -1571,7 +1694,7 @@ isDynRight bytes wantDyn = case Ldr.loadElf bytes of
 validateElf :: [Word8] -> Either Ldr.LoadError ()
 validateElf bytes = case Ldr.loadElf bytes of
   Left err -> Left err
-  Right elf -> Ldr.validateRunElf elf
+  Right elf -> Ldr.validateStaticRunElf elf
 
 dynInterpIs :: [Word8] -> Maybe String -> Bool
 dynInterpIs bytes want = case Ldr.loadElf bytes of

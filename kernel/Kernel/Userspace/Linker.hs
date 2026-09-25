@@ -12,18 +12,22 @@ values. It performs no I/O and mutates no input object or byte buffer.
 module Kernel.Userspace.Linker (
   LinkPlan (..),
   LinkRelocation (..),
+  PageAccess (..),
   PlacedObject (..),
   RelocationPatch (..),
+  maxDependencies,
   linkDynamic,
+  plannedPageAccess,
 )
 where
 
 import Control.Monad (foldM, unless, when)
 import Data.Bits (shiftR, (.&.))
 import Data.Int (Int64)
+import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isNothing)
+import Data.Maybe (catMaybes, isNothing)
 import Data.Set qualified as Set
 import Data.Word (Word16, Word32, Word64, Word8)
 import Kernel.Userspace.Loader qualified as Ldr
@@ -72,6 +76,12 @@ data LinkRelocation
   = LinkRelative
   | LinkGlobDat
   | LinkJumpSlot
+  deriving (Eq, Show)
+
+-- | Final software access for one mapped dynamic page.
+data PageAccess
+  = PageRO
+  | PageRW
   deriving (Eq, Show)
 
 -- | Logical placement data for one dynamic object.
@@ -212,6 +222,80 @@ placeObjects ((name, elf) : rest) cursor totalPages = do
           }
   pure (PlannedObject placed elf : tailPlaced)
 
+-- | Plan final software access for every relocated page in one object.
+plannedPageAccess :: PlacedObject -> Ldr.Elf -> Either Ldr.LoadError [(Word64, PageAccess)]
+plannedPageAccess placed elf = do
+  let name = placedObjectName placed
+  when (null (Ldr.elfSegs elf)) (badLink (name ++ " has no PT_LOAD"))
+  when (placedObjectPages placed > maxObjectPages) (badLink (name ++ " exceeds object page cap"))
+  ranges <- mapM (segmentPageRange name (placedObjectBase placed)) (Ldr.elfSegs elf)
+  let mappedRanges = catMaybes ranges
+  when (null mappedRanges) (badLink (name ++ " has no mapped pages"))
+  totalPages <- foldM addPageCount 0 mappedRanges
+  unless (totalPages == placedObjectPages placed) (badLink (name ++ " page count mismatch"))
+  relro <- case Ldr.elfRelro elf of
+    Nothing -> badLink (name ++ " has no RELRO")
+    Just range -> pure range
+  unless (Ldr.relroEnd relro > Ldr.relroStart relro) (badLink (name ++ " has empty RELRO"))
+  unless (any (containsRelro relro) (Ldr.elfSegs elf)) (badLink (name ++ " RELRO outside LOAD"))
+  relroStart <- checkedAdd (name ++ " RELRO start") (placedObjectBase placed) (Ldr.relroStart relro)
+  relroEnd <- checkedAdd (name ++ " RELRO end") (placedObjectBase placed) (Ldr.relroEnd relro)
+  when (relroEnd > maxUserEnd) (badLink (name ++ " RELRO exceeds 4GiB user window"))
+  let relroFirstPage = floorPage relroStart
+  relroEndPage <- alignUpPageChecked (name ++ " RELRO end") relroEnd
+  pageEntries <- fmap concat (mapM (pageEntriesFor relroFirstPage relroEndPage) mappedRanges)
+  let sortedEntries = sortOn fst pageEntries
+  validateUniquePages name sortedEntries
+  case sortedEntries of
+    [] -> badLink (name ++ " has no mapped pages")
+    ((firstPage, _) : _) -> unless (firstPage == placedObjectBase placed) (badLink (name ++ " does not start at object base"))
+  pure sortedEntries
+  where
+    addPageCount total (start, end, _) =
+      checkedAdd "planned page count" total ((end - start) `div` pageSize)
+
+-- | Return the page-rounded range of one nonzero PT_LOAD.
+segmentPageRange :: String -> Word64 -> Ldr.Segment -> Either Ldr.LoadError (Maybe (Word64, Word64, Bool))
+segmentPageRange name base segment = do
+  when (Ldr.segFileSz segment < 0 || Ldr.segMemSz segment < 0) (badLink (name ++ " has negative segment size"))
+  when (Ldr.segFileSz segment > Ldr.segMemSz segment) (badLink (name ++ " has filesz above memsz"))
+  start <- checkedAdd (name ++ " segment start") base (Ldr.segVaddr segment)
+  end <- checkedAdd (name ++ " segment end") start (fromIntegral (Ldr.segMemSz segment))
+  when (end > maxUserEnd) (badLink (name ++ " segment exceeds 4GiB user window"))
+  if Ldr.segMemSz segment == 0
+    then pure Nothing
+    else do
+      let firstPage = floorPage start
+          lastPage = floorPage (end - 1)
+      endPage <- checkedAdd (name ++ " segment page end") lastPage pageSize
+      pure (Just (firstPage, endPage, (Ldr.segFlags segment .&. pfWrite) /= 0))
+
+pageEntriesFor :: Word64 -> Word64 -> (Word64, Word64, Bool) -> Either Ldr.LoadError [(Word64, PageAccess)]
+pageEntriesFor relroStart relroEnd (start, end, writable) =
+  pure
+    [ ( address
+      , if address >= relroStart && address < relroEnd
+          then PageRO
+          else if writable then PageRW else PageRO
+      )
+    | address <- [start, start + pageSize .. end - pageSize]
+    ]
+
+validateUniquePages :: String -> [(Word64, PageAccess)] -> Either Ldr.LoadError ()
+validateUniquePages name = go
+  where
+    go [] = pure ()
+    go [_] = pure ()
+    go ((first, _) : (second, secondAccess) : rest)
+      | first >= second = badLink (name ++ " mapped pages overlap")
+      | otherwise = go ((second, secondAccess) : rest)
+
+floorPage :: Word64 -> Word64
+floorPage value = value - value `mod` pageSize
+
+alignUpPageChecked :: String -> Word64 -> Either Ldr.LoadError Word64
+alignUpPageChecked label value = alignUpChecked label value pageSize
+
 objectPageCount :: String -> Ldr.Elf -> Either Ldr.LoadError Word64
 objectPageCount name elf = do
   when (null (Ldr.elfSegs elf)) (badLink (name ++ " has no PT_LOAD"))
@@ -287,6 +371,7 @@ relocationTarget planned relocation = do
   offset <- case relocation of
     Ldr.RelativeBinding relative -> pure (Ldr.relativeOffset relative)
     Ldr.EagerSymbolBinding eager -> pure (Ldr.eagerOffset eager)
+  unless (offset .&. 7 == 0) (badLink (plannedName planned ++ " relocation target is unaligned"))
   target <- checkedAdd (plannedName planned ++ " relocation target") (plannedBase planned) offset
   unless (relocationTargetInObject planned target relocation) (badLink (plannedName planned ++ " relocation target outside LOAD"))
   pure target
