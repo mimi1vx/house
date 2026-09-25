@@ -113,6 +113,27 @@ ld.lld -pie --gc-sections --fatal-warnings \
 	--no-undefined --build-id=none \
 	-L"$OUT" -o "$OUT/hello-dyn" "$OUT/hello.o" "-l:$SONAME"
 
+ld.lld -shared --gc-sections --fatal-warnings \
+	--soname=libc-missing.so.0 --hash-style=sysv \
+	-z now -z relro -z noseparate-code \
+	--no-undefined --build-id=none \
+	--version-script="$OUT/exports.map" \
+	-o "$OUT/libc-missing.so.0" "$OBJ"
+
+ld.lld -pie --gc-sections --fatal-warnings \
+	--dynamic-linker=/lib/ld-house.so.0 --hash-style=sysv \
+	-z now -z relro -z noseparate-code \
+	--no-undefined --build-id=none \
+	-L"$OUT" -o "$OUT/hello-dyn-missing" "$OUT/hello.o" \
+	"-l:libc-missing.so.0"
+
+gcc -c build-probe/exec-dyn.s -o "$OUT/exec-dyn.o"
+ld.lld --gc-sections --fatal-warnings --build-id=none \
+	-T build-probe/exec.ld -o "$OUT/exec-dyn" "$OUT/exec-dyn.o"
+
 printf '%s  %s\n' "$(sha256sum "$OUT/$SONAME" | cut -d' ' -f1)" "$SONAME"
 printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn" | cut -d' ' -f1)" "hello-dyn"
+printf '%s  %s\n' "$(sha256sum "$OUT/libc-missing.so.0" | cut -d' ' -f1)" "libc-missing.so.0"
+printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn-missing" | cut -d' ' -f1)" "hello-dyn-missing"
+printf '%s  %s\n' "$(sha256sum "$OUT/exec-dyn" | cut -d' ' -f1)" "exec-dyn"
 echo "mk-dynamic-probe: $OUT"

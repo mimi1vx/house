@@ -31,6 +31,7 @@ module Kernel.FileSystem.Vfs (
   vfsMount,
   vfsLookup,
   vfsEnsurePid,
+  vfsBindPid,
   vfsForkPid,
   vfsReleasePid,
   vfsLookupPid,
@@ -238,6 +239,19 @@ vfsEnsurePid pid = withQSem registrySem $ do
     Nothing -> do
       writeRef pidNs (Map.insert pid defaultNamespace m)
       return defaultNamespace
+
+-- | Bind a newly allocated pid to an existing namespace.
+vfsBindPid :: Int -> NamespaceId -> H Bool
+vfsBindPid pid ns = withQSem registrySem $ do
+  namespaces <- readRef nsTable
+  bindings <- readRef pidNs
+  if Map.notMember ns namespaces
+    then return False
+    else case Map.lookup pid bindings of
+      Just existing | existing /= ns -> return False
+      _ -> do
+        writeRef pidNs (Map.insert pid ns bindings)
+        return True
 
 -- | Fork a pid's namespace for a child pid (copies descriptors only).
 vfsForkPid :: Int -> Int -> H ()

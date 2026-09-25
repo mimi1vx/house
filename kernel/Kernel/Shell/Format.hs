@@ -61,5 +61,6 @@ toExecError :: ULdr.LoadError -> String
 toExecError le = case le of
   ULdr.BadMagic -> "EBADEXEC: not ELF64 LE"
   ULdr.BadArch -> "EBADEXEC: need AArch64"
-  ULdr.BadType -> "EBADEXEC: need ET_EXEC"
+  ULdr.BadType -> "EBADEXEC: need ET_EXEC or ET_DYN"
+  ULdr.DependencyMissing name -> "ENOENT: missing dependency " ++ name
   _ -> ULdr.loadErrorToString le

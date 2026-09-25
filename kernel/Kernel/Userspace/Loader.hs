@@ -591,8 +591,8 @@ validateSegments segs bytes entry isDyn =
         mapM_ (checkSeg len) loads
         checkPageOverlap loads
         checkStackCollision loads
-        let pages = sum (map (\s -> (segMemSz s + 4095) `div` 4096) loads)
-        if pages > maxTotalPages then Left NoSpace else Right ()
+        let pages = sum [lastPage - firstPage + 1 | (firstPage, lastPage) <- map pageBounds loads]
+        if pages > fromIntegral maxTotalPages then Left NoSpace else Right ()
         case filter (entryInSeg entry) loads of
           [] -> Left (BadSegment "entry not in LOAD")
           _ -> Right loads

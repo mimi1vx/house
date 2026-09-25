@@ -212,11 +212,14 @@ house-virtio-con-check: house-build initrd
 # EL0 userspace + initramfs (pid1 slice): assemble userspace/*.s +
 # build-probe/*.s in the container, pack the cpio on the host.
 # File-tracked: repeat runs skip the rebuild and boot straight in.
-DYNAMIC_PROBE_SRCS := build-probe/hello-dyn.s
+DYNAMIC_PROBE_SRCS := build-probe/hello-dyn.s build-probe/exec-dyn.s
 USERSPACE_SRCS := $(filter-out $(DYNAMIC_PROBE_SRCS),$(wildcard userspace/*.s userspace/*.ld build-probe/*.s build-probe/*.ld))
 STAGING_STATIC := initramfs-staging/etc/house-servers initramfs-staging/probe.txt
+DYNAMIC_INITRD_SRCS := build-probe/hello-dyn.s build-probe/exec-dyn.s build-probe/exec.ld \
+	scripts/mk-dynamic-probe.sh scripts/dynamic-userspace.sha256 \
+	rust/crates/house-el0-tiny/src/lib.rs rust/Cargo.toml rust/Cargo.lock
 initrd: build/initramfs.cpio
-build/initramfs.cpio: $(USERSPACE_SRCS) build-probe/repack.py scripts/mk-userspace.sh scripts/mkinitramfs.sh scripts/static-userspace.sha256 $(STAGING_STATIC) | volumes
+build/initramfs.cpio: $(USERSPACE_SRCS) $(DYNAMIC_INITRD_SRCS) build-probe/repack.py scripts/mk-userspace.sh scripts/mkinitramfs.sh scripts/static-userspace.sha256 $(STAGING_STATIC) | volumes
 	$(RUN_IN_CONTAINER) sh scripts/mk-userspace.sh
 	sh scripts/mkinitramfs.sh
 	file build/initramfs.cpio
@@ -271,6 +274,10 @@ house-ipc-el0-check: house-build initrd
 house-userspace-check: house-build initrd
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
+
+house-dynamic-userspace-check: house-build initrd
+	expect scripts/qemu-dynamic-userspace.exp $(SPIKE_DIR)/build/house.bin 120 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-dynamic-userspace.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N)
 
 # SMP hotplug cycle (Tracks S+H): down/up at N=2, caps mirror, parfib each step.
 # Accel split (step 6 spike): hvf refuses PSCI re-CPU_ON after CPU_OFF (call
@@ -349,11 +356,12 @@ check:
 	$(MAKE) house-check
 	$(MAKE) house-shell-check
 	$(MAKE) house-posix-check
+	$(MAKE) house-dynamic-userspace-check
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, rust, dynamic ELF/link plan) =="
+	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, dynamic userspace, rust, dynamic ELF/link plan) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-dynamic-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check

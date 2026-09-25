@@ -1,0 +1,76 @@
+#!/usr/bin/expect -f
+# Dynamic EL0 runtime probe: initial load, missing dependency, dynamic exec,
+# failed-exec preservation, and static non-regression.
+# Usage: expect scripts/qemu-dynamic-userspace.exp <kernel.bin> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout_arg [lindex $argv 1]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 180 } else { set timeout 120 }
+} else {
+    set timeout $timeout_arg
+}
+
+proc fail_stage {stage} {
+    puts "\nFAIL: $stage"
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+
+proc expect_stage {pattern stage} {
+    expect {
+        -re $pattern {}
+        timeout {fail_stage "$stage timeout"}
+        eof {fail_stage "$stage eof"}
+    }
+}
+
+proc expect_prompt {stage} {
+    expect_stage "> ?" "$stage prompt"
+}
+
+proc run_and_expect {command output stage} {
+    send "$command\r"
+    expect_stage $output $stage
+}
+
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
+expect_stage "Welcome to the House shell" "welcome"
+expect_prompt "initial"
+
+run_and_expect "run /bin/hello-dyn" "Hello from dynamic EL0" "dynamic initial"
+expect_stage "ok exit 0" "dynamic initial exit"
+expect_prompt "dynamic initial after exit"
+
+send "jobs\r"
+expect_stage "jobs:" "dynamic jobs"
+expect_prompt "dynamic jobs prompt"
+
+run_and_expect "run /bin/hello-dyn-missing" "ENOENT: missing dependency libc-missing.so.0" "missing dependency"
+expect_prompt "missing dependency prompt"
+send "jobs\r"
+expect_stage "jobs:" "missing jobs"
+expect_prompt "missing jobs prompt"
+
+run_and_expect "run /bin/exec-dyn ok" "Hello from dynamic EL0" "dynamic exec"
+expect_stage "ok exit 0" "dynamic exec exit"
+expect_prompt "dynamic exec prompt"
+
+run_and_expect "run /bin/exec-dyn missing" "exec missing preserved" "failed exec preservation"
+expect_stage "ok exit 0" "failed exec exit"
+expect_prompt "failed exec prompt"
+
+run_and_expect "run /bin/hello" "Hello from EL0" "static regression"
+expect_stage "ok exit 0" "static regression exit"
+expect_prompt "static regression prompt"
+
+puts "\nPASS: dynamic userspace runtime ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

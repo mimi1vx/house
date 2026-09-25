@@ -107,8 +107,14 @@ for prog in argenv brk exec fork ipc_pp spin yield; do
 	build_one "build-probe/$prog.s" "build-probe/$prog.ld" "initramfs-staging/bin/$prog"
 done
 
+# Remove only prior dynamic outputs before the frozen static manifest check.
+rm -f initramfs-staging/bin/hello-dyn initramfs-staging/bin/hello-dyn-missing \
+	initramfs-staging/bin/exec-dyn initramfs-staging/lib/libc-house.so.0
+mkdir -p initramfs-staging/lib
+
 static_manifest=$(mktemp)
-trap 'rm -f "$static_manifest"' EXIT
+dynamic_manifest=$(mktemp)
+trap 'rm -f "$static_manifest" "$dynamic_manifest"' EXIT
 find initramfs-staging/bin initramfs-staging/sbin -type f -print | LC_ALL=C sort |
 	while IFS= read -r path; do sha256sum "$path"; done >"$static_manifest"
 if ! cmp -s scripts/static-userspace.sha256 "$static_manifest"; then
@@ -116,7 +122,33 @@ if ! cmp -s scripts/static-userspace.sha256 "$static_manifest"; then
 	diff -u scripts/static-userspace.sha256 "$static_manifest" >&2 || true
 	exit 1
 fi
-rm -f "$static_manifest"
-trap - EXIT
 
-ls initramfs-staging/bin initramfs-staging/sbin
+sh scripts/mk-dynamic-probe.sh staging
+"$PYTHON3" build-probe/repack.py \
+	build/dynamic-probe/staging/hello-dyn \
+	initramfs-staging/bin/hello-dyn
+"$PYTHON3" build-probe/repack.py \
+	build/dynamic-probe/staging/hello-dyn-missing \
+	initramfs-staging/bin/hello-dyn-missing
+"$PYTHON3" build-probe/repack.py \
+	build/dynamic-probe/staging/exec-dyn \
+	initramfs-staging/bin/exec-dyn
+"$PYTHON3" build-probe/repack.py \
+	build/dynamic-probe/staging/libc-house.so.0 \
+	initramfs-staging/lib/libc-house.so.0
+chmod 755 initramfs-staging/bin/hello-dyn initramfs-staging/bin/hello-dyn-missing \
+	initramfs-staging/bin/exec-dyn
+chmod 644 initramfs-staging/lib/libc-house.so.0
+touch -d '@0' initramfs-staging/bin/hello-dyn initramfs-staging/bin/hello-dyn-missing \
+	initramfs-staging/bin/exec-dyn initramfs-staging/lib/libc-house.so.0
+find initramfs-staging/bin initramfs-staging/lib -type f \( \
+	-name hello-dyn -o -name hello-dyn-missing -o -name exec-dyn -o -name libc-house.so.0 \
+	\) -print | LC_ALL=C sort |
+	while IFS= read -r path; do sha256sum "$path"; done >"$dynamic_manifest"
+if ! cmp -s scripts/dynamic-userspace.sha256 "$dynamic_manifest"; then
+	echo "dynamic userspace manifest drift" >&2
+	diff -u scripts/dynamic-userspace.sha256 "$dynamic_manifest" >&2 || true
+	exit 1
+fi
+
+ls initramfs-staging/bin initramfs-staging/sbin initramfs-staging/lib

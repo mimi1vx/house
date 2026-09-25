@@ -193,8 +193,9 @@ dependencyOrder deps roots = do
     go active done orderedRev (name : rest)
       | name `Set.member` done = go active done orderedRev rest
       | name `Set.member` active = Left Ldr.NeededCycle
+      | name == mainObjectName = badLink "dependency name main reserved"
       | otherwise = case Map.lookup name deps of
-          Nothing -> badLink ("missing dependency " ++ name)
+          Nothing -> Left (Ldr.DependencyMissing name)
           Just elf -> do
             validateDependency name elf
             (childOrderedRev, childDone) <- go (Set.insert name active) done ((name, elf) : orderedRev) (Ldr.dynNeeded (Ldr.elfDyn elf))
@@ -299,21 +300,15 @@ alignUpPageChecked label value = alignUpChecked label value pageSize
 objectPageCount :: String -> Ldr.Elf -> Either Ldr.LoadError Word64
 objectPageCount name elf = do
   when (null (Ldr.elfSegs elf)) (badLink (name ++ " has no PT_LOAD"))
-  mapM_ validateSegment (Ldr.elfSegs elf)
   foldM addPage 0 (Ldr.elfSegs elf)
   where
-    validateSegment segment = do
-      when (Ldr.segFileSz segment < 0 || Ldr.segMemSz segment < 0) (badLink (name ++ " has negative segment size"))
-      when (Ldr.segFileSz segment > Ldr.segMemSz segment) (badLink (name ++ " has filesz above memsz"))
-      end <- checkedAdd (name ++ " segment end") (Ldr.segVaddr segment) (fromIntegral (Ldr.segMemSz segment))
-      when (end > maxUserEnd) (badLink (name ++ " segment exceeds 4GiB user window"))
-    addPage total segment =
-      checkedAdd (name ++ " page count") total (segmentPages segment)
-
-segmentPages :: Ldr.Segment -> Word64
-segmentPages segment
-  | Ldr.segMemSz segment == 0 = 0
-  | otherwise = (fromIntegral (Ldr.segMemSz segment) - 1) `div` pageSize + 1
+    addPage total segment = do
+      range <- segmentPageRange name 0 segment
+      case range of
+        Nothing -> pure total
+        Just (start, end, _) -> do
+          let count = (end - start) `div` pageSize
+          checkedAdd (name ++ " page count") total count
 
 objectEndOffset :: String -> Ldr.Elf -> Either Ldr.LoadError Word64
 objectEndOffset name elf = foldM step 0 (Ldr.elfSegs elf)

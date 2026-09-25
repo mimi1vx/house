@@ -827,6 +827,15 @@ main = do
                 , (0x01013000, Linker.PageRW)
                 ]
           )
+      , check
+          "link unaligned load page count"
+          ( case linkWith
+              elfLinkMain
+              (Right . setUnalignedLayout . setMainRelocations [] . setMainNeeded [])
+              [] of
+              Right plan -> map Linker.placedObjectPages (Linker.linkObjects plan) == [3]
+              Left _ -> False
+          )
       , assertPageAccessError
           "link page count mismatch rejects"
           (plannedAccessFor 0x01000000 3 (accessSegments, accessRelro))
@@ -851,16 +860,26 @@ main = do
       , check
           "missing dependency renders soname"
           (Ldr.loadErrorToString (Ldr.DependencyMissing "libmissing.so.0") == "DependencyMissing: libmissing.so.0")
-      , assertLinkLeft
+      , assertLinkError
           "link missing dependency"
           (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
-      , assertLinkLeft
+          (Ldr.DependencyMissing "missing.so.0")
+      , assertLinkError
           "link incomplete transitive dependency"
           ( linkWith
               elfLinkMain
               (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
               [("liba.so.0", elfLinkDep, validDependency "liba.so.0" ["libmissing.so.0"] [])]
           )
+          (Ldr.DependencyMissing "libmissing.so.0")
+      , assertLinkError
+          "link reserved main dependency"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["main"])
+              [("main", elfLinkDep, validDependency "main" [] [])]
+          )
+          (Ldr.BadDyn "link: dependency name main reserved")
       , assertLinkLeft
           "link dependency cycle"
           ( linkWith
@@ -1501,6 +1520,23 @@ accessSegments =
 
 accessRelro :: Ldr.RelroRange
 accessRelro = Ldr.RelroRange 0x1001 0x2FFF
+
+unalignedSegments :: [Ldr.Segment]
+unalignedSegments =
+  [ Ldr.Segment 1 0 0x400 0x1000 5
+  , Ldr.Segment 0x2000 0x400 0x400 0x1000 6
+  ]
+
+unalignedRelro :: Ldr.RelroRange
+unalignedRelro = Ldr.RelroRange 0x801 0x1001
+
+setUnalignedLayout :: Ldr.Elf -> Ldr.Elf
+setUnalignedLayout elf =
+  elf {
+    Ldr.elfSegs = unalignedSegments
+    , Ldr.elfRelro = Just unalignedRelro
+    , Ldr.elfEntry = 0x101
+    }
 
 overlapSegments :: [Ldr.Segment]
 overlapSegments =

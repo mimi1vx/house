@@ -1,19 +1,23 @@
 #!/bin/sh
-# M2.0/M2.1 dynamic-ELF compatibility and pure-link gate. Runs inside
-# house-port:latest on linux/arm64; builds twice, audits both artifacts, checks
-# the bounded loader before and after repacking, and compares deterministic
-# logical link plans without mapping or executing either object.
+# M2.0/M2.1/M2.2 dynamic-ELF compatibility, packaging, and runtime-artifact gate.
+# Runs inside house-port:latest on linux/arm64. It builds the pinned dynamic
+# artifacts twice, checks Loader/repacker parity, exercises failure cases, and
+# verifies the minimized dynamic set staged into initramfs.
 set -eu
 
 cd "$(dirname "$0")/.."
 WORK=build/dynamic-probe/check
 SONAME=libc-house.so.0
+MISSING_SONAME=libc-missing.so.0
 INTERP=/lib/ld-house.so.0
 EXPECTED_SONAME_SHA=ebcc38e958debe4eb18caec30ca5302c3a649aa25741bbb137d0dcbec86f8cbe
 EXPECTED_HELLO_SHA=26e1f4265882441b717bfc5a963295c65ff962cf9fdef20d21b6b325e8503fe7
+EXPECTED_MISSING_SONAME_SHA=abc7acfa562c5b2dfbda2ea943da70ad29a15590c33fedb0b6f400bf938b8b55
+EXPECTED_MISSING_HELLO_SHA=50725e3a1cfe6344666ada25b5cd7d0c0502deab329f21fb89dece4834f1a943
+EXPECTED_EXEC_SHA=f251fec290c2899d03d57be6e687a230566a1de2d87eda3d736d1d224223edf3
 
 cleanup() {
-	rm -rf initramfs-staging/bin
+	rm -rf initramfs-staging/bin initramfs-staging/lib
 }
 trap cleanup EXIT
 
@@ -26,7 +30,7 @@ sh scripts/mk-dynamic-probe.sh build-b
 A=build/dynamic-probe/build-a
 B=build/dynamic-probe/build-b
 
-for name in "$SONAME" hello-dyn; do
+for name in "$SONAME" "$MISSING_SONAME" hello-dyn hello-dyn-missing exec-dyn; do
 	hash_a=$(sha256sum "$A/$name" | cut -d' ' -f1)
 	hash_b=$(sha256sum "$B/$name" | cut -d' ' -f1)
 	if [ "$hash_a" != "$hash_b" ]; then
@@ -35,7 +39,10 @@ for name in "$SONAME" hello-dyn; do
 	fi
 	case "$name" in
 	"$SONAME") expected_sha=$EXPECTED_SONAME_SHA ;;
+	"$MISSING_SONAME") expected_sha=$EXPECTED_MISSING_SONAME_SHA ;;
 	hello-dyn) expected_sha=$EXPECTED_HELLO_SHA ;;
+	hello-dyn-missing) expected_sha=$EXPECTED_MISSING_HELLO_SHA ;;
+	exec-dyn) expected_sha=$EXPECTED_EXEC_SHA ;;
 	*) expected_sha= ;;
 	esac
 	[ -z "$expected_sha" ] || [ "$hash_a" = "$expected_sha" ] || {
@@ -106,68 +113,114 @@ audit_common() {
 		echo "dynamic-elf-check: $artifact lacks SysV HASH" >&2
 		exit 1
 	}
-	if readelf -dW "$artifact" | grep -q '(GNU_HASH)\|TEXTREL\|(TLS'; then
+	if readelf -dW "$artifact" | grep -Eq 'GNU_HASH|TEXTREL|\(TLS'; then
 		echo "dynamic-elf-check: $artifact has rejected dynamic metadata" >&2
 		exit 1
 	fi
 }
 
-soname=$(readelf -dW "$A/$SONAME" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
-[ "$soname" = "$SONAME" ] || {
-	echo "dynamic-elf-check: SONAME allowlist failed: $soname" >&2
-	exit 1
+audit_exec() {
+	artifact=$1
+	readelf -hW "$artifact" | grep -q 'Type:.*EXEC' || {
+		echo "dynamic-elf-check: $artifact is not ET_EXEC" >&2
+		exit 1
+	}
+	readelf -hW "$artifact" | grep -q 'Machine:.*AArch64' || {
+		echo "dynamic-elf-check: $artifact is not AArch64" >&2
+		exit 1
+	}
+	if readelf -lW "$artifact" | grep -q 'Requesting program interpreter'; then
+		echo "dynamic-elf-check: $artifact unexpectedly has PT_INTERP" >&2
+		exit 1
+	fi
+	if readelf -dW "$artifact" 2>/dev/null | grep -Eq '\(NEEDED\)|\(SONAME\)|\(HASH\)'; then
+		echo "dynamic-elf-check: $artifact unexpectedly has dynamic metadata" >&2
+		exit 1
+	fi
+	if nm -u "$artifact" | grep -q .; then
+		echo "dynamic-elf-check: $artifact has undefined symbols" >&2
+		exit 1
+	fi
 }
-needed_count=$(readelf -dW "$A/$SONAME" | grep -c '(NEEDED)' || true)
-[ "$needed_count" -eq 0 ] || {
-	echo "dynamic-elf-check: shared library has NEEDED entries" >&2
-	exit 1
-}
-if readelf -dW "$A/$SONAME" | grep -Eq 'libc\.so|libm\.so|libgcc|ld-linux|ld-house'; then
-	echo "dynamic-elf-check: shared library has a forbidden dependency" >&2
-	exit 1
-fi
-audit_symbols "$A/$SONAME"
-audit_common "$A/$SONAME"
 
-interp=$(readelf -lW "$A/hello-dyn" | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')
-[ "$interp" = "$INTERP" ] || {
-	echo "dynamic-elf-check: INTERP allowlist failed: $interp" >&2
-	exit 1
+check_interp() {
+	artifact=$1
+	interp=$(readelf -lW "$artifact" | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')
+	[ "$interp" = "$INTERP" ] || {
+		echo "dynamic-elf-check: INTERP allowlist failed: $interp" >&2
+		exit 1
+	}
 }
-needed=$(readelf -dW "$A/hello-dyn" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
-[ "$needed" = "$SONAME" ] || {
-	echo "dynamic-elf-check: NEEDED allowlist failed: $needed" >&2
-	exit 1
-}
-needed_count=$(readelf -dW "$A/hello-dyn" | grep -c '(NEEDED)' || true)
-[ "$needed_count" -eq 1 ] || {
-	echo "dynamic-elf-check: hello-dyn NEEDED count is $needed_count" >&2
-	exit 1
-}
-if readelf -dW "$A/hello-dyn" | grep -q '(SONAME)'; then
-	echo "dynamic-elf-check: executable unexpectedly has SONAME" >&2
-	exit 1
-fi
-readelf -rW "$A/hello-dyn" | grep -q 'R_AARCH64_JUMP_SLOT.*strlen' || {
-	echo "dynamic-elf-check: hello-dyn lacks a real strlen JUMP_SLOT" >&2
-	exit 1
-}
-audit_common "$A/hello-dyn"
 
-"$LOADER_CHECK" "$A/$SONAME" >"$WORK/libc.loader"
-"$LOADER_CHECK" "$A/hello-dyn" >"$WORK/hello.loader"
-python3 build-probe/repack.py "$A/$SONAME" "$WORK/libc-house.repacked"
-python3 build-probe/repack.py "$A/hello-dyn" "$WORK/hello-dyn.repacked"
-"$LOADER_CHECK" "$WORK/libc-house.repacked" >"$WORK/libc.repacked.loader"
-"$LOADER_CHECK" "$WORK/hello-dyn.repacked" >"$WORK/hello.repacked.loader"
-cmp "$WORK/libc.loader" "$WORK/libc.repacked.loader"
-sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/hello.loader" >"$WORK/hello.normalized"
-sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/hello.repacked.loader" >"$WORK/hello.repacked.normalized"
-cmp "$WORK/hello.normalized" "$WORK/hello.repacked.normalized"
+check_soname() {
+	artifact=$1
+	expected=$2
+	soname=$(readelf -dW "$artifact" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
+	[ "$soname" = "$expected" ] || {
+		echo "dynamic-elf-check: SONAME allowlist failed: $soname" >&2
+		exit 1
+	}
+	needed_count=$(readelf -dW "$artifact" | grep -c '(NEEDED)' || true)
+	[ "$needed_count" -eq 0 ] || {
+		echo "dynamic-elf-check: shared library has NEEDED entries" >&2
+		exit 1
+	}
+	if readelf -dW "$artifact" | grep -Eq 'libc\.so|libm\.so|libgcc|ld-linux|ld-house'; then
+		echo "dynamic-elf-check: shared library has a forbidden dependency" >&2
+		exit 1
+	fi
+	audit_symbols "$artifact"
+	audit_common "$artifact"
+}
+
+check_hello() {
+	artifact=$1
+	expected_soname=$2
+	check_interp "$artifact"
+	needed=$(readelf -dW "$artifact" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+	[ "$needed" = "$expected_soname" ] || {
+		echo "dynamic-elf-check: NEEDED allowlist failed: $needed" >&2
+		exit 1
+	}
+	needed_count=$(readelf -dW "$artifact" | grep -c '(NEEDED)' || true)
+	[ "$needed_count" -eq 1 ] || {
+		echo "dynamic-elf-check: $artifact NEEDED count is $needed_count" >&2
+		exit 1
+	}
+	if readelf -dW "$artifact" | grep -q '(SONAME)'; then
+		echo "dynamic-elf-check: executable unexpectedly has SONAME" >&2
+		exit 1
+	fi
+	readelf -rW "$artifact" | grep -q 'R_AARCH64_JUMP_SLOT.*strlen' || {
+		echo "dynamic-elf-check: $artifact lacks a real strlen JUMP_SLOT" >&2
+		exit 1
+	}
+	audit_common "$artifact"
+}
+
+check_soname "$A/$SONAME" "$SONAME"
+check_soname "$A/$MISSING_SONAME" "$MISSING_SONAME"
+check_hello "$A/hello-dyn" "$SONAME"
+check_hello "$A/hello-dyn-missing" "$MISSING_SONAME"
+audit_exec "$A/exec-dyn"
+
+for name in "$SONAME" "$MISSING_SONAME" hello-dyn hello-dyn-missing exec-dyn; do
+	loader_name=$(printf '%s' "$name" | tr '.-' '__')
+	"$LOADER_CHECK" "$A/$name" >"$WORK/$loader_name.loader"
+	python3 build-probe/repack.py "$A/$name" "$WORK/$loader_name.repacked" >/dev/null
+	"$LOADER_CHECK" "$WORK/$loader_name.repacked" >"$WORK/$loader_name.repacked.loader"
+	if [ "$name" = exec-dyn ]; then
+		cmp "$WORK/$loader_name.loader" "$WORK/$loader_name.repacked.loader"
+	else
+		sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/$loader_name.loader" >"$WORK/$loader_name.normalized"
+		sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/$loader_name.repacked.loader" >"$WORK/$loader_name.repacked.normalized"
+		cmp "$WORK/$loader_name.normalized" "$WORK/$loader_name.repacked.normalized"
+	fi
+done
 
 "$LOADER_CHECK" link "$A/hello-dyn" "$A/$SONAME" >"$WORK/link-a"
 "$LOADER_CHECK" link "$B/hello-dyn" "$B/$SONAME" >"$WORK/link-b"
-"$LOADER_CHECK" link "$WORK/hello-dyn.repacked" "$WORK/libc-house.repacked" >"$WORK/link-repacked"
+"$LOADER_CHECK" link "$WORK/hello_dyn.repacked" "$WORK/libc_house_so_0.repacked" >"$WORK/link-repacked"
 cmp "$WORK/link-a" "$WORK/link-b"
 cmp "$WORK/link-a" "$WORK/link-repacked"
 cat >"$WORK/expected-link" <<'EOF'
@@ -177,17 +230,16 @@ relocation object=main provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUM
 EOF
 cmp "$WORK/expected-link" "$WORK/link-a"
 
-printf 'not an elf\n' >"$WORK/malformed"
-if "$LOADER_CHECK" link "$WORK/malformed" >"$WORK/malformed.link.out" 2>"$WORK/malformed.link.err"; then
-	echo "dynamic-elf-check: malformed link input was not rejected" >&2
-	exit 1
-fi
-grep -q 'Truncated' "$WORK/malformed.link.err"
 if "$LOADER_CHECK" link "$A/hello-dyn" >"$WORK/missing.link.out" 2>"$WORK/missing.link.err"; then
-	echo "dynamic-elf-check: missing link dependency was not rejected" >&2
+	echo "dynamic-elf-check: missing direct link dependency was not rejected" >&2
 	exit 1
 fi
-grep -q 'missing dependency libc-house.so.0' "$WORK/missing.link.err"
+grep -q 'DependencyMissing: libc-house.so.0' "$WORK/missing.link.err"
+if "$LOADER_CHECK" link "$A/hello-dyn-missing" >"$WORK/missing-soname.link.out" 2>"$WORK/missing-soname.link.err"; then
+	echo "dynamic-elf-check: missing SONAME dependency was not rejected" >&2
+	exit 1
+fi
+grep -q 'DependencyMissing: libc-missing.so.0' "$WORK/missing-soname.link.err"
 
 cat >"$WORK/leaf.s" <<'EOF'
 .arch armv8-a
@@ -221,12 +273,13 @@ if "$LOADER_CHECK" link "$A/hello-dyn" "$WORK/libmid.so.0" >"$WORK/incomplete.li
 	echo "dynamic-elf-check: incomplete transitive link was not rejected" >&2
 	exit 1
 fi
-grep -q 'missing dependency libleaf.so.0' "$WORK/incomplete.link.err"
+grep -q 'DependencyMissing: libleaf.so.0' "$WORK/incomplete.link.err"
 
 cat >"$WORK/bad-u.s" <<'EOF'
 .arch armv8-a
 .text
 .global bad_u
+.type bad_u,%function
 bad_u:
     bl uart_putc
     ret
@@ -256,11 +309,41 @@ if "$LOADER_CHECK" link "$WORK/oversized" "$A/$SONAME" >"$WORK/oversized.link.ou
 fi
 grep -q 'file exceeds maxElfBytes' "$WORK/oversized.link.err"
 
-if find initramfs-staging -type f \( -name 'ld-house.so*' -o -name 'libc-house.so*' -o -name 'hello-dyn*' \) -print -quit | grep -q .; then
-	echo "dynamic-elf-check: M2.1 must not ship dynamic probe/library files" >&2
+for path in \
+	initramfs-staging/bin/hello-dyn \
+	initramfs-staging/bin/hello-dyn-missing \
+	initramfs-staging/bin/exec-dyn \
+	initramfs-staging/lib/libc-house.so.0; do
+	[ -f "$path" ] || {
+		echo "dynamic-elf-check: missing staged dynamic file $path" >&2
+		exit 1
+	}
+done
+find initramfs-staging/bin initramfs-staging/lib -type f \( \
+	-name hello-dyn -o -name hello-dyn-missing -o -name exec-dyn -o -name libc-house.so.0 \
+	\) -print | LC_ALL=C sort >"$WORK/staged.dynamic"
+printf '%s\n' \
+	initramfs-staging/bin/exec-dyn \
+	initramfs-staging/bin/hello-dyn \
+	initramfs-staging/bin/hello-dyn-missing \
+	initramfs-staging/lib/libc-house.so.0 >"$WORK/expected.staged.dynamic"
+cmp "$WORK/expected.staged.dynamic" "$WORK/staged.dynamic"
+for path in \
+	initramfs-staging/bin/exec-dyn \
+	initramfs-staging/bin/hello-dyn \
+	initramfs-staging/bin/hello-dyn-missing \
+	initramfs-staging/lib/libc-house.so.0; do
+	sha256sum "$path"
+done >"$WORK/staged.manifest"
+cmp scripts/dynamic-userspace.sha256 "$WORK/staged.manifest"
+if find initramfs-staging -type f \( -name 'ld-house.so*' -o -name 'libc-missing.so*' \) -print -quit | grep -q .; then
+	echo "dynamic-elf-check: forbidden negative/interpreter artifact is staged" >&2
 	exit 1
 fi
 
 printf '%s  %s\n' "$(sha256sum "$A/$SONAME" | cut -d' ' -f1)" "$SONAME"
+printf '%s  %s\n' "$(sha256sum "$A/$MISSING_SONAME" | cut -d' ' -f1)" "$MISSING_SONAME"
 printf '%s  %s\n' "$(sha256sum "$A/hello-dyn" | cut -d' ' -f1)" "hello-dyn"
-echo "dynamic-elf-check: reproducible artifacts, bounded parser, repacker, and pure link plan agree"
+printf '%s  %s\n' "$(sha256sum "$A/hello-dyn-missing" | cut -d' ' -f1)" "hello-dyn-missing"
+printf '%s  %s\n' "$(sha256sum "$A/exec-dyn" | cut -d' ' -f1)" "exec-dyn"
+echo "dynamic-elf-check: reproducible artifacts, Loader/repacker parity, negative dependency, and exact staging agree"

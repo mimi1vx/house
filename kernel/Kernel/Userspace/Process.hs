@@ -6,6 +6,7 @@ Description : ELF loader -> PageMap -> EL0 entry with cleanup.
 -}
 module Kernel.Userspace.Process (
   runElf,
+  runElfIn,
   forkProc,
   procInfo,
   listProcs,
@@ -20,13 +21,15 @@ module Kernel.Userspace.Process (
 where
 
 import Control.Concurrent (tryPutMVar, tryTakeMVar)
-import Control.Monad (forM_, void, when)
+import Control.Monad (foldM, forM_, unless, void, when)
 import Data.Bits (complement, shiftR, (.&.))
 import Data.Char (chr, ord)
 import Data.IORef (atomicModifyIORef')
 import Data.Int (Int64)
+import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
+import Data.Set qualified as Set
 import Data.Word (Word32, Word64, Word8)
 import Foreign.C.Types (CInt (..))
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
@@ -43,7 +46,9 @@ import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
 import Kernel.Userspace.Fd qualified as Fd
+import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateStaticRunElf)
+import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Sched qualified as Sched
 import Kernel.Userspace.Types (Pid (..), Process (..), pidNext, procExitMap, procMap, processExitVar, userSem)
 import System.Timeout qualified as T
@@ -101,6 +106,18 @@ installStackPage pdir stk = do
     Just _ -> return False
     Nothing ->
       VM.setPage pdir stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
+
+unmapStackPage :: VM.PageMap -> Ptr Word8 -> H ()
+unmapStackPage pdir stk = do
+  let stackBase = stackTop - 4096
+  mapped <- VM.getPage pdir stackBase
+  case mapped of
+    Just info
+      | VM.physPage info == toPhysPage (castPtr stk) -> do
+          ok <- VM.setPage pdir stackBase Nothing
+          when ok (releaseBacking (fromPhysPage (VM.physPage info)))
+    Nothing -> HPages.freePage stk
+    Just _ -> return ()
 
 {- | Request parked by an EL0 trap (svc #imm). Yield plus brk/fd
 0x03..0x07/0x0A plus fork 0x08/wait 0x09/exec 0x0B plus dir 0x0C..0x0F
@@ -194,12 +211,92 @@ cowLiveCount = Map.size <$> readRef cowRefs
 pfW :: Word32
 pfW = 2
 
+-- | A parsed object paired with the logical placement chosen by the linker.
+data RuntimeObject = RuntimeObject {
+  runtimePlaced :: Linker.PlacedObject
+  , runtimeElf :: Elf
+  }
+
+-- | A fully preflighted image. Effectful mapping is deliberately private.
+data PreparedImage
+  = StaticImage Elf
+  | DynamicImage Linker.LinkPlan [RuntimeObject]
+
+-- | The result of mapping and, for dynamic images, finalizing an image.
+data MappedImage = MappedImage {
+  mappedEntry :: Word64
+  , mappedBreak :: Word64
+  , mappedObjects :: [(String, [VM.VAddr])]
+  }
+
+-- | Dynamic mappings are writable only while unpublished in the page map.
+data MapMode = FinalFlags | TemporaryRW
+  deriving (Eq)
+
 runElf :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
-runElf elf argv envp = case validateStaticRunElf elf of
-  Left err -> return (Left err)
-  Right () -> case validateStackSegments (elfSegs elf) of
+runElf = runElfIn Vfs.defaultNamespace
+
+-- | Launch a static or dynamic image using the supplied VFS namespace.
+runElfIn :: Vfs.NamespaceId -> Elf -> [String] -> [String] -> H (Either LoadError Pid)
+runElfIn ns elf argv envp = do
+  prepared <- prepareImage ns elf
+  case prepared of
     Left err -> return (Left err)
-    Right () -> runElfValidated elf argv envp
+    Right image -> runPreparedImage ns image argv envp
+
+prepareImage :: Vfs.NamespaceId -> Elf -> H (Either LoadError PreparedImage)
+prepareImage ns elf
+  | elfIsDyn elf = do
+      resolved <- resolveDependencies ns elf
+      pure (resolved >>= prepareDynamicImage elf)
+  | otherwise =
+      pure $
+        case validateStaticRunElf elf of
+          Left err -> Left err
+          Right () ->
+            case validateStackSegments (elfSegs elf) of
+              Left err -> Left err
+              Right () -> Right (StaticImage elf)
+
+resolveDependencies :: Vfs.NamespaceId -> Elf -> H (Either LoadError (Map.Map String Elf))
+resolveDependencies ns main = go (Ldr.dynNeeded (Ldr.elfDyn main)) Map.empty Set.empty
+  where
+    go [] deps _ = return (Right deps)
+    go (name : rest) deps seen
+      | Set.member name seen = go rest deps seen
+      | Map.size deps >= Linker.maxDependencies =
+          return (Left (BadDyn "dependency object cap exceeded"))
+      | otherwise = do
+          bytesResult <- Vfs.vfsRead ns ("/lib/" ++ name)
+          case bytesResult of
+            Left Vfs.ENOENT -> return (Left (DependencyMissing name))
+            Left _ -> return (Left (BadDyn ("dependency " ++ name ++ " unavailable")))
+            Right bytes -> case loadElf bytes of
+              Left err -> return (Left err)
+              Right dependency ->
+                go
+                  (Ldr.dynNeeded (Ldr.elfDyn dependency) ++ rest)
+                  (Map.insert name dependency deps)
+                  (Set.insert name seen)
+
+prepareDynamicImage :: Elf -> Map.Map String Elf -> Either LoadError PreparedImage
+prepareDynamicImage main deps
+  | Map.member "main" deps = Left (BadDyn "dependency name main reserved")
+  | otherwise = do
+      plan <- Linker.linkDynamic main deps
+      let allElf = Map.insert "main" main deps
+      objects <- mapM (runtimeObject allElf) (Linker.linkObjects plan)
+      unless (uniqueRuntimeNames objects) (Left (BadDyn "duplicate dynamic object name"))
+      pure (DynamicImage plan objects)
+  where
+    runtimeObject allElf placed = case Map.lookup (Linker.placedObjectName placed) allElf of
+      Nothing -> Left (BadDyn "prepared dynamic object missing")
+      Just elf -> Right (RuntimeObject placed elf)
+
+uniqueRuntimeNames :: [RuntimeObject] -> Bool
+uniqueRuntimeNames objects =
+  let names = map (Linker.placedObjectName . runtimePlaced) objects
+   in length names == Set.size (Set.fromList names)
 
 validateStackSegments :: [Segment] -> Either LoadError ()
 validateStackSegments = mapM_ check
@@ -217,50 +314,73 @@ validateStackSegments = mapM_ check
                 then Left (BadSegment "stack page collision")
                 else Right ()
 
-runElfValidated :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
-runElfValidated elf argv envp = withQSem userSem $ do
+runPreparedImage :: Vfs.NamespaceId -> PreparedImage -> [String] -> [String] -> H (Either LoadError Pid)
+runPreparedImage ns image argv envp = withQSem userSem $ do
   pidInt <- readRef pidNext
   writeRef pidNext (pidInt + 1)
-  _ <- Vfs.vfsEnsurePid pidInt
+  bound <- Vfs.vfsBindPid pidInt ns
+  if not bound
+    then do
+      writeRef pidNext pidInt
+      return (Left (BadSegment "namespace unavailable"))
+    else runPreparedBound pidInt image argv envp
+
+runPreparedBound :: Int -> PreparedImage -> [String] -> [String] -> H (Either LoadError Pid)
+runPreparedBound pidInt image argv envp = do
   let pid = Pid pidInt
+      abort err = do
+        Vfs.vfsReleasePid pidInt
+        return (Left err)
   _ <- liftIO c_clear_exit
   mPdir <- VM.allocPageMap
   case mPdir of
-    Nothing -> return (Left NoSpace)
+    Nothing -> abort NoSpace
     Just pdir -> do
       let pdirPtr = VM.fromPageMap pdir
-      mapped <- mapSegments pdir elf
+      mapped <- mapPreparedImage pdir image
       case mapped of
         Left err -> do
           freePDir pdir
-          return (Left err)
-        Right () -> do
-          let initBrk = initBreak elf
+          abort err
+        Right mappedImage -> do
           mStack <- HPages.allocPage :: H (Maybe (Ptr Word8))
           case mStack of
-            Nothing -> do freePDir pdir; return (Left NoSpace)
+            Nothing -> do
+              freePDir pdir
+              abort NoSpace
             Just stk -> do
               HPages.zeroPage stk
               eSp <- setupArgStack stk argv envp
               case eSp of
-                Left err -> do HPages.freePage stk; freePDir pdir; return (Left err)
+                Left err -> do
+                  HPages.freePage stk
+                  freePDir pdir
+                  abort err
                 Right sp -> do
                   okStk <- installStackPage pdir stk
                   if not okStk
-                    then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
+                    then do
+                      HPages.freePage stk
+                      freePDir pdir
+                      abort NoSpace
                     else do
+                      let entry = mappedEntry mappedImage
+                          initBrk = mappedBreak mappedImage
                       asid <- liftIO (c_asid_for pdirPtr)
                       reg <- liftIO (c_el0_register pdirPtr)
                       if reg /= 0
-                        then do HPages.freePage stk; freePDir pdir; return (Left NoSpace)
+                        then do
+                          unmapStackPage pdir stk
+                          freePDir pdir
+                          abort NoSpace
                         else do
                           exitVar <- newEmptyMVar
                           modifyRef procExitMap (Map.insert pid exitVar)
-                          modifyRef procMap (Map.insert pid (Process pid pdir (elfEntry elf) initBrk))
+                          modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk))
                           Sched.schedRegister pid
                           _ <- forkH $ do
                             liftIO (c_set_pdir pdirPtr)
-                            liftIO (c_enter_el0 (elfEntry elf) sp pdirPtr asid)
+                            liftIO (c_enter_el0 entry sp pdirPtr asid)
                             parkLoop pid pdirPtr asid exitVar
                             return ()
                           return (Right pid)
@@ -537,44 +657,57 @@ execReplace pid@(Pid pidInt) pdir path = do
   case mBytes of
     Left _ -> return (Left (BadSegment "enoent"))
     Right bytes -> case loadElf bytes of
-      Left le -> return (Left le)
-      Right elf -> case validateStaticRunElf elf of
-        Left le -> return (Left le)
-        Right () -> case validateStackSegments (elfSegs elf) of
-          Left le -> return (Left le)
-          Right () -> execReplaceValidated pid pdir path elf
+      Left err -> return (Left err)
+      Right elf -> do
+        prepared <- prepareImage ns elf
+        case prepared of
+          Left err -> return (Left err)
+          Right image -> execReplaceValidated pid pdir path image
 
-execReplaceValidated :: Pid -> Ptr Word64 -> String -> Elf -> H (Either LoadError (Word64, Word64))
-execReplaceValidated pid pdir path elf = withQSem userSem $ do
+execReplaceValidated :: Pid -> Ptr Word64 -> String -> PreparedImage -> H (Either LoadError (Word64, Word64))
+execReplaceValidated pid pdir path image = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup pid mp of
     Nothing -> return (Left (BadSegment "no such pid"))
     Just pr -> do
       let oldHi = max (procBrk pr) stackTop
       freeUserPages (procPdir pr) oldHi
-      mapped <- mapSegments (procPdir pr) elf
+      mapped <- mapPreparedImage (procPdir pr) image
       case mapped of
         Left err -> return (Left err)
-        Right () -> do
-          let initBrk = initBreak elf
+        Right mappedImage -> do
+          let entry = mappedEntry mappedImage
+              initBrk = mappedBreak mappedImage
           mStack <- HPages.allocPage :: H (Maybe (Ptr Word8))
           case mStack of
-            Nothing -> return (Left NoSpace)
+            Nothing -> do
+              cleanupMappedImage (procPdir pr) mappedImage
+              return (Left NoSpace)
             Just stk -> do
               HPages.zeroPage stk
               eSp <- setupArgStack stk [path] ["HOUSE=1", "PATH=/bin"]
               case eSp of
-                Left err -> do HPages.freePage stk; return (Left err)
+                Left err -> do
+                  HPages.freePage stk
+                  cleanupMappedImage (procPdir pr) mappedImage
+                  return (Left err)
                 Right sp -> do
                   okStk <- installStackPage (procPdir pr) stk
                   if not okStk
-                    then do HPages.freePage stk; return (Left NoSpace)
+                    then do
+                      HPages.freePage stk
+                      cleanupMappedImage (procPdir pr) mappedImage
+                      return (Left NoSpace)
                     else do
-                      writeRef procMap (Map.insert pid pr {procEntry = elfEntry elf, procBrk = initBrk} mp)
-                      setRc <- liftIO (c_el0_set_entry pdir (elfEntry elf) sp)
+                      setRc <- liftIO (c_el0_set_entry pdir entry sp)
                       if setRc /= 0
-                        then return (Left (BadSegment "exec redirect"))
-                        else return (Right (elfEntry elf, sp))
+                        then do
+                          unmapStackPage (procPdir pr) stk
+                          cleanupMappedImage (procPdir pr) mappedImage
+                          return (Left (BadSegment "exec redirect"))
+                        else do
+                          writeRef procMap (Map.insert pid pr {procEntry = entry, procBrk = initBrk} mp)
+                          return (Right (entry, sp))
 
 -- | EL1 lookup for the forktest isolation check (caller holds no locks).
 procInfo :: Pid -> H (Maybe Process)
@@ -864,6 +997,7 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
           r <- execReplace pid pdir path
           case r of
             Left (BadSegment "enoent") -> resumeWith negENOENT
+            Left (DependencyMissing _) -> resumeWith negENOENT
             Left NoSpace -> resumeWith negNOMEM
             Left _ -> resumeWith negINVAL
             Right _ -> resumeWith 0
@@ -1266,71 +1400,320 @@ procBrkGrow pid newBrk = withQSem userSem $ do
                     then do HPages.freePage pg; return (Left NoSpace)
                     else growPages pdir (lo + 4096) hi
 
-mapSegments :: VM.PageMap -> Elf -> H (Either LoadError ())
-mapSegments pdir elf = go (elfSegs elf) []
+mapPreparedImage :: VM.PageMap -> PreparedImage -> H (Either LoadError MappedImage)
+mapPreparedImage pdir image = case image of
+  StaticImage elf -> do
+    mapped <- mapSegmentsAt pdir 0 elf FinalFlags
+    pure $ do
+      pages <- mapped
+      pure
+        MappedImage {
+          mappedEntry = elfEntry elf
+          , mappedBreak = initBreak elf
+          , mappedObjects = [("static", sortOn id pages)]
+          }
+  DynamicImage plan objects -> do
+    case mapM plannedAccessFor objects of
+      Left err -> return (Left err)
+      Right accesses -> do
+        mapped <- mapDynamicObjects pdir objects
+        case mapped of
+          Left err -> return (Left err)
+          Right objectPages -> do
+            patched <- applyPatches pdir plan objects accesses
+            case patched of
+              Left err -> do
+                cleanupPages pdir (concatMap snd objectPages)
+                return (Left err)
+              Right () -> do
+                finalized <- finalizeDynamic pdir accesses objectPages
+                case finalized of
+                  Left err -> do
+                    cleanupPages pdir (concatMap snd objectPages)
+                    return (Left err)
+                  Right () ->
+                    case dynamicEntryBreak objects of
+                      Left err -> do
+                        cleanupPages pdir (concatMap snd objectPages)
+                        return (Left err)
+                      Right (entry, brk) ->
+                        return
+                          ( Right
+                              MappedImage {
+                                mappedEntry = entry
+                                , mappedBreak = brk
+                                , mappedObjects = objectPages
+                                }
+                          )
+
+plannedAccess :: RuntimeObject -> Either LoadError [(Word64, Linker.PageAccess)]
+plannedAccess object =
+  Linker.plannedPageAccess (runtimePlaced object) (runtimeElf object)
+
+plannedAccessFor :: RuntimeObject -> Either LoadError (String, [(Word64, Linker.PageAccess)])
+plannedAccessFor object = do
+  pages <- plannedAccess object
+  pure (Linker.placedObjectName (runtimePlaced object), pages)
+
+mapDynamicObjects :: VM.PageMap -> [RuntimeObject] -> H (Either LoadError [(String, [VM.VAddr])])
+mapDynamicObjects pdir objects = go objects []
   where
-    bytes = elfBytes elf
-    go [] _ = return (Right ())
-    go (seg : rest) allocated = do
-      r <- mapOneSegment pdir bytes seg
-      case r of
+    go [] mapped = return (Right (reverse mapped))
+    go (object : rest) mapped = do
+      result <- mapObject pdir object
+      case result of
         Left err -> do
-          cleanup allocated
+          cleanupPages pdir (concatMap snd mapped)
           return (Left err)
-        Right addrs -> go rest (addrs ++ allocated)
-    cleanup =
-      mapM_
-        ( \va -> do
-            mInfo <- VM.getPage pdir va
-            case mInfo of
-              Nothing -> return ()
-              Just info -> do
-                _ <- VM.setPage pdir va Nothing
-                HPages.freePage (fromPhysPage (VM.physPage info))
-        )
+        Right pages -> go rest ((Linker.placedObjectName (runtimePlaced object), sortOn id pages) : mapped)
 
-mapOneSegment :: VM.PageMap -> [Word8] -> Segment -> H (Either LoadError [VM.VAddr])
-mapOneSegment pdir bytes seg =
-  let vaddr = segVaddr seg
-      foff = segFileOff seg
-      fsz = segFileSz seg
-      msz = segMemSz seg
-      flags = segFlags seg
-      writable = (flags .&. pfW) /= 0
-      pages = (msz + 4095) `div` 4096
-      loop idx acc
-        | idx >= pages = return (Right (reverse acc))
-        | otherwise = do
-            let curVa = vaddr + fromIntegral (idx * 4096)
-            occupied <- VM.getPage pdir curVa
-            if isJust occupied
-              then return (Left (BadSegment "overlapping LOAD page"))
-              else do
-                mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
-                case mp of
-                  Nothing -> return (Left NoSpace)
-                  Just pg -> do
-                    HPages.zeroPage pg
-                    let pageFileStart = idx * 4096
-                    let remainingFile = fsz - pageFileStart
-                    let copyLen = if remainingFile <= 0 then 0 else min 4096 remainingFile
-                    mapM_ (\i -> let srcIdx = foff + pageFileStart + i; b = indexBytes bytes srcIdx in poke (pg `plusPtr` i) b) [0 .. copyLen - 1]
-                    ok <- VM.setPage pdir curVa (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = writable, VM.dirty = False, VM.accessed = False, VM.cow = False}))
-                    if not ok
-                      then do
-                        HPages.freePage pg
-                        return (Left NoSpace)
-                      else loop (idx + 1) (curVa : acc)
-   in if pages == 0
-        then return (Right [])
-        else loop 0 []
+mapObject :: VM.PageMap -> RuntimeObject -> H (Either LoadError [VM.VAddr])
+mapObject pdir object =
+  mapSegmentsAt pdir (Linker.placedObjectBase (runtimePlaced object)) (runtimeElf object) TemporaryRW
 
-indexBytes :: [Word8] -> Int -> Word8
-indexBytes = go
+mapSegmentsAt :: VM.PageMap -> Word64 -> Elf -> MapMode -> H (Either LoadError [VM.VAddr])
+mapSegmentsAt pdir base elf mode = go (elfSegs elf) []
   where
-    go [] _ = 0
-    go (y : _) 0 = y
-    go (_ : ys) n = go ys (n - 1)
+    go [] allocated = return (Right allocated)
+    go (segment : rest) allocated = do
+      result <- mapOneSegment pdir base (elfBytes elf) segment mode
+      case result of
+        Left err -> do
+          cleanupPages pdir allocated
+          return (Left err)
+        Right pages -> go rest (allocated ++ pages)
+
+segmentMappingLayout :: Word64 -> Segment -> Either LoadError (Word64, Int, Int, Word64)
+segmentMappingLayout base segment = do
+  when (segMemSz segment < 0) (Left (BadDyn "negative segment size"))
+  absoluteStart <- checkedAddWord "segment start" base (segVaddr segment)
+  let pageBase = absoluteStart - absoluteStart `mod` 4096
+      delta = absoluteStart - pageBase
+  spanBytes <- checkedAddWord "segment span" delta (fromIntegral (fromIntegral (segMemSz segment) :: Word64))
+  let pages
+        | segMemSz segment == 0 = 0
+        | otherwise = fromIntegral ((spanBytes - 1) `div` 4096 + 1)
+  pure (pageBase, fromIntegral delta, pages, delta)
+
+mapOneSegment :: VM.PageMap -> Word64 -> [Word8] -> Segment -> MapMode -> H (Either LoadError [VM.VAddr])
+mapOneSegment pdir base bytes segment mode = do
+  let layout = segmentMappingLayout base segment
+  case layout of
+    Left err -> return (Left err)
+    Right (pageBase, _delta, pages, deltaWord) ->
+      if pages == 0
+        then return (Right [])
+        else loop pageBase pages deltaWord 0 []
+  where
+    writable =
+      case mode of
+        FinalFlags -> (segFlags segment .&. pfW) /= 0
+        TemporaryRW -> True
+    loop pageBase pageCount deltaWord idx acc
+      | idx >= pageCount = return (Right acc)
+      | otherwise = do
+          let currentVaResult = checkedAddWord "segment virtual address" pageBase (fromIntegral (idx * 4096))
+          case currentVaResult of
+            Left err -> do
+              cleanupPages pdir acc
+              return (Left err)
+            Right curVa -> do
+              occupied <- VM.getPage pdir curVa
+              if isJust occupied
+                then do
+                  cleanupPages pdir acc
+                  return (Left (BadSegment "overlapping LOAD page"))
+                else do
+                  mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                  case mp of
+                    Nothing -> do
+                      cleanupPages pdir acc
+                      return (Left NoSpace)
+                    Just pg -> do
+                      HPages.zeroPage pg
+                      let fileOffset = segFileOff segment
+                          fileSize = segFileSz segment
+                          pageOffset = fromIntegral (idx * 4096) :: Word64
+                          fileStart = if pageOffset <= deltaWord then 0 else pageOffset - deltaWord
+                          destinationOffset = fromIntegral (deltaWord + fileStart - pageOffset) :: Int
+                          fileStartInt = fromIntegral fileStart
+                          remainingFile = max 0 (fileSize - fileStartInt)
+                          copyLength = min (4096 - destinationOffset) remainingFile
+                      copied <-
+                        if fileOffset > maxBound - fileStartInt
+                          then return (Left (BadSegment "file offset overflow"))
+                          else copyElfPageBytes bytes pg (fileOffset + fileStartInt) destinationOffset copyLength
+                      case copied of
+                        Left err -> do
+                          HPages.freePage pg
+                          cleanupPages pdir acc
+                          return (Left err)
+                        Right () -> do
+                          ok <-
+                            VM.setPage
+                              pdir
+                              curVa
+                              ( Just
+                                  ( VM.PageInfo {
+                                      VM.physPage = toPhysPage (castPtr pg)
+                                      , VM.writable = writable
+                                      , VM.dirty = False
+                                      , VM.accessed = False
+                                      , VM.cow = False
+                                      }
+                                  )
+                              )
+                          if not ok
+                            then do
+                              HPages.freePage pg
+                              cleanupPages pdir acc
+                              return (Left NoSpace)
+                            else loop pageBase pageCount deltaWord (idx + 1) (acc ++ [curVa])
+
+copyElfPageBytes :: [Word8] -> Ptr Word8 -> Int -> Int -> Int -> H (Either LoadError ())
+copyElfPageBytes source destination sourceOffset destinationOffset count = do
+  let copied = mapM (\index -> indexBytesAt source (sourceOffset + index)) [0 .. count - 1]
+  case copied of
+    Nothing -> return (Left (BadSegment "file bytes outside image"))
+    Just bytes -> do
+      mapM_ (\(index, byte) -> poke (destination `plusPtr` (destinationOffset + index)) byte) (zip [0 ..] bytes)
+      return (Right ())
+
+indexBytesAt :: [Word8] -> Int -> Maybe Word8
+indexBytesAt bytes index
+  | index < 0 = Nothing
+  | otherwise = go bytes index
+  where
+    go [] _ = Nothing
+    go (byte : _) 0 = Just byte
+    go (_ : rest) offset
+      | offset < 0 = Nothing
+      | otherwise = go rest (offset - 1)
+
+applyPatches :: VM.PageMap -> Linker.LinkPlan -> [RuntimeObject] -> [(String, [(Word64, Linker.PageAccess)])] -> H (Either LoadError ())
+applyPatches pdir plan objects accesses = go (Linker.linkPatches plan)
+  where
+    objectNames = Map.fromList [(Linker.placedObjectName (runtimePlaced object), ()) | object <- objects]
+    accessByName = Map.fromList [(name, Set.fromList (map fst pages)) | (name, pages) <- accesses]
+    go [] = return (Right ())
+    go (patch : rest) = do
+      let target = Linker.patchTarget patch
+          pageBase = target .&. complement 4095
+      if target .&. 7 /= 0
+        then return (Left (BadDyn "dynamic relocation target is unaligned"))
+        else case Map.lookup (Linker.patchObject patch) objectNames of
+          Nothing -> return (Left (BadDyn "dynamic relocation object missing"))
+          Just () -> case Map.lookup (Linker.patchObject patch) accessByName of
+            Nothing -> return (Left (BadDyn "dynamic relocation page plan missing"))
+            Just pages
+              | not (Set.member pageBase pages) ->
+                  return (Left (BadDyn "dynamic relocation page outside object"))
+              | otherwise -> do
+                  mapped <- VM.getPage pdir pageBase
+                  case mapped of
+                    Nothing -> return (Left (BadDyn "dynamic relocation page unmapped"))
+                    Just info
+                      | not (VM.writable info) ->
+                          return (Left (BadDyn "dynamic relocation page is read-only"))
+                      | VM.cow info ->
+                          return (Left (BadDyn "dynamic relocation page is copy-on-write"))
+                      | target - pageBase > 4088 ->
+                          return (Left (BadDyn "dynamic relocation crosses page"))
+                      | otherwise -> do
+                          pokeWord64LE
+                            (fromPhysPage (VM.physPage info))
+                            (fromIntegral (target - pageBase))
+                            (Linker.patchValue patch)
+                          go rest
+
+finalizeDynamic :: VM.PageMap -> [(String, [(Word64, Linker.PageAccess)])] -> [(String, [VM.VAddr])] -> H (Either LoadError ())
+finalizeDynamic pdir accesses mapped = do
+  case verifyDynamicPages accesses mapped of
+    Left err -> return (Left err)
+    Right () -> applyAll accesses
+  where
+    applyAll [] = return (Right ())
+    applyAll ((_, pages) : rest) = do
+      result <- applyPages pages
+      case result of
+        Left err -> return (Left err)
+        Right () -> applyAll rest
+    applyPages [] = return (Right ())
+    applyPages ((address, access) : rest) = do
+      result <- setAccess (address, access)
+      case result of
+        Left err -> return (Left err)
+        Right () -> applyPages rest
+    setAccess (address, access) = do
+      mappedPage <- VM.getPage pdir address
+      case mappedPage of
+        Nothing -> return (Left (BadDyn "dynamic final page unmapped"))
+        Just info -> do
+          let writable = access == Linker.PageRW
+          ok <- VM.setPage pdir address (Just info {VM.writable = writable, VM.cow = False})
+          if ok
+            then return (Right ())
+            else return (Left (BadDyn "dynamic final permission update failed"))
+
+verifyDynamicPages :: [(String, [(Word64, Linker.PageAccess)])] -> [(String, [VM.VAddr])] -> Either LoadError ()
+verifyDynamicPages accesses mapped = do
+  let actualByName = Map.fromList mapped
+      expectedNames = map fst accesses
+      actualNames = map fst mapped
+      sameNames = sortOn id expectedNames == sortOn id actualNames
+      uniqueNames names = length names == Set.size (Set.fromList names)
+      sameObjects =
+        all (\(name, pages) -> Map.lookup name actualByName == Just (map fst pages)) accesses
+      expectedPages = concatMap (map fst . snd) accesses
+      actualPages = concatMap snd mapped
+  unless (uniqueNames expectedNames && uniqueNames actualNames && sameNames) (Left (BadDyn "dynamic mapped object set mismatch"))
+  unless sameObjects (Left (BadDyn "dynamic mapped object set mismatch"))
+  unless (sortOn id expectedPages == sortOn id actualPages) (Left (BadDyn "dynamic mapped page set mismatch"))
+  unless (length expectedPages == length actualPages) (Left (BadDyn "dynamic mapped page count mismatch"))
+
+dynamicEntryBreak :: [RuntimeObject] -> Either LoadError (Word64, Word64)
+dynamicEntryBreak objects = do
+  mainPlaced <-
+    case [runtimePlaced object | object <- objects, Linker.placedObjectName (runtimePlaced object) == "main"] of
+      [placed] -> Right placed
+      _ -> Left (BadDyn "dynamic main object missing")
+  end <- foldM objectEnd 0 objects
+  brk <-
+    if end > maxBound - 15
+      then Left (BadDyn "dynamic break overflow")
+      else Right ((end + 15) .&. complement 15)
+  if brk >= stackPageStart || brk > 0x100000000
+    then Left (BadDyn "dynamic break outside user window")
+    else pure (Linker.placedObjectEntry mainPlaced, brk)
+  where
+    objectEnd high object =
+      let base = Linker.placedObjectBase (runtimePlaced object)
+       in foldM (segmentEnd base) high (elfSegs (runtimeElf object))
+    segmentEnd high base segment
+      | segMemSz segment < 0 = Left (BadDyn "dynamic negative segment size")
+      | otherwise = do
+          relativeEnd <- checkedAddWord "dynamic segment end" (segVaddr segment) (fromIntegral (segMemSz segment))
+          absoluteEnd <- checkedAddWord "dynamic object end" base relativeEnd
+          pure (max high absoluteEnd)
+
+cleanupMappedImage :: VM.PageMap -> MappedImage -> H ()
+cleanupMappedImage pdir image = cleanupPages pdir (concatMap snd (mappedObjects image))
+
+cleanupPages :: VM.PageMap -> [VM.VAddr] -> H ()
+cleanupPages pdir addresses = mapM_ cleanupOne (Set.toList (Set.fromList addresses))
+  where
+    cleanupOne address = do
+      mapped <- VM.getPage pdir address
+      case mapped of
+        Nothing -> return ()
+        Just info -> do
+          ok <- VM.setPage pdir address Nothing
+          when ok (releaseBacking (fromPhysPage (VM.physPage info)))
+
+checkedAddWord :: String -> Word64 -> Word64 -> Either LoadError Word64
+checkedAddWord label left right
+  | right > maxBound - left = Left (BadDyn (label ++ " overflows"))
+  | otherwise = Right (left + right)
 
 freePDir :: VM.PageMap -> H ()
 freePDir pdir = do

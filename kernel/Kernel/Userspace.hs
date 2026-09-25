@@ -22,6 +22,7 @@ module Kernel.Userspace (
 
   -- * Process
   Kernel.Userspace.Process.runElf,
+  Kernel.Userspace.Process.runElfIn,
   Kernel.Userspace.Process.forkProc,
   Kernel.Userspace.Process.procInfo,
   Kernel.Userspace.Process.listProcs,
