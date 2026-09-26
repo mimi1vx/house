@@ -46,12 +46,18 @@ def main() -> None:
     if not dso:
         raise ValueError("dynamic root DSO is empty")
 
-    image = encode_image(
-        [
-            ("/lib/libc-house.so.0", b"not-an-elf"),
-            ("/lib/libc-missing.so.0", dso),
-        ]
+    files = [
+        ("/lib/libc-house.so.0", b"not-an-elf"),
+        ("/lib/libc-missing.so.0", dso),
+    ]
+    manifest = "".join(
+        f"{hashlib.sha256(content).hexdigest()}  {path}\n"
+        for path, content in sorted(files)
     )
+    record = hashlib.sha256(manifest.encode("ascii")).hexdigest()
+    files.append(("/lib/.house-lib-version", record.encode("ascii")))
+
+    image = encode_image(files)
     if len(image) > ROOT_IMAGE_BYTES:
         raise ValueError("dynamic root image does not fit raw disk")
 

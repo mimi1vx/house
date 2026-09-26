@@ -73,5 +73,8 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
   dependency lookup only, never a writable overlay: the initramfs RamFS stays the
   upper layer, only `ENOENT` falls through to a lower layer, and any other backend
   error fails closed.
+- A layer's `/lib/.house-lib-version` pin is content-derived, never hand-maintained:
+  editing a staged shared object changes the digest, and the build fails on pin
+  drift until the pin is regenerated.
 - `plans/` contains untracked local notes and is intentionally not ignored; do
   not treat those files as product documentation or generated artifacts.

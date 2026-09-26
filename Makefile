@@ -216,7 +216,7 @@ DYNAMIC_PROBE_SRCS := build-probe/hello-dyn.s build-probe/exec-dyn.s
 USERSPACE_SRCS := $(filter-out $(DYNAMIC_PROBE_SRCS),$(wildcard userspace/*.s userspace/*.ld build-probe/*.s build-probe/*.ld))
 STAGING_STATIC := initramfs-staging/etc/house-servers initramfs-staging/probe.txt
 DYNAMIC_INITRD_SRCS := build-probe/hello-dyn.s build-probe/exec-dyn.s build-probe/exec.ld \
-	scripts/mk-dynamic-probe.sh scripts/dynamic-userspace.sha256 \
+	scripts/mk-dynamic-probe.sh scripts/dynamic-userspace.sha256 scripts/lib-version.sha256 \
 	rust/crates/house-el0-tiny/src/lib.rs rust/Cargo.toml rust/Cargo.lock
 initrd: build/initramfs.cpio
 build/initramfs.cpio: $(USERSPACE_SRCS) $(DYNAMIC_INITRD_SRCS) build-probe/repack.py scripts/mk-userspace.sh scripts/mkinitramfs.sh scripts/static-userspace.sha256 $(STAGING_STATIC) | volumes

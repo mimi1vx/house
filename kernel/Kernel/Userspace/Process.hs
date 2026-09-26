@@ -16,6 +16,8 @@ module Kernel.Userspace.Process (
   stackTop,
   breakCow,
   cowLiveCount,
+  libVersionPin,
+  libVersionSkewLine,
   ParkRequest (..),
 )
 where
@@ -390,6 +392,7 @@ runElfIn ns elf argv envp = do
 prepareImage :: Vfs.NamespaceId -> Elf -> H (Either LoadError PreparedImage)
 prepareImage ns elf
   | elfIsDyn elf = do
+      checkLibVersionSkew ns
       resolved <- resolveDependencies ns elf
       pure (resolved >>= prepareDynamicImage elf)
   | otherwise =
@@ -423,6 +426,59 @@ resolveDependencies ns main = go (Ldr.dynNeeded (Ldr.elfDyn main)) Map.empty Set
                   (Ldr.dynNeeded (Ldr.elfDyn dependency) ++ rest)
                   (Map.insert name dependency deps)
                   (Set.insert name seen)
+
+-- | Where a layer records the digest of its own @/lib@ content.
+libVersionPath :: FilePath
+libVersionPath = "/lib/.house-lib-version"
+
+{- | Hex characters logged per side. Two sides plus the fixed prefix stay
+inside the dmesg line width, so a hostile record cannot choose what a
+truncated line says.
+-}
+libVersionLogChars :: Int
+libVersionLogChars = 12
+
+{- | Read a layer's @/lib@ version record. Only exactly 64 lowercase hex
+bytes is a pin; any other length, case, or byte is unpinned, and a read
+failure is treated exactly as absent.
+-}
+libVersionPin :: [Word8] -> Maybe String
+libVersionPin bytes
+  | length bytes /= 64 = Nothing
+  | all isLowerHex bytes = Just (map (chr . fromIntegral) bytes)
+  | otherwise = Nothing
+  where
+    isLowerHex b = (b >= 0x30 && b <= 0x39) || (b >= 0x61 && b <= 0x66)
+
+{- | The single diagnostic line for a mixed @/lib@, or 'Nothing' when both
+layers pin the same digest. A one-sided or malformed record is reported,
+never ignored: a layer predating the record is the likeliest real skew.
+-}
+libVersionSkewLine :: Maybe String -> Maybe String -> Maybe String
+libVersionSkewLine upper lower = case (upper, lower) of
+  (Just a, Just b) | a == b -> Nothing
+  _ -> Just ("lib version skew: initramfs=" ++ side upper ++ " block-root=" ++ side lower)
+  where
+    side Nothing = "unpinned"
+    side (Just pin) = take libVersionLogChars pin
+
+{- | Warn once per dynamic exec that the active layer and the layer below
+it disagree about @/lib@. Diagnostic only: it never changes which layer
+serves a dependency, so resolution stays first-hit-wins. Skipped entirely
+when a single layer is mounted, which keeps an initramfs-only boot free of
+the two extra reads.
+-}
+checkLibVersionSkew :: Vfs.NamespaceId -> H ()
+checkLibVersionSkew ns = do
+  layers <- Vfs.vfsLayerCount ns "/"
+  when (layers > 1) $ do
+    upper <- Vfs.vfsRead ns libVersionPath
+    lower <- Vfs.vfsReadOverlayFrom ns 1 libVersionPath
+    forM_ (libVersionSkewLine (pinOf upper) (pinOf lower)) Dmesg.dmesgLog
+  where
+    pinOf r = case r of
+      Left _ -> Nothing
+      Right bytes -> libVersionPin bytes
 
 prepareDynamicImage :: Elf -> Map.Map String Elf -> Either LoadError PreparedImage
 prepareDynamicImage main deps

@@ -53,8 +53,11 @@ test-suite house-pure
     Kernel.IPC.Grant
     Kernel.IPC.Nameservice
     Kernel.IPC.Types
+    Kernel.Userspace.Fd
     Kernel.Userspace.Linker
     Kernel.Userspace.Loader
+    Kernel.Userspace.Process
+    Kernel.Userspace.Sched
     Kernel.Userspace.Types
     Util.Word12
   c-sources: cbits/stubs.c

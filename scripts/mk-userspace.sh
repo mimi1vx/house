@@ -114,7 +114,8 @@ mkdir -p initramfs-staging/lib
 
 static_manifest=$(mktemp)
 dynamic_manifest=$(mktemp)
-trap 'rm -f "$static_manifest" "$dynamic_manifest"' EXIT
+lib_manifest=$(mktemp)
+trap 'rm -f "$static_manifest" "$dynamic_manifest" "$lib_manifest"' EXIT
 find initramfs-staging/bin initramfs-staging/sbin -type f -print | LC_ALL=C sort |
 	while IFS= read -r path; do sha256sum "$path"; done >"$static_manifest"
 if ! cmp -s scripts/static-userspace.sha256 "$static_manifest"; then
@@ -148,6 +149,22 @@ find initramfs-staging/bin initramfs-staging/lib -type f \( \
 if ! cmp -s scripts/dynamic-userspace.sha256 "$dynamic_manifest"; then
 	echo "dynamic userspace manifest drift" >&2
 	diff -u scripts/dynamic-userspace.sha256 "$dynamic_manifest" >&2 || true
+	exit 1
+fi
+
+# /lib version record: layer-relative manifest digest, no trailing newline.
+rm -f initramfs-staging/lib/.house-lib-version
+(cd initramfs-staging && find lib -type f -print | LC_ALL=C sort |
+	while IFS= read -r path; do
+		printf '%s  /%s\n' "$(sha256sum "$path" | cut -d' ' -f1)" "$path"
+	done) >"$lib_manifest"
+lib_pin=$(sha256sum "$lib_manifest" | cut -d' ' -f1)
+echo "lib version pin $lib_pin" >&2
+printf '%s' "$lib_pin" >initramfs-staging/lib/.house-lib-version
+chmod 644 initramfs-staging/lib/.house-lib-version
+touch -d '@0' initramfs-staging/lib/.house-lib-version
+if ! sha256sum -c scripts/lib-version.sha256; then
+	echo "lib version pin drift" >&2
 	exit 1
 fi
 

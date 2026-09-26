@@ -11,7 +11,9 @@ backend never sees an escaping path.
 A prefix may carry several layers: 'vfsMount' replaces the prefix,
 'vfsMountLayer' appends below it. 'vfsReadOverlay' walks the layers of
 the longest matching prefix in order and stops at the first hit, while
-ordinary ops use only the topmost layer.
+ordinary ops use only the topmost layer. 'vfsReadOverlayFrom' starts the
+same walk at a given depth, which is the only way to read a lower
+layer's own copy of a file the topmost layer also has.
 
 Lock order: 'registrySem' is a leaf; it is never held across backend
 ops (which take their own @fsSem@\/@blkSem@). Lookup snapshots
@@ -49,6 +51,7 @@ module Kernel.FileSystem.Vfs (
   vfsWrite,
   vfsRead,
   vfsReadOverlay,
+  vfsReadOverlayFrom,
   vfsLs,
   vfsRm,
   vfsStat,
@@ -383,12 +386,24 @@ first. A layer is skipped only on 'ENOENT'; any other failure is
 authoritative and stops the walk, so the caller fails closed.
 -}
 vfsReadOverlay :: NamespaceId -> FilePath -> H (Either FsError [Word8])
-vfsReadOverlay ns path = case splitPath path of
+vfsReadOverlay ns = vfsReadOverlayFrom ns 0
+
+{- | 'vfsReadOverlay' starting at @depth@ layers below the topmost, so a
+caller can read one specific layer's own bytes. An overlay read of a
+record that exists in several layers always returns the topmost copy;
+a lower layer is only reachable this way. @depth@ 0 is
+'vfsReadOverlay', a negative depth behaves as 0, and a depth at or past
+the end of the stack is 'ENOENT'. The skip and lock rules are shared:
+'ENOENT' is the only fall-through, and 'registrySem' is released before
+every backend call.
+-}
+vfsReadOverlayFrom :: NamespaceId -> Int -> FilePath -> H (Either FsError [Word8])
+vfsReadOverlayFrom ns depth path = case splitPath path of
   Left e -> return (Left e)
   Right comps -> do
     layers <- withQSem registrySem $ do
       m <- readRef nsTable
-      return (resolveLayers (fromMaybe [] (Map.lookup ns m)) comps)
+      return (drop depth (resolveLayers (fromMaybe [] (Map.lookup ns m)) comps))
     readLayers layers
 
 readLayers :: [(FsOps, FilePath)] -> H (Either FsError [Word8])

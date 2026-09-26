@@ -76,6 +76,7 @@ run_and_expect "blk root 7" "root ok slot=7" "mounted root"
 run_and_expect "blk root 7" "root blocked: already mounted" "second root refused"
 run_process "run /bin/hello-dyn-missing" "Hello from dynamic EL0" "root fallback"
 run_process "run /bin/hello-dyn" "Hello from dynamic EL0" "initramfs first hit"
+run_and_expect "dmesg" {lib version skew: initramfs=[0-9a-f]{12} block-root=[0-9a-f]{12}} "lib version skew dmesg"
 run_and_expect "jobs" "jobs:" "root jobs"
 run_and_expect "blk teardown 7" "teardown blocked: mounted root" "mounted root teardown guard"
 

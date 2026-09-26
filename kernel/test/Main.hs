@@ -37,6 +37,7 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Ix qualified as Ix
 import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, isNothing)
 import Data.Set qualified as Set
 import Data.Word (Word16, Word32, Word64, Word8)
 import H.FileSystem qualified as FS
@@ -50,6 +51,7 @@ import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
 import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader qualified as Ldr
+import Kernel.Userspace.Process qualified as Proc
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
@@ -574,6 +576,78 @@ vfsLayerForkGolden = do
     childCount <- Vfs.vfsLayerCount child "/"
     return (parentResult == Right [1] && childResult == Right [1] && parentCount == 2 && childCount == 3)
 
+-- | Depth 0 is the whole stack, so it must agree with 'vfsReadOverlay'.
+vfsLayerDepthZeroGolden :: IO Bool
+vfsLayerDepthZeroGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.vfsWrite ns "/lib/dependency" [1]
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    overlay <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    depth0 <- Vfs.vfsReadOverlayFrom ns 0 "/lib/dependency"
+    miss <- Vfs.vfsReadOverlayFrom ns 0 "/lib/absent"
+    return (depth0 == overlay && overlay == Right [1] && miss == Left Vfs.ENOENT)
+
+-- | Depth 1 starts below the topmost layer, so only lower bytes are visible.
+vfsLayerDepthLowerGolden :: IO Bool
+vfsLayerDepthLowerGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.vfsWrite ns "/lib/dependency" [1]
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.opsWrite lower "/lib/lower-only" [3]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    lowerHit <- Vfs.vfsReadOverlayFrom ns 1 "/lib/dependency"
+    upperOnly <- Vfs.vfsReadOverlayFrom ns 1 "/lib/absent"
+    lowerOnly <- Vfs.vfsReadOverlayFrom ns 1 "/lib/lower-only"
+    return (lowerHit == Right [2] && lowerOnly == Right [3] && upperOnly == Left Vfs.ENOENT)
+
+-- | A depth at or past the end of the stack is ENOENT, never the top layer.
+vfsLayerDepthPastEndGolden :: IO Bool
+vfsLayerDepthPastEndGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.vfsWrite ns "/lib/dependency" [1]
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    atEnd <- Vfs.vfsReadOverlayFrom ns 2 "/lib/dependency"
+    pastEnd <- Vfs.vfsReadOverlayFrom ns 7 "/lib/dependency"
+    return (atEnd == Left Vfs.ENOENT && pastEnd == Left Vfs.ENOENT)
+
+{- | A non-ENOENT result at the starting depth is authoritative: it must not
+fall through to a layer below, or a hostile lower record would be masked.
+-}
+vfsLayerDepthErrorGolden :: IO Bool
+vfsLayerDepthErrorGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.vfsMkdir ns "/lib/dependency"
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    result <- Vfs.vfsReadOverlayFrom ns 0 "/lib/dependency"
+    return (result == Left Vfs.EISDIR)
+
 -- | Pure candidate ordering and the longest-prefix boundary.
 vfsResolveLayersGolden :: IO Bool
 vfsResolveLayersGolden = do
@@ -791,6 +865,10 @@ main = do
       , checkIO "vfs layer append vs replace" vfsLayerAppendGolden
       , checkIO "vfs layer count" vfsLayerCountGolden
       , checkIO "vfs layer fork isolation" vfsLayerForkGolden
+      , checkIO "vfs layer depth 0 matches overlay" vfsLayerDepthZeroGolden
+      , checkIO "vfs layer depth 1 lower view" vfsLayerDepthLowerGolden
+      , checkIO "vfs layer depth past end" vfsLayerDepthPastEndGolden
+      , checkIO "vfs layer depth error propagates" vfsLayerDepthErrorGolden
       , checkIO "vfs resolve layers" vfsResolveLayersGolden
       , checkIO "vfs bytes all-256" vfsBytesGolden
       , checkIO "vfs dir mkdir/rm/stat/ls" vfsDirGolden
@@ -1075,6 +1153,8 @@ main = do
       , check
           "missing dependency renders soname"
           (Ldr.loadErrorToString (Ldr.DependencyMissing "libmissing.so.0") == "DependencyMissing: libmissing.so.0")
+      , checkIO "lib version pin format" libVersionPinGolden
+      , checkIO "lib version skew lines" libVersionSkewGolden
       , assertLinkError
           "link missing dependency"
           (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
@@ -1280,6 +1360,65 @@ blkTruncGolden :: IO Bool
 blkTruncGolden = case BP.encodeImage [("/a", [1, 2, 3])] of
   Left _ -> check "blk trunc body" False
   Right img -> assertLeft "blk trunc body" (BP.decodeImage (trunc img))
+
+{- | A layer's /lib version record is a digest over its own /lib content,
+so a lower block root is attacker-controlled: only exactly 64 lowercase
+hex bytes is a pin, and every other length, case, or byte is unpinned.
+-}
+libVersionPinGolden :: IO Bool
+libVersionPinGolden = do
+  let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      upperDigest = "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+      bytesOf s = [fromIntegral (ord c) :: Word8 | c <- s]
+      valid = bytesOf digest
+  results <-
+    sequence
+      [ check "lib version pin 64 hex parses" (Proc.libVersionPin valid == Just digest)
+      , check "lib version pin 63 bytes unpinned" (isNothing (Proc.libVersionPin (take 63 valid)))
+      , check "lib version pin 65 bytes unpinned" (isNothing (Proc.libVersionPin (valid ++ [0x61])))
+      , check "lib version pin uppercase unpinned" (isNothing (Proc.libVersionPin (bytesOf upperDigest)))
+      , check "lib version pin dash unpinned" (isNothing (Proc.libVersionPin (0x2d : drop 1 valid)))
+      , check "lib version pin 0xff unpinned" (isNothing (Proc.libVersionPin (0xff : drop 1 valid)))
+      , check "lib version pin empty unpinned" (isNothing (Proc.libVersionPin []))
+      ]
+  return (and results)
+
+{- | One line per skew shape, silence when the pins agree, and every line
+inside the 120-column dmesg width so a hostile record cannot choose what
+a truncated line says.
+-}
+libVersionSkewGolden :: IO Bool
+libVersionSkewGolden = do
+  let initramfsPin = Just "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      blockRootPin = Just "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      skew = Proc.libVersionSkewLine
+      mismatch = skew initramfsPin blockRootPin
+      upperOnly = skew initramfsPin Nothing
+      lowerOnly = skew Nothing blockRootPin
+      bothUnpinned = skew Nothing Nothing
+      produced = catMaybes [mismatch, upperOnly, lowerOnly, bothUnpinned]
+      -- Kernel.Driver.Dmesg truncates at 120 and does not export the bound.
+      dmesgWidth = 120 :: Int
+  results <-
+    sequence
+      [ check
+          "lib version skew mismatch line"
+          (mismatch == Just "lib version skew: initramfs=0123456789ab block-root=fedcba987654")
+      , check
+          "lib version skew upper-only line"
+          (upperOnly == Just "lib version skew: initramfs=0123456789ab block-root=unpinned")
+      , check
+          "lib version skew lower-only line"
+          (lowerOnly == Just "lib version skew: initramfs=unpinned block-root=fedcba987654")
+      , check
+          "lib version skew both-unpinned line"
+          (bothUnpinned == Just "lib version skew: initramfs=unpinned block-root=unpinned")
+      , check "lib version skew equal pins silent" (isNothing (skew initramfsPin initramfsPin))
+      , check
+          "lib version skew lines fit dmesg"
+          (length produced == 4 && all ((<= dmesgWidth) . length) produced)
+      ]
+  return (and results)
 
 -- M1 dynamic-linking fixtures -------------------------------------------------
 
