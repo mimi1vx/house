@@ -185,6 +185,7 @@ demand pager + `mprotect` RO perm faults + `munmap` translation faults,
 | `house-hal-aarch64` | `invalidate_page` | `void invalidate_page(uint64_t vaddr)` | `userspace.c` |
 | `house-hal-aarch64` | `house_set_recorded_pdir` | `void house_set_recorded_pdir(void *pdir)` | `userspace.c` |
 | `house-hal-aarch64` | `house_asid_for_pdir` | `uint64_t house_asid_for_pdir(void *pdir)` | `userspace.c` |
+| `house-hal-aarch64` | `house_asid_forget_pdir` | `void house_asid_forget_pdir(void *pdir)` | `userspace.rs` (new: evict the `(pdir → ASID)` cache entry and `TLBI VMALLE1IS` when a page-directory root is released, so a recycled root cannot alias two images on one `(TTBR0, ASID)` pair) |
 | `house-hal-aarch64` | `house_is_ro_page` | `int house_is_ro_page(uint64_t va)` | `userspace.c` |
 | `house-hal-aarch64` | `house_is_cow_page` | `int house_is_cow_page(uint64_t va)` | `userspace.rs` (new: SW bit-57 COW mark on an RO L3 page, `1` COW / `0` otherwise; trap-safe PTE read for the FAULT park gate) |
 | `house-hal-aarch64` | `house_tlb_shootdown` | `void house_tlb_shootdown(uint64_t vaddr)` | `userspace.c` |

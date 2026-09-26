@@ -60,6 +60,11 @@ foreign import ccall unsafe "house_enter_el0" c_enter_el0 :: Word64 -> Word64 ->
 
 foreign import ccall unsafe "house_asid_for_pdir" c_asid_for :: Ptr Word64 -> IO Word64
 
+-- Drops the HAL's (pdir -> ASID) cache entry before the root page returns to
+-- the allocator, which would otherwise hand the same root -- and so the same
+-- (TTBR0, ASID) pair -- to the next image.
+foreign import ccall unsafe "house_asid_forget_pdir" c_asid_forget :: Ptr Word64 -> IO ()
+
 foreign import ccall unsafe "house_get_exit_code" c_get_exit :: IO CInt
 
 foreign import ccall unsafe "house_clear_exit" c_clear_exit :: IO ()
@@ -1932,6 +1937,7 @@ freePDir pdir = do
   if l0 == curL0
     then return ()
     else do
+      liftIO (c_asid_forget l0)
       let pageEntries = 512
       let l0Idx = fromIntegral ((VM.minVAddr `div` (2 ^ (39 :: Int))) `mod` 512) :: Int
       -- Instead of recomputing, directly walk all L1 entries for the user window

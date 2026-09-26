@@ -74,12 +74,49 @@ unsafe fn asid_for_pdir(pdir: *mut u8) -> u16 {
                 options(nostack, preserves_flags)
             );
         }
-        if ASID_MAP_LEN < ASID_MAP_CAP {
-            ASID_MAP[ASID_MAP_LEN] = (pdir, a);
-            ASID_MAP_LEN += 1;
+        if ASID_MAP_LEN == ASID_MAP_CAP {
+            // Every live root already holds a slot, so none may keep its ASID
+            // while the map is rebuilt; the flush above already covers this.
+            ASID_MAP = [(core::ptr::null_mut(), 0); ASID_MAP_CAP];
+            ASID_MAP_LEN = 0;
         }
+        ASID_MAP[ASID_MAP_LEN] = (pdir, a);
+        ASID_MAP_LEN += 1;
         ASID_LOCK.unlock();
         a
+    }
+}
+
+/// Release a cached `(pdir -> ASID)` binding when its root page is about to be
+/// returned to the buddy allocator. The allocator hands the same root back to
+/// the next image, so a surviving entry would alias two processes on one
+/// `(TTBR0, ASID)` pair. The flush drops every entry tagged with that pair
+/// before the recycled root is populated with a different image.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_asid_forget_pdir(pdir: *mut u8) {
+    if pdir.is_null() {
+        return;
+    }
+    unsafe {
+        ASID_LOCK.lock();
+        let mut i = 0;
+        while i < ASID_MAP_LEN {
+            if ASID_MAP[i].0 == pdir {
+                let last = ASID_MAP_LEN - 1;
+                ASID_MAP[i] = ASID_MAP[last];
+                ASID_MAP[last] = (core::ptr::null_mut(), 0);
+                ASID_MAP_LEN = last;
+                break;
+            }
+            i += 1;
+        }
+        ASID_LOCK.unlock();
+        // SAFETY: the root is recycled by the caller straight after this
+        // returns, so no entry may keep the pair this pdir was tagged with.
+        core::arch::asm!(
+            "dsb ishst; tlbi vmalle1is; dsb ish; isb",
+            options(nostack, preserves_flags)
+        );
     }
 }
 
