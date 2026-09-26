@@ -50,6 +50,7 @@ import Kernel.Driver.Virtio.Queue qualified as VQueue
 import Kernel.Driver.Virtio.Transport qualified as VTrans
 import Kernel.Driver.Virtio.Types qualified as VTypes
 import Kernel.Driver.VirtioProbe qualified as VProbe
+import Kernel.FileSystem.BlkFs qualified as BlkFs
 import Kernel.FileSystem.BlkPersist qualified as BlkPersist
 import Kernel.FileSystem.Vfs qualified as FS
 import Kernel.IPC.Endpoint qualified as IPC
@@ -154,7 +155,8 @@ loop = do
       ["blk", "sync"] -> handleBlkSync Nothing
       ["blk", "sync", s] -> handleBlkSync (Just s)
       ["blk", "mount", s] -> handleBlkMount s
-      ["blk"] -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot>\n" c_uart_puts
+      ["blk", "root", s] -> handleBlkRoot s
+      ["blk"] -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|root <slot>|teardown <slot>\n" c_uart_puts
       ["net", "init", s] -> handleNetInit s
       ["net", "status", s] -> handleNetStatus s
       ["net", "teardown", s] -> handleNetTeardown s
@@ -408,9 +410,15 @@ loop = do
       _ -> withCString "usage: blk write <slot> <lba> <text>\n" c_uart_puts
     handleBlkTeardown s = case reads s of
       [(n, "")] -> do
-        r <- runH (Blk.blkServerTeardown n)
+        r <- runH $ do
+          layers <- FS.vfsLayerCount FS.defaultNamespace "/"
+          if layers > 1
+            then return (Left "teardown blocked: mounted root")
+            else do
+              t <- Blk.blkServerTeardown n
+              return (either (Left . BlkTypes.blkErrorToString) Right t)
         case r of
-          Left e -> withCString (BlkTypes.blkErrorToString e ++ "\n") c_uart_puts
+          Left e -> withCString (e ++ "\n") c_uart_puts
           Right () -> withCString "teardown ok\n" c_uart_puts
       _ -> withCString "usage: blk teardown <slot>\n" c_uart_puts
     handleBlkSync mSlot = do
@@ -433,6 +441,25 @@ loop = do
           Left e -> withCString (BlkPersist.persistErrorToString e ++ "\n") c_uart_puts
           Right () -> withCString "mount ok\n" c_uart_puts
       _ -> withCString "usage: blk mount <slot>\n" c_uart_puts
+    handleBlkRoot s = case reads s of
+      [(n, "")] -> do
+        r <- runH $ do
+          layers <- FS.vfsLayerCount FS.defaultNamespace "/"
+          if layers > 1
+            then return (Left "root blocked: already mounted")
+            else do
+              valid <- BlkFs.blkfsCheck n
+              case valid of
+                Left e -> return (Left (showFsError e))
+                Right () -> do
+                  mounted <- FS.vfsMountLayer FS.defaultNamespace "/" (BlkFs.blkfsOps n)
+                  return $ case mounted of
+                    Left e -> Left (showFsError e)
+                    Right () -> Right ()
+        case r of
+          Left e -> withCString (e ++ "\n") c_uart_puts
+          Right () -> withCString ("root ok slot=" ++ show n ++ "\n") c_uart_puts
+      _ -> withCString "usage: blk root <slot>\n" c_uart_puts
     findBlkSlot xs = case filter ("virtio-blk" `isPrefixOf`) xs of
       (x : _) -> case reads (drop (length "virtio-blk") x) of [(n, "")] -> n; _ -> 0
       [] -> 0
@@ -782,7 +809,7 @@ loop = do
         , "       ipc el0pp <nsName> -- EL0 ping-pong: server RECV+REPLY + client CALL via the park ring"
         , "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)"
         , "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)"
-        , "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; ramfs volatile, sync persists HFS1, mount restores)"
+        , "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|root <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; mount restores RamFS, root appends a lower / layer for /lib reads and blocks teardown)"
         , "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)"
         , "       dns <name> -- A-record lookup via 10.0.2.3 (UDP/53, no TCP; e.g. dns example.com)"
         , "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3 console / multiport serial port0 + control q2/q3 DEVICE_READY/OPEN, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)"

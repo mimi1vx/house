@@ -14,6 +14,9 @@ any FFI (foreign symbols are stubbed at link time, never called):
   @nsFork@ invisibility, and bytes round-trips (NUL + 0x80-0xFF) through
   fake in-memory backends via @runH@ (RamFS pages need real FFI, so the
   routing contract is exercised without them).
+* VFS layers: ordered same-prefix stacking, upper-first reads,
+  @ENOENT@-only fallback, the nested-mount boundary, and namespace
+  inheritance of the layer list.
 * Initramfs: cpio newc round-trip (all-256 binary payloads) plus
   bad-magic/truncation/traversal/oversize rejects, unpack via the fake
   backends, manifest line validation, RamFS quota math + over-quota
@@ -399,6 +402,207 @@ vfsForkGolden = do
     rc <- Vfs.vfsRead child "/extra/secret"
     return (isLeft rp && rc == Right [7])
 
+-- | Layered reads are upper-first; an upper hit never consults a lower layer.
+vfsLayerFirstHitGolden :: IO Bool
+vfsLayerFirstHitGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.vfsWrite ns "/lib/dependency" [1]
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    result <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (result == Right [1])
+
+-- | An upper ENOENT falls through to the next layer.
+vfsLayerFallbackGolden :: IO Bool
+vfsLayerFallbackGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    result <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (result == Right [2])
+
+-- | A second appended layer is reached only after the first misses.
+vfsLayerOrderGolden :: IO Bool
+vfsLayerOrderGolden = do
+  upper <- newMemBackend
+  mid <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.opsMkdir mid "/lib"
+    _ <- Vfs.opsWrite mid "/lib/dependency" [2]
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [3]
+    _ <- Vfs.vfsMountLayer ns "/" mid
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    result <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (result == Right [2])
+
+-- | ENOENT from every layer remains ENOENT.
+vfsLayerMissingGolden :: IO Bool
+vfsLayerMissingGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    result <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (result == Left Vfs.ENOENT)
+
+-- | A non-ENOENT upper result fails closed without consulting a lower layer.
+vfsLayerUpperErrorGolden :: IO Bool
+vfsLayerUpperErrorGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.vfsMkdir ns "/lib/dependency"
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    result <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (result == Left Vfs.EISDIR)
+
+-- | A non-ENOENT result from a lower layer is returned unchanged.
+vfsLayerLowerErrorGolden :: IO Bool
+vfsLayerLowerErrorGolden = do
+  upper <- newMemBackend
+  lower <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsMkdir lower "/lib/dependency"
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    result <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (result == Left Vfs.EISDIR)
+
+{- | A miss under a nested mount never leaks into a root layer: @/lib@
+is the routing boundary, so the root layers are not candidates.
+-}
+vfsLayerNestedBoundaryGolden :: IO Bool
+vfsLayerNestedBoundaryGolden = do
+  root <- newMemBackend
+  lower <- newMemBackend
+  nested <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" root
+    _ <- Vfs.opsMkdir lower "/lib"
+    _ <- Vfs.opsWrite lower "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" lower
+    _ <- Vfs.vfsMount ns "/lib" nested
+    _ <- Vfs.opsMkdir nested "/lib"
+    result <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (result == Left Vfs.ENOENT)
+
+-- | 'vfsMountLayer' appends; 'vfsMount' still replaces the whole stack.
+vfsLayerAppendGolden :: IO Bool
+vfsLayerAppendGolden = do
+  first <- newMemBackend
+  second <- newMemBackend
+  third <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" first
+    _ <- Vfs.vfsMkdir ns "/lib"
+    _ <- Vfs.vfsWrite ns "/lib/dependency" [1]
+    _ <- Vfs.opsMkdir second "/lib"
+    _ <- Vfs.opsWrite second "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer ns "/" second
+    appended <- Vfs.vfsLayerCount ns "/"
+    stacked <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    _ <- Vfs.opsMkdir third "/lib"
+    _ <- Vfs.opsWrite third "/lib/dependency" [3]
+    _ <- Vfs.vfsMount ns "/" third
+    replaced <- Vfs.vfsLayerCount ns "/"
+    collapsed <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    return (appended == 2 && stacked == Right [1] && replaced == 1 && collapsed == Right [3])
+
+-- | Layer counts are per prefix; an unmounted prefix reports zero.
+vfsLayerCountGolden :: IO Bool
+vfsLayerCountGolden = do
+  a <- newMemBackend
+  b <- newMemBackend
+  c <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" a
+    _ <- Vfs.vfsMountLayer ns "/" b
+    _ <- Vfs.vfsMount ns "/lib" c
+    rootCount <- Vfs.vfsLayerCount ns "/"
+    libCount <- Vfs.vfsLayerCount ns "/lib"
+    absentCount <- Vfs.vfsLayerCount ns "/nowhere"
+    return (rootCount == 2 && libCount == 1 && absentCount == 0)
+
+-- | A forked namespace inherits the layer stack; its own append stays local.
+vfsLayerForkGolden :: IO Bool
+vfsLayerForkGolden = do
+  upper <- newMemBackend
+  lowerA <- newMemBackend
+  lowerB <- newMemBackend
+  HM.runH $ do
+    ns <- Vfs.nsCreate
+    _ <- Vfs.vfsMount ns "/" upper
+    _ <- Vfs.opsMkdir lowerA "/lib"
+    _ <- Vfs.opsWrite lowerA "/lib/dependency" [1]
+    _ <- Vfs.vfsMountLayer ns "/" lowerA
+    child <- Vfs.nsFork ns
+    _ <- Vfs.opsMkdir lowerB "/lib"
+    _ <- Vfs.opsWrite lowerB "/lib/dependency" [2]
+    _ <- Vfs.vfsMountLayer child "/" lowerB
+    parentResult <- Vfs.vfsReadOverlay ns "/lib/dependency"
+    childResult <- Vfs.vfsReadOverlay child "/lib/dependency"
+    parentCount <- Vfs.vfsLayerCount ns "/"
+    childCount <- Vfs.vfsLayerCount child "/"
+    return (parentResult == Right [1] && childResult == Right [1] && parentCount == 2 && childCount == 3)
+
+-- | Pure candidate ordering and the longest-prefix boundary.
+vfsResolveLayersGolden :: IO Bool
+vfsResolveLayersGolden = do
+  root <- newMemBackend
+  mid <- newMemBackend
+  nested <- newMemBackend
+  HM.runH $ do
+    _ <- Vfs.opsWrite root "/dep" [1]
+    _ <- Vfs.opsWrite mid "/dep" [2]
+    _ <- Vfs.opsWrite nested "/dep" [3]
+    let mount p = Vfs.Mount (Vfs.joinRel p) p
+        -- Longest-prefix sorted, as the mount registry keeps it.
+        table =
+          [ mount ["lib"] nested
+          , mount [] root
+          , mount [] mid
+          ]
+        rootLayers = Vfs.resolveLayers table ["dep"]
+        libLayers = Vfs.resolveLayers table ["lib", "dep"]
+        miss = Vfs.resolveLayers [mount ["lib"] nested] ["etc", "hosts"]
+    rootHits <- mapM (uncurry Vfs.opsRead) rootLayers
+    libHits <- mapM (uncurry Vfs.opsRead) libLayers
+    return
+      ( rootHits == [Right [1], Right [2]]
+          && map snd libLayers == ["/dep"]
+          && libHits == [Right [3]]
+          && null miss
+      )
+
 -- | Byte fidelity through routing: all 256 values + NUL + empty.
 vfsBytesGolden :: IO Bool
 vfsBytesGolden = do
@@ -577,6 +781,17 @@ main = do
       , checkIO "vfs prefix routing" vfsPrefixGolden
       , checkIO "vfs dotdot per-backend" vfsDotDotGolden
       , checkIO "vfs nsFork invisibility" vfsForkGolden
+      , checkIO "vfs layer first hit" vfsLayerFirstHitGolden
+      , checkIO "vfs layer fallback" vfsLayerFallbackGolden
+      , checkIO "vfs layer order" vfsLayerOrderGolden
+      , checkIO "vfs layer missing" vfsLayerMissingGolden
+      , checkIO "vfs layer upper error" vfsLayerUpperErrorGolden
+      , checkIO "vfs layer lower error" vfsLayerLowerErrorGolden
+      , checkIO "vfs layer nested boundary" vfsLayerNestedBoundaryGolden
+      , checkIO "vfs layer append vs replace" vfsLayerAppendGolden
+      , checkIO "vfs layer count" vfsLayerCountGolden
+      , checkIO "vfs layer fork isolation" vfsLayerForkGolden
+      , checkIO "vfs resolve layers" vfsResolveLayersGolden
       , checkIO "vfs bytes all-256" vfsBytesGolden
       , checkIO "vfs dir mkdir/rm/stat/ls" vfsDirGolden
       , checkIO "vfs dir pid-namespace isolation" vfsDirPidNsGolden

@@ -42,6 +42,7 @@ import H.PhysicalMemory (fromPhysPage, toPhysPage)
 import H.Unsafe (unsafePerformH)
 import H.Utils (ptrFromWord64, ptrToWord64)
 import H.VirtualMemory qualified as VM
+import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
@@ -409,9 +410,11 @@ resolveDependencies ns main = go (Ldr.dynNeeded (Ldr.elfDyn main)) Map.empty Set
       | Map.size deps >= Linker.maxDependencies =
           return (Left (BadDyn "dependency object cap exceeded"))
       | otherwise = do
-          bytesResult <- Vfs.vfsRead ns ("/lib/" ++ name)
+          bytesResult <- Vfs.vfsReadOverlay ns ("/lib/" ++ name)
           case bytesResult of
-            Left Vfs.ENOENT -> return (Left (DependencyMissing name))
+            Left Vfs.ENOENT -> do
+              Dmesg.dmesgLog ("needed " ++ name ++ ": no initramfs or mounted-root candidate")
+              return (Left (DependencyMissing name))
             Left _ -> return (Left (BadDyn ("dependency " ++ name ++ " unavailable")))
             Right bytes -> case loadElf bytes of
               Left err -> return (Left err)

@@ -72,6 +72,40 @@ expect {
 }
 expect {
     -re "> " {}
+    timeout { puts "\nFAIL: prompt after cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+# No block device is attached: a root-only dependency must fail closed.
+send "run /bin/hello-dyn-missing\r"
+expect {
+    -re "ENOENT: missing dependency libc-missing.so.0" { puts "\nPASS: no-block dependency is ENOENT" }
+    timeout { puts "\nFAIL: no-block dependency timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before no-block dependency"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after no-block dependency timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "dmesg\r"
+expect {
+    -re "needed libc-missing.so.0: no initramfs or mounted-root candidate" { puts "\nPASS: no-block dependency logged" }
+    timeout { puts "\nFAIL: no-block dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after no-block dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "run /bin/hello\r"
+expect {
+    -re "Hello from EL0" { puts "\nPASS: static hello survives no-block miss" }
+    timeout { puts "\nFAIL: static hello timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before static hello"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: static hello exit 0" }
+    timeout { puts "\nFAIL: static hello exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after static hello" }
     timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 puts "\nPASS: initramfs ok"

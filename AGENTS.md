@@ -30,7 +30,8 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
   `house-virtio-blk-check`, `house-virtio-net-check`,
   `house-virtio-con-check`, `house-userspace-check`, `house-proc-check`,
   `house-fd-el0-check`, `house-ipc-el0-check`, `house-fork-check`,
-  `house-preempt-check`, and `house-spin-hotplug-check`.
+  `house-preempt-check`, `house-spin-hotplug-check`,
+  `house-dynamic-userspace-check`, and `house-dynamic-root-check`.
 - SMP checks: `make smp-check` (default `SMP_N=2`),
   `SMP_N=4 make smp-check`, `make smp-hotplug-check`, and the expensive nightly
   scaling gate `make smp-check-8` (4 GiB).
@@ -68,5 +69,9 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 - The supported machine is `qemu-system-aarch64 -M virt,gic-version=3`; HVF is
   the host default, while harnesses use TCG where required (notably EL0 tests).
 - The stock threaded GHC RTS and unsafe FFI are deliberate constraints.
+- A block root attached with `blk root <slot>` is an ordered read fallback for
+  dependency lookup only, never a writable overlay: the initramfs RamFS stays the
+  upper layer, only `ENOENT` falls through to a lower layer, and any other backend
+  error fails closed.
 - `plans/` contains untracked local notes and is intentionally not ignored; do
   not treat those files as product documentation or generated artifacts.

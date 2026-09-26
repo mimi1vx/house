@@ -8,6 +8,11 @@ prefix wins inside the caller's namespace. Paths are total
 ('splitPath' confines @..@ to root, rejects overlong names), so a
 backend never sees an escaping path.
 
+A prefix may carry several layers: 'vfsMount' replaces the prefix,
+'vfsMountLayer' appends below it. 'vfsReadOverlay' walks the layers of
+the longest matching prefix in order and stops at the first hit, while
+ordinary ops use only the topmost layer.
+
 Lock order: 'registrySem' is a leaf; it is never held across backend
 ops (which take their own @fsSem@\/@blkSem@). Lookup snapshots
 @(ops, relPath)@ under the lock, then invokes the backend unlocked.
@@ -25,10 +30,13 @@ module Kernel.FileSystem.Vfs (
   splitPath,
   normalizeMount,
   resolvePrefix,
+  resolveLayers,
   joinRel,
   nsCreate,
   nsFork,
   vfsMount,
+  vfsMountLayer,
+  vfsLayerCount,
   vfsLookup,
   vfsEnsurePid,
   vfsBindPid,
@@ -40,6 +48,7 @@ module Kernel.FileSystem.Vfs (
   vfsMkdir,
   vfsWrite,
   vfsRead,
+  vfsReadOverlay,
   vfsLs,
   vfsRm,
   vfsStat,
@@ -156,11 +165,45 @@ resolvePrefix mounts comps = go sorted
     sorted = sortBy (comparing (negate . length . fst)) mounts
     go [] = Nothing
     go ((pre, v) : rest)
-      | pre `isPrefixOf` comps = Just (v, drop (length pre) comps)
+      | compIsPrefixOf pre comps = Just (v, drop (length pre) comps)
       | otherwise = go rest
-    isPrefixOf [] _ = True
-    isPrefixOf _ [] = False
-    isPrefixOf (x : xs) (y : ys) = x == y && isPrefixOf xs ys
+
+-- | Segment-wise prefix test over normalized comp lists.
+compIsPrefixOf :: [String] -> [String] -> Bool
+compIsPrefixOf [] _ = True
+compIsPrefixOf _ [] = False
+compIsPrefixOf (x : xs) (y : ys) = x == y && compIsPrefixOf xs ys
+
+{- | Ordered read candidates for a path: every layer at the longest
+matching prefix, topmost first. The table is longest-prefix sorted, so
+the first match fixes the routing boundary; a shorter prefix is never a
+candidate, which keeps a miss under a nested mount from leaking into a
+root layer.
+-}
+resolveLayers :: MountTable -> [String] -> [(FsOps, FilePath)]
+resolveLayers table comps = case filter covers table of
+  [] -> []
+  top : rest -> map layer (top : takeWhile (samePrefix top) rest)
+  where
+    covers m = compIsPrefixOf (mountPrefixComps m) comps
+    samePrefix a b = mountPrefixComps a == mountPrefixComps b
+    layer m = (mountOps m, joinRel (drop (length (mountPrefixComps m)) comps))
+
+{- | Insert a layer below the layers already mounted at the same prefix,
+keeping the table longest-prefix sorted.
+-}
+insertLayer :: Mount -> MountTable -> MountTable
+insertLayer entry = go
+  where
+    go [] = [entry]
+    go (m : ms)
+      | mountPrefixComps m == mountPrefixComps entry = m : insertBelow ms
+      | length (mountPrefixComps m) < length (mountPrefixComps entry) = entry : m : ms
+      | otherwise = m : go ms
+    insertBelow [] = [entry]
+    insertBelow (m : ms)
+      | mountPrefixComps m == mountPrefixComps entry = m : insertBelow ms
+      | otherwise = entry : m : ms
 
 -- Registry ---------------------------------------------------------------------
 
@@ -201,7 +244,7 @@ nsFork parent = withQSem registrySem $ do
   return n
 
 {- | Mount backend ops at an absolute prefix inside a namespace.
-Replaces an existing mount at the same normalized prefix.
+Replaces every layer at the same normalized prefix.
 -}
 vfsMount :: NamespaceId -> FilePath -> FsOps -> H (Either FsError ())
 vfsMount ns prefix ops = case normalizeMount prefix of
@@ -209,12 +252,33 @@ vfsMount ns prefix ops = case normalizeMount prefix of
   Right comps -> withQSem registrySem $ do
     m <- readRef nsTable
     let table = fromMaybe [] (Map.lookup ns m)
-        norm = joinRel comps
-        without = filter (\mt -> mountPrefix mt /= norm) table
-        entry = Mount norm comps ops
-        sorted = sortBy (comparing (negate . length . mountPrefixComps)) (entry : without)
-    writeRef nsTable (Map.insert ns sorted m)
+        entry = Mount (joinRel comps) comps ops
+        without = filter ((/= comps) . mountPrefixComps) table
+    writeRef nsTable (Map.insert ns (insertLayer entry without) m)
     return (Right ())
+
+{- | Append a layer below the ones already mounted at an absolute
+prefix. Ordinary ops keep using the topmost layer; only
+'vfsReadOverlay' walks the stack.
+-}
+vfsMountLayer :: NamespaceId -> FilePath -> FsOps -> H (Either FsError ())
+vfsMountLayer ns prefix ops = case normalizeMount prefix of
+  Left e -> return (Left e)
+  Right comps -> withQSem registrySem $ do
+    m <- readRef nsTable
+    let table = fromMaybe [] (Map.lookup ns m)
+        entry = Mount (joinRel comps) comps ops
+    writeRef nsTable (Map.insert ns (insertLayer entry table) m)
+    return (Right ())
+
+-- | Number of layers stacked at an exact normalized prefix.
+vfsLayerCount :: NamespaceId -> FilePath -> H Int
+vfsLayerCount ns prefix = case normalizeMount prefix of
+  Left _ -> return 0
+  Right comps -> withQSem registrySem $ do
+    m <- readRef nsTable
+    let table = fromMaybe [] (Map.lookup ns m)
+    return (length (filter ((== comps) . mountPrefixComps) table))
 
 -- | Resolve a full path inside a namespace to backend ops + relative path.
 vfsLookup :: NamespaceId -> FilePath -> H (Either FsError (FsOps, FilePath))
@@ -313,6 +377,27 @@ vfsRead ns path = do
   case r of
     Left e -> return (Left e)
     Right (ops, rel) -> opsRead ops rel
+
+{- | Read through every layer of the longest matching prefix, topmost
+first. A layer is skipped only on 'ENOENT'; any other failure is
+authoritative and stops the walk, so the caller fails closed.
+-}
+vfsReadOverlay :: NamespaceId -> FilePath -> H (Either FsError [Word8])
+vfsReadOverlay ns path = case splitPath path of
+  Left e -> return (Left e)
+  Right comps -> do
+    layers <- withQSem registrySem $ do
+      m <- readRef nsTable
+      return (resolveLayers (fromMaybe [] (Map.lookup ns m)) comps)
+    readLayers layers
+
+readLayers :: [(FsOps, FilePath)] -> H (Either FsError [Word8])
+readLayers [] = return (Left ENOENT)
+readLayers ((ops, rel) : rest) = do
+  r <- opsRead ops rel
+  case r of
+    Left ENOENT -> readLayers rest
+    other -> return other
 
 vfsLs :: NamespaceId -> FilePath -> H (Either FsError [String])
 vfsLs ns path = do

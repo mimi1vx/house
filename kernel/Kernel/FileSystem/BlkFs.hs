@@ -16,6 +16,7 @@ cache makes @mkdir \/a && mkdir \/a\/b@ work within a session, but
 a sync\/mount round-trip with no files under @\/a@ drops it.
 -}
 module Kernel.FileSystem.BlkFs (
+  blkfsCheck,
   blkfsOps,
   blkfsSave,
   blkfsRestore,
@@ -275,6 +276,10 @@ blkfsRestore slot = do
       return ()
 
 -- Backend record --------------------------------------------------------------------
+
+-- | Validate and decode a slot before publishing it as a mounted root.
+blkfsCheck :: Int -> H (Either FsError ())
+blkfsCheck slot = either Left (const (Right ())) <$> loadFiles slot
 
 -- | Block-backed 'FsOps' for one slot.
 blkfsOps :: Int -> FsOps

@@ -279,6 +279,17 @@ house-dynamic-userspace-check: house-build initrd
 	expect scripts/qemu-dynamic-userspace.exp $(SPIKE_DIR)/build/house.bin 120 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-dynamic-userspace.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N)
 
+# Mounted-root /lib fallback: offline ENOENT, root fallback, upper-first lookup.
+dynamic-root-image: initrd scripts/mk-dynamic-probe.sh scripts/mk-dynamic-root.py scripts/dynamic-root.sha256
+	$(RUN_IN_CONTAINER) sh scripts/mk-dynamic-probe.sh root
+	$(RUN_IN_CONTAINER) python3 scripts/mk-dynamic-root.py \
+		build/dynamic-probe/root/libc-missing.so.0 build/dynamic-root.img
+	sha256sum -c scripts/dynamic-root.sha256
+
+house-dynamic-root-check: house-build dynamic-root-image
+	expect scripts/qemu-dynamic-root.exp $(SPIKE_DIR)/build/house.bin build/dynamic-root.img 120 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-dynamic-root.exp $(SPIKE_DIR)/build/house.bin build/dynamic-root.img 180 tcg $(SPIKE_MEM) $(SMP_N)
+
 # SMP hotplug cycle (Tracks S+H): down/up at N=2, caps mirror, parfib each step.
 # Accel split (step 6 spike): hvf refuses PSCI re-CPU_ON after CPU_OFF (call
 # returns 0, core never re-enters), so up-after-down is tcg-only; hvf runs the
@@ -357,11 +368,12 @@ check:
 	$(MAKE) house-shell-check
 	$(MAKE) house-posix-check
 	$(MAKE) house-dynamic-userspace-check
+	$(MAKE) house-dynamic-root-check
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, dynamic userspace, rust, dynamic ELF/link plan) =="
+	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, dynamic userspace, mounted-root dynamic, rust, dynamic ELF/link plan) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-dynamic-userspace-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check

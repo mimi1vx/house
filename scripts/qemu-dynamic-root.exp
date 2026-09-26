@@ -1,0 +1,84 @@
+#!/usr/bin/expect -f
+# Mounted-root dynamic dependency probe: offline ENOENT, namespace fallback,
+# upper-layer precedence, and mounted-root teardown protection.
+# Usage: expect scripts/qemu-dynamic-root.exp <kernel.bin> <root.img> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set root_image [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+set smp [lindex $argv 5]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 180 } else { set timeout 120 }
+} else {
+    set timeout $timeout_arg
+}
+
+proc fail_stage {stage} {
+    puts "\nFAIL: $stage"
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+
+proc expect_stage {pattern stage} {
+    expect {
+        -re $pattern {}
+        timeout {fail_stage "$stage timeout"}
+        eof {fail_stage "$stage eof"}
+    }
+}
+
+proc sync_prompt {stage} {
+    send "\r"
+    expect {
+        -re "> ?" {}
+        timeout {fail_stage "$stage prompt timeout"}
+        eof {fail_stage "$stage prompt eof"}
+    }
+}
+
+proc expect_output_prompt {pattern stage} {
+    expect_stage $pattern $stage
+    sync_prompt $stage
+}
+
+proc run_and_expect {command output stage} {
+    send "$command\r"
+    expect_stage $output $stage
+    sync_prompt $stage
+}
+
+proc run_process {command output stage} {
+    send "$command\r"
+    expect_stage $output $stage
+    expect_stage "ok exit 0" "$stage exit"
+    sync_prompt $stage
+}
+
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max \
+    -M virt,virtio-mmio-transports=8,gic-version=3 \
+    -global virtio-mmio.force-legacy=false \
+    -smp $smp -m $mem -nographic -kernel $kernel \
+    -initrd build/initramfs.cpio \
+    -drive "if=none,file=$root_image,format=raw,id=hd0" \
+    -device virtio-blk-device,drive=hd0
+expect_output_prompt "Welcome to the House shell" "welcome"
+
+run_and_expect "blk init 7" "capacity=.*slot=7" "block init"
+run_and_expect "run /bin/hello-dyn-missing" "ENOENT: missing dependency libc-missing.so.0" "offline missing dependency"
+run_and_expect "dmesg" "needed libc-missing.so.0: no initramfs or mounted-root candidate" "offline dmesg"
+run_process "run /bin/hello" "Hello from EL0" "offline shell alive"
+run_and_expect "blk root 7" "root ok slot=7" "mounted root"
+run_and_expect "blk root 7" "root blocked: already mounted" "second root refused"
+run_process "run /bin/hello-dyn-missing" "Hello from dynamic EL0" "root fallback"
+run_process "run /bin/hello-dyn" "Hello from dynamic EL0" "initramfs first hit"
+run_and_expect "jobs" "jobs:" "root jobs"
+run_and_expect "blk teardown 7" "teardown blocked: mounted root" "mounted root teardown guard"
+
+puts "\nPASS: mounted-root dynamic dependency runtime ok"
+catch {exec kill -9 [exp_pid]}
+exit 0
