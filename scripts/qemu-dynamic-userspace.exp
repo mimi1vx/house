@@ -1,6 +1,7 @@
 #!/usr/bin/expect -f
-# Dynamic EL0 runtime probe: initial load, shared finalized DSO pages, missing
-# dependency, dynamic exec, failed-exec preservation, and static non-regression.
+# Dynamic EL0 runtime probe: initial load, transitive three-object load, shared
+# finalized DSO pages, missing dependency, dynamic exec, failed-exec
+# preservation, and static non-regression.
 # Usage: expect scripts/qemu-dynamic-userspace.exp <kernel.bin> [timeout] [accel] [mem] [smp]
 set kernel [lindex $argv 0]
 set timeout_arg [lindex $argv 1]
@@ -49,12 +50,21 @@ run_and_expect "run /bin/hello-dyn" "Hello from dynamic EL0" "dynamic initial"
 expect_stage "ok exit 0" "dynamic initial exit"
 expect_prompt "dynamic initial after exit"
 
+run_and_expect "run /bin/hello-dyn-deep" "Hello from deep dynamic EL0" "dynamic deep"
+expect_stage "mid house_pad ok" "dynamic deep pad"
+expect_stage "mid house_len ok" "dynamic deep len"
+expect_stage "ok exit 0" "dynamic deep exit"
+expect_prompt "dynamic deep after exit"
+
 send "jobs\r"
 expect_stage "jobs:" "dynamic jobs"
 expect_prompt "dynamic jobs prompt"
 
 run_and_expect "loaderrefs" "loaderrefs ok" "dynamic shared pages"
 expect_prompt "dynamic shared pages prompt"
+
+run_and_expect "loaderrefs /bin/hello-dyn-deep" "loaderrefs ok" "dynamic deep shared pages"
+expect_prompt "dynamic deep shared pages prompt"
 
 run_and_expect "forktest" "forktest ok" "static COW regression"
 expect_prompt "static COW regression prompt"

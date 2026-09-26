@@ -31,7 +31,8 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
   `house-virtio-con-check`, `house-userspace-check`, `house-proc-check`,
   `house-fd-el0-check`, `house-ipc-el0-check`, `house-fork-check`,
   `house-preempt-check`, `house-spin-hotplug-check`,
-  `house-dynamic-userspace-check`, and `house-dynamic-root-check`.
+  `house-dynamic-userspace-check`, `house-dynamic-root-check`,
+  `house-initrd-check`, and `house-pid1-check`.
 - SMP checks: `make smp-check` (default `SMP_N=2`),
   `SMP_N=4 make smp-check`, `make smp-hotplug-check`, and the expensive nightly
   scaling gate `make smp-check-8` (4 GiB).
@@ -75,6 +76,8 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
   error fails closed.
 - A layer's `/lib/.house-lib-version` pin is content-derived, never hand-maintained:
   editing a staged shared object changes the digest, and the build fails on pin
-  drift until the pin is regenerated.
+  drift until the pin is regenerated. Staging a new `/lib` file therefore re-pins
+  `scripts/lib-version.sha256` and moves the initramfs file count asserted by
+  `scripts/qemu-initramfs.exp`, so regenerate both in the same change.
 - `plans/` contains untracked local notes and is intentionally not ignored; do
   not treat those files as product documentation or generated artifacts.

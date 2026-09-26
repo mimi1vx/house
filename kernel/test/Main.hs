@@ -1167,6 +1167,42 @@ main = do
               [("liba.so.0", elfLinkDep, validDependency "liba.so.0" ["libmissing.so.0"] [])]
           )
           (Ldr.DependencyMissing "libmissing.so.0")
+      , check
+          "link deep graph discovery order"
+          (linkNamesAre ["main", "libmid-house.so.0", "libc-house.so.0"] deepLink)
+      , check
+          "link deep graph distinct page-aligned bases"
+          (linkBasesAre [0x01000000, 0x01010000, 0x01020000] deepLink)
+      , check
+          "link deep graph main symbol from deepest DSO"
+          ( linkPatchIs
+              (Linker.RelocationPatch "main" "libmid-house.so.0" (Just "house_pad") Linker.LinkJumpSlot 0x01000338 0x01010110)
+              deepLink
+          )
+      , check
+          "link deep graph sibling-sourced relocation"
+          ( linkPatchIs
+              (Linker.RelocationPatch "libmid-house.so.0" "libc-house.so.0" (Just "strlen") Linker.LinkJumpSlot 0x01010338 0x01020100)
+              deepLink
+          )
+      , check
+          "link deep graph patch order"
+          ( linkPatchesAre
+              [ Linker.RelocationPatch "main" "libmid-house.so.0" (Just "house_pad") Linker.LinkJumpSlot 0x01000338 0x01010110
+              , Linker.RelocationPatch "libmid-house.so.0" "libc-house.so.0" (Just "strlen") Linker.LinkJumpSlot 0x01010338 0x01020100
+              ]
+              deepLink
+          )
+      , assertLinkError
+          "link deep graph duplicate export"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["libc-house.so.0", "libmid-house.so.0"])
+              [ ("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "house_pad" 0x100 1])
+              , ("libmid-house.so.0", elfLinkDep, validDependency "libmid-house.so.0" ["libc-house.so.0"] [definedSymbol "house_pad" 0x110 1])
+              ]
+          )
+          (Ldr.BadDyn "link: duplicate export house_pad")
       , assertLinkError
           "link reserved main dependency"
           ( linkWith
@@ -1847,6 +1883,32 @@ defaultLink mainBytes =
     Right
     [("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1])]
 
+{- | The staged three-object graph: @hello-dyn-deep@ needs @libmid-house.so.0@,
+which itself needs @libc-house.so.0@. The mid DSO exports only @house_pad@ and
+carries a JUMP_SLOT for @strlen@, so the plan must resolve a relocation inside
+a non-main object against a sibling rather than the main.
+-}
+deepLink :: Either Ldr.LoadError Linker.LinkPlan
+deepLink =
+  linkWith
+    elfLinkMain
+    ( Right
+        . setMainSymbolTable [undefinedSymbol "house_pad"]
+        . setMainRelocations [eagerBinding 0x338 1026 1 "house_pad" 0]
+        . setMainNeeded ["libmid-house.so.0", "libc-house.so.0"]
+    )
+    [ ("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1])
+    ,
+      ( "libmid-house.so.0"
+      , elfLinkDep
+      , validDependencyWith
+          "libmid-house.so.0"
+          ["libc-house.so.0"]
+          [undefinedSymbol "strlen", definedSymbol "house_pad" 0x110 1]
+          [eagerBinding 0x338 1026 1 "strlen" 0]
+      )
+    ]
+
 dependencyNames :: Int -> [String]
 dependencyNames count = ["lib" ++ show index ++ ".so.0" | index <- ([0 .. count - 1] :: [Int])]
 
@@ -1922,7 +1984,10 @@ finalPageAccess = do
       Just elf -> Linker.plannedPageAccess placed elf
 
 validDependency :: String -> [String] -> [Ldr.DynamicSymbol] -> ElfEdit
-validDependency name needed exports elf = do
+validDependency name needed exports = validDependencyWith name needed exports []
+
+validDependencyWith :: String -> [String] -> [Ldr.DynamicSymbol] -> [Ldr.Relocation] -> ElfEdit
+validDependencyWith name needed exports relocations elf = do
   withSymbols <- setSymbols exports elf
   let dynInfo = Ldr.elfDyn withSymbols
   pure
@@ -1931,9 +1996,15 @@ validDependency name needed exports elf = do
         dynInfo {
           Ldr.dynSoname = Just name
           , Ldr.dynNeeded = needed
-          , Ldr.dynRelocations = []
+          , Ldr.dynRelocations = relocationTables relocations
           }
       }
+
+relocationTables :: [Ldr.Relocation] -> [Ldr.RelocationTable]
+relocationTables relocations =
+  [ Ldr.RelocationTable Ldr.DynamicRelocations 0 (24 * length relocations) 24 relocations
+  | not (null relocations)
+  ]
 
 setSymbols :: [Ldr.DynamicSymbol] -> ElfEdit
 setSymbols named elf = case (Ldr.dynSymbols dynInfo, Ldr.dynHashStyle dynInfo) of
@@ -1957,16 +2028,7 @@ setMainNeeded :: [String] -> Ldr.Elf -> Ldr.Elf
 setMainNeeded needed = updateDyn (\dynInfo -> dynInfo {Ldr.dynNeeded = needed})
 
 setMainRelocations :: [Ldr.Relocation] -> Ldr.Elf -> Ldr.Elf
-setMainRelocations relocations =
-  updateDyn
-    ( \dynInfo ->
-        dynInfo {
-          Ldr.dynRelocations =
-            [ Ldr.RelocationTable Ldr.DynamicRelocations 0 (24 * length relocations) 24 relocations
-            | not (null relocations)
-            ]
-          }
-    )
+setMainRelocations relocations = updateDyn (\dynInfo -> dynInfo {Ldr.dynRelocations = relocationTables relocations})
 
 setMainSymbolTable :: [Ldr.DynamicSymbol] -> Ldr.Elf -> Ldr.Elf
 setMainSymbolTable names elf = fromRight elf (setSymbols names elf)
@@ -2068,6 +2130,16 @@ linkPatchTargetsAre :: [Word64] -> Either Ldr.LoadError Linker.LinkPlan -> Bool
 linkPatchTargetsAre expected result = case result of
   Left _ -> False
   Right plan -> map Linker.patchTarget (Linker.linkPatches plan) == expected
+
+linkPatchesAre :: [Linker.RelocationPatch] -> Either Ldr.LoadError Linker.LinkPlan -> Bool
+linkPatchesAre expected result = case result of
+  Left _ -> False
+  Right plan -> Linker.linkPatches plan == expected
+
+linkPatchIs :: Linker.RelocationPatch -> Either Ldr.LoadError Linker.LinkPlan -> Bool
+linkPatchIs expected result = case result of
+  Left _ -> False
+  Right plan -> expected `elem` Linker.linkPatches plan
 
 relativeRelocation :: Word64 -> Word64 -> Ldr.Relocation
 relativeRelocation off add = Ldr.RelativeBinding (Ldr.RelativeRelocation off add)

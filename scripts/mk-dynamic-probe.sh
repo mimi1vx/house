@@ -22,6 +22,7 @@ EXPECTED_GCC='gcc (Debian 14.2.0-19) 14.2.0'
 EXPECTED_AR='GNU ar (GNU Binutils for Debian) 2.44'
 EXPECTED_NM='GNU nm (GNU Binutils for Debian) 2.44'
 SONAME=libc-house.so.0
+MID_SONAME=libmid-house.so.0
 
 actual_rustc_commit=$(rustc -Vv | sed -n 's/^commit-hash: //p')
 [ "$actual_rustc_commit" = "$EXPECTED_RUSTC_COMMIT" ] || {
@@ -113,6 +114,43 @@ ld.lld -pie --gc-sections --fatal-warnings \
 	--no-undefined --build-id=none \
 	-L"$OUT" -o "$OUT/hello-dyn" "$OUT/hello.o" "-l:$SONAME"
 
+cat >"$OUT/mid-exports.map" <<'EOF'
+{
+  global:
+    house_pad;
+    house_len;
+  local:
+    *;
+};
+EOF
+gcc -c build-probe/hello-pad.s -o "$OUT/hello-pad.o"
+nm "$OUT/hello-pad.o" | awk '$1 == "U" && $2 == "strlen" {found = 1} END {exit !found}' || {
+	echo "mk-dynamic-probe: hello-pad.s does not import strlen" >&2
+	exit 1
+}
+ld.lld -shared --gc-sections --fatal-warnings \
+	--soname="$MID_SONAME" --hash-style=sysv \
+	-z now -z relro -z noseparate-code \
+	--no-undefined --build-id=none --no-as-needed \
+	--version-script="$OUT/mid-exports.map" \
+	-L"$OUT" -l:"$SONAME" -o "$OUT/$MID_SONAME" "$OUT/hello-pad.o"
+
+gcc -c build-probe/hello-dyn-deep.s -o "$OUT/hello-deep.o"
+nm "$OUT/hello-deep.o" | awk '$1 == "U" && $2 == "house_pad" {found = 1} END {exit !found}' || {
+	echo "mk-dynamic-probe: hello-dyn-deep.s does not import house_pad" >&2
+	exit 1
+}
+nm "$OUT/hello-deep.o" | awk '$1 == "U" && $2 == "house_len" {found = 1} END {exit !found}' || {
+	echo "mk-dynamic-probe: hello-dyn-deep.s does not import house_len" >&2
+	exit 1
+}
+ld.lld -pie --gc-sections --fatal-warnings \
+	--dynamic-linker=/lib/ld-house.so.0 --hash-style=sysv \
+	-z now -z relro -z noseparate-code \
+	--no-undefined --build-id=none \
+	-L"$OUT" -o "$OUT/hello-dyn-deep" "$OUT/hello-deep.o" \
+	"-l:$MID_SONAME" "-l:$SONAME"
+
 ld.lld -shared --gc-sections --fatal-warnings \
 	--soname=libc-missing.so.0 --hash-style=sysv \
 	-z now -z relro -z noseparate-code \
@@ -133,6 +171,8 @@ ld.lld --gc-sections --fatal-warnings --build-id=none \
 
 printf '%s  %s\n' "$(sha256sum "$OUT/$SONAME" | cut -d' ' -f1)" "$SONAME"
 printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn" | cut -d' ' -f1)" "hello-dyn"
+printf '%s  %s\n' "$(sha256sum "$OUT/$MID_SONAME" | cut -d' ' -f1)" "$MID_SONAME"
+printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn-deep" | cut -d' ' -f1)" "hello-dyn-deep"
 printf '%s  %s\n' "$(sha256sum "$OUT/libc-missing.so.0" | cut -d' ' -f1)" "libc-missing.so.0"
 printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn-missing" | cut -d' ' -f1)" "hello-dyn-missing"
 printf '%s  %s\n' "$(sha256sum "$OUT/exec-dyn" | cut -d' ' -f1)" "exec-dyn"

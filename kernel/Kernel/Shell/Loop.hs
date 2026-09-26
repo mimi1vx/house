@@ -185,7 +185,8 @@ loop = do
       ["palloc"] -> handlePalloc
       ["fdtest"] -> handleFdtest
       ["forktest"] -> handleForktest
-      ["loaderrefs"] -> handleLoaderRefs
+      ["loaderrefs"] -> handleLoaderRefs "/bin/hello-dyn"
+      ["loaderrefs", p] -> handleLoaderRefs p
       ["run"] -> withCString "usage: run <path> [args...]\n" c_uart_puts
       ("run" : p : args) -> handleRun p args
       ["spawn"] -> withCString "usage: spawn <path> [args...]\n" c_uart_puts
@@ -587,20 +588,20 @@ loop = do
         Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
     defaultEnv = ["HOUSE=1", "PATH=/bin"]
-    handleLoaderRefs = do
+    handleLoaderRefs imagePath = do
       r <- runH $ do
         baseline <- U.cowLiveCount
-        mBytes <- FS.vfsRead FS.defaultNamespace "/bin/hello-dyn"
+        mBytes <- FS.vfsRead FS.defaultNamespace imagePath
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> case ULdr.loadElf bytes of
             Left le -> return (Left (toExecError le))
             Right elf -> do
-              first <- U.runElf elf ["/bin/hello-dyn"] defaultEnv
+              first <- U.runElf elf [imagePath] defaultEnv
               case first of
                 Left le -> return (Left (toExecError le))
                 Right pidA -> do
-                  second <- U.runElf elf ["/bin/hello-dyn"] defaultEnv
+                  second <- U.runElf elf [imagePath] defaultEnv
                   case second of
                     Left le -> do
                       _ <- U.killPid pidA
@@ -818,7 +819,7 @@ loop = do
         , "       quantum <ticks> -- preempt quantum in timer ticks (0..1000000, 0 means 1; default 10)"
         , "       fdtest -- per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)"
         , "       forktest -- EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)"
-        , "       loaderrefs -- launch two dynamic images, verify finalized DSO page sharing, then drain refs"
+        , "       loaderrefs [path] -- launch two dynamic images (default /bin/hello-dyn), verify finalized DSO page sharing, then drain refs"
         ]
     seqFib :: Int -> Int
     seqFib n

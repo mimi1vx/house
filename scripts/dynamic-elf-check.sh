@@ -8,10 +8,15 @@ set -eu
 cd "$(dirname "$0")/.."
 WORK=build/dynamic-probe/check
 SONAME=libc-house.so.0
+MID_SONAME=libmid-house.so.0
 MISSING_SONAME=libc-missing.so.0
+DEEP_MAIN=hello-dyn-deep
 INTERP=/lib/ld-house.so.0
+ARTIFACTS="$SONAME $MID_SONAME $MISSING_SONAME hello-dyn $DEEP_MAIN hello-dyn-missing exec-dyn"
 EXPECTED_SONAME_SHA=ebcc38e958debe4eb18caec30ca5302c3a649aa25741bbb137d0dcbec86f8cbe
+EXPECTED_MID_SONAME_SHA=60f5ec18e338e678b75bce377f8f9b51cfe2ff7214ce3b21a7474fa8df8b6a9a
 EXPECTED_HELLO_SHA=26e1f4265882441b717bfc5a963295c65ff962cf9fdef20d21b6b325e8503fe7
+EXPECTED_DEEP_MAIN_SHA=62c71320f772008535f616955dee29ce01c66c909625d70bc3f877a95f7e0960
 EXPECTED_MISSING_SONAME_SHA=abc7acfa562c5b2dfbda2ea943da70ad29a15590c33fedb0b6f400bf938b8b55
 EXPECTED_MISSING_HELLO_SHA=50725e3a1cfe6344666ada25b5cd7d0c0502deab329f21fb89dece4834f1a943
 EXPECTED_EXEC_SHA=f251fec290c2899d03d57be6e687a230566a1de2d87eda3d736d1d224223edf3
@@ -30,7 +35,7 @@ sh scripts/mk-dynamic-probe.sh build-b
 A=build/dynamic-probe/build-a
 B=build/dynamic-probe/build-b
 
-for name in "$SONAME" "$MISSING_SONAME" hello-dyn hello-dyn-missing exec-dyn; do
+for name in $ARTIFACTS; do
 	hash_a=$(sha256sum "$A/$name" | cut -d' ' -f1)
 	hash_b=$(sha256sum "$B/$name" | cut -d' ' -f1)
 	if [ "$hash_a" != "$hash_b" ]; then
@@ -39,8 +44,10 @@ for name in "$SONAME" "$MISSING_SONAME" hello-dyn hello-dyn-missing exec-dyn; do
 	fi
 	case "$name" in
 	"$SONAME") expected_sha=$EXPECTED_SONAME_SHA ;;
+	"$MID_SONAME") expected_sha=$EXPECTED_MID_SONAME_SHA ;;
 	"$MISSING_SONAME") expected_sha=$EXPECTED_MISSING_SONAME_SHA ;;
 	hello-dyn) expected_sha=$EXPECTED_HELLO_SHA ;;
+	"$DEEP_MAIN") expected_sha=$EXPECTED_DEEP_MAIN_SHA ;;
 	hello-dyn-missing) expected_sha=$EXPECTED_MISSING_HELLO_SHA ;;
 	exec-dyn) expected_sha=$EXPECTED_EXEC_SHA ;;
 	*) expected_sha= ;;
@@ -67,18 +74,29 @@ strncmp
 EOF
 LC_ALL=C sort -o "$WORK/expected-exports" "$WORK/expected-exports"
 
+printf '%s\n' house_pad house_len >"$WORK/expected-exports-mid"
+LC_ALL=C sort -o "$WORK/expected-exports-mid" "$WORK/expected-exports-mid"
+: >"$WORK/expected-undefined-none"
+printf '%s\n' strlen >"$WORK/expected-undefined-mid"
+
+# $2 and $3 name the files holding that artifact's exact defined and undefined
+# dynamic symbol sets. An artifact with no entry here falls through to the libc
+# sets, so an unlisted export or import still fails.
 audit_symbols() {
 	artifact=$1
-	undefined=$(nm -D --undefined-only "$artifact" || true)
-	if [ -n "$undefined" ]; then
-		echo "dynamic-elf-check: unexpected undefined symbols in $artifact" >&2
-		echo "$undefined" >&2
+	expected=${2:-$WORK/expected-exports}
+	expected_undefined=${3:-$WORK/expected-undefined-none}
+	nm -D --undefined-only --format=posix "$artifact" 2>/dev/null |
+		awk 'NF {print $1}' | LC_ALL=C sort >"$WORK/actual-undefined"
+	if ! cmp -s "$expected_undefined" "$WORK/actual-undefined"; then
+		echo "dynamic-elf-check: undefined-symbol drift in $artifact" >&2
+		diff -u "$expected_undefined" "$WORK/actual-undefined" >&2 || true
 		return 1
 	fi
 	nm -D --defined-only --format=posix "$artifact" | awk '{print $1}' | LC_ALL=C sort >"$WORK/actual-exports"
-	if ! cmp -s "$WORK/expected-exports" "$WORK/actual-exports"; then
+	if ! cmp -s "$expected" "$WORK/actual-exports"; then
 		echo "dynamic-elf-check: export-set drift in $artifact" >&2
-		diff -u "$WORK/expected-exports" "$WORK/actual-exports" >&2 || true
+		diff -u "$expected" "$WORK/actual-exports" >&2 || true
 		return 1
 	fi
 }
@@ -152,24 +170,33 @@ check_interp() {
 	}
 }
 
+check_needed() {
+	artifact=$1
+	expected=$2
+	actual=$(readelf -dW "$artifact" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')
+	[ "$actual" = "$expected" ] || {
+		echo "dynamic-elf-check: NEEDED allowlist failed: '$actual' != '$expected'" >&2
+		exit 1
+	}
+}
+
 check_soname() {
 	artifact=$1
 	expected=$2
+	expected_exports=$3
+	expected_undefined=$4
+	expected_needed=$5
 	soname=$(readelf -dW "$artifact" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
 	[ "$soname" = "$expected" ] || {
 		echo "dynamic-elf-check: SONAME allowlist failed: $soname" >&2
 		exit 1
 	}
-	needed_count=$(readelf -dW "$artifact" | grep -c '(NEEDED)' || true)
-	[ "$needed_count" -eq 0 ] || {
-		echo "dynamic-elf-check: shared library has NEEDED entries" >&2
-		exit 1
-	}
+	check_needed "$artifact" "$expected_needed"
 	if readelf -dW "$artifact" | grep -Eq 'libc\.so|libm\.so|libgcc|ld-linux|ld-house'; then
 		echo "dynamic-elf-check: shared library has a forbidden dependency" >&2
 		exit 1
 	fi
-	audit_symbols "$artifact"
+	audit_symbols "$artifact" "$expected_exports" "$expected_undefined"
 	audit_common "$artifact"
 }
 
@@ -177,11 +204,7 @@ check_hello() {
 	artifact=$1
 	expected_soname=$2
 	check_interp "$artifact"
-	needed=$(readelf -dW "$artifact" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
-	[ "$needed" = "$expected_soname" ] || {
-		echo "dynamic-elf-check: NEEDED allowlist failed: $needed" >&2
-		exit 1
-	}
+	check_needed "$artifact" "$expected_soname "
 	needed_count=$(readelf -dW "$artifact" | grep -c '(NEEDED)' || true)
 	[ "$needed_count" -eq 1 ] || {
 		echo "dynamic-elf-check: $artifact NEEDED count is $needed_count" >&2
@@ -198,13 +221,32 @@ check_hello() {
 	audit_common "$artifact"
 }
 
-check_soname "$A/$SONAME" "$SONAME"
-check_soname "$A/$MISSING_SONAME" "$MISSING_SONAME"
+# Two NEEDED entries in link order; check_hello's single-NEEDED shape does not apply.
+check_deep_hello() {
+	artifact=$1
+	shift
+	check_interp "$artifact"
+	check_needed "$artifact" "$* "
+	if readelf -dW "$artifact" | grep -q '(SONAME)'; then
+		echo "dynamic-elf-check: executable unexpectedly has SONAME" >&2
+		exit 1
+	fi
+	readelf -rW "$artifact" | grep -q 'R_AARCH64_JUMP_SLOT.*house_pad' || {
+		echo "dynamic-elf-check: $artifact lacks a real house_pad JUMP_SLOT" >&2
+		exit 1
+	}
+	audit_common "$artifact"
+}
+
+check_soname "$A/$SONAME" "$SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
+check_soname "$A/$MID_SONAME" "$MID_SONAME" "$WORK/expected-exports-mid" "$WORK/expected-undefined-mid" "$SONAME "
+check_soname "$A/$MISSING_SONAME" "$MISSING_SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
 check_hello "$A/hello-dyn" "$SONAME"
 check_hello "$A/hello-dyn-missing" "$MISSING_SONAME"
+check_deep_hello "$A/$DEEP_MAIN" "$MID_SONAME" "$SONAME"
 audit_exec "$A/exec-dyn"
 
-for name in "$SONAME" "$MISSING_SONAME" hello-dyn hello-dyn-missing exec-dyn; do
+for name in $ARTIFACTS; do
 	loader_name=$(printf '%s' "$name" | tr '.-' '__')
 	"$LOADER_CHECK" "$A/$name" >"$WORK/$loader_name.loader"
 	python3 build-probe/repack.py "$A/$name" "$WORK/$loader_name.repacked" >/dev/null
@@ -240,6 +282,55 @@ if "$LOADER_CHECK" link "$A/hello-dyn-missing" >"$WORK/missing-soname.link.out" 
 	exit 1
 fi
 grep -q 'DependencyMissing: libc-missing.so.0' "$WORK/missing-soname.link.err"
+
+# Positive three-object graph: main + libmid-house.so.0 + libc-house.so.0.
+"$LOADER_CHECK" link "$A/$DEEP_MAIN" "$A/$MID_SONAME" "$A/$SONAME" >"$WORK/link-deep-a"
+"$LOADER_CHECK" link "$B/$DEEP_MAIN" "$B/$MID_SONAME" "$B/$SONAME" >"$WORK/link-deep-b"
+cmp "$WORK/link-deep-a" "$WORK/link-deep-b"
+object_count=$(grep -c '^object=' "$WORK/link-deep-a" || true)
+[ "$object_count" -eq 3 ] || {
+	echo "dynamic-elf-check: deep link plan placed $object_count objects, expected 3" >&2
+	exit 1
+}
+bases=$(sed -n 's/^object=[^ ]* base=\([^ ]*\).*/\1/p' "$WORK/link-deep-a" | sort -u | tr '\n' ' ')
+base_count=$(printf '%s' "$bases" | wc -w | tr -d ' ')
+[ "$base_count" -eq 3 ] || {
+	echo "dynamic-elf-check: deep link plan reuses a load base: $bases" >&2
+	exit 1
+}
+grep -q '^relocation object=libmid-house.so.0 provider=libc-house.so.0 symbol=strlen ' "$WORK/link-deep-a" || {
+	echo "dynamic-elf-check: deep link plan has no sibling-sourced relocation for libmid-house.so.0" >&2
+	cat "$WORK/link-deep-a" >&2
+	exit 1
+}
+grep -q '^relocation object=main provider=libmid-house.so.0 symbol=house_pad ' "$WORK/link-deep-a" || {
+	echo "dynamic-elf-check: deep link plan does not resolve the main symbol from the deepest DSO" >&2
+	cat "$WORK/link-deep-a" >&2
+	exit 1
+}
+grep -q '^relocation object=main provider=libmid-house.so.0 symbol=house_len ' "$WORK/link-deep-a" || {
+	echo "dynamic-elf-check: deep link plan does not resolve the DSO-internal strlen call target" >&2
+	cat "$WORK/link-deep-a" >&2
+	exit 1
+}
+cat >"$WORK/expected-link-deep" <<'EOF'
+object=main base=0x1000000 entry=0x1010328
+object=libmid-house.so.0 base=0x1030000 entry=0x1030000
+object=libc-house.so.0 base=0x1060000 entry=0x1060000
+relocation object=main provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1020528 resolved=0x10704b4
+relocation object=main provider=libmid-house.so.0 symbol=house_pad type=R_AARCH64_JUMP_SLOT target=0x1020530 resolved=0x10402a8
+relocation object=main provider=libmid-house.so.0 symbol=house_len type=R_AARCH64_JUMP_SLOT target=0x1020538 resolved=0x10402c4
+relocation object=libmid-house.so.0 provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1050408 resolved=0x10704b4
+EOF
+cmp "$WORK/expected-link-deep" "$WORK/link-deep-a"
+
+# Dropping either dependency must fail the plan at a named error, not silently
+# plan a smaller graph.
+if "$LOADER_CHECK" link "$A/$DEEP_MAIN" "$A/$MID_SONAME" >"$WORK/deep-incomplete.link.out" 2>"$WORK/deep-incomplete.link.err"; then
+	echo "dynamic-elf-check: deep link without libc-house.so.0 was not rejected" >&2
+	exit 1
+fi
+grep -q "DependencyMissing: $SONAME" "$WORK/deep-incomplete.link.err"
 
 cat >"$WORK/leaf.s" <<'EOF'
 .arch armv8-a
@@ -309,41 +400,29 @@ if "$LOADER_CHECK" link "$WORK/oversized" "$A/$SONAME" >"$WORK/oversized.link.ou
 fi
 grep -q 'file exceeds maxElfBytes' "$WORK/oversized.link.err"
 
-for path in \
-	initramfs-staging/bin/hello-dyn \
-	initramfs-staging/bin/hello-dyn-missing \
-	initramfs-staging/bin/exec-dyn \
-	initramfs-staging/lib/libc-house.so.0; do
+STAGED="initramfs-staging/bin/exec-dyn initramfs-staging/bin/hello-dyn \
+initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/hello-dyn-missing \
+initramfs-staging/lib/libc-house.so.0 initramfs-staging/lib/libmid-house.so.0"
+for path in $STAGED; do
 	[ -f "$path" ] || {
 		echo "dynamic-elf-check: missing staged dynamic file $path" >&2
 		exit 1
 	}
 done
 find initramfs-staging/bin initramfs-staging/lib -type f \( \
-	-name hello-dyn -o -name hello-dyn-missing -o -name exec-dyn -o -name libc-house.so.0 \
+	-name hello-dyn -o -name hello-dyn-missing -o -name hello-dyn-deep -o -name exec-dyn \
+	-o -name libc-house.so.0 -o -name libmid-house.so.0 \
 	\) -print | LC_ALL=C sort >"$WORK/staged.dynamic"
-printf '%s\n' \
-	initramfs-staging/bin/exec-dyn \
-	initramfs-staging/bin/hello-dyn \
-	initramfs-staging/bin/hello-dyn-missing \
-	initramfs-staging/lib/libc-house.so.0 >"$WORK/expected.staged.dynamic"
+printf '%s\n' $STAGED >"$WORK/expected.staged.dynamic"
 cmp "$WORK/expected.staged.dynamic" "$WORK/staged.dynamic"
-for path in \
-	initramfs-staging/bin/exec-dyn \
-	initramfs-staging/bin/hello-dyn \
-	initramfs-staging/bin/hello-dyn-missing \
-	initramfs-staging/lib/libc-house.so.0; do
-	sha256sum "$path"
-done >"$WORK/staged.manifest"
+sha256sum $STAGED >"$WORK/staged.manifest"
 cmp scripts/dynamic-userspace.sha256 "$WORK/staged.manifest"
 if find initramfs-staging -type f \( -name 'ld-house.so*' -o -name 'libc-missing.so*' \) -print -quit | grep -q .; then
 	echo "dynamic-elf-check: forbidden negative/interpreter artifact is staged" >&2
 	exit 1
 fi
 
-printf '%s  %s\n' "$(sha256sum "$A/$SONAME" | cut -d' ' -f1)" "$SONAME"
-printf '%s  %s\n' "$(sha256sum "$A/$MISSING_SONAME" | cut -d' ' -f1)" "$MISSING_SONAME"
-printf '%s  %s\n' "$(sha256sum "$A/hello-dyn" | cut -d' ' -f1)" "hello-dyn"
-printf '%s  %s\n' "$(sha256sum "$A/hello-dyn-missing" | cut -d' ' -f1)" "hello-dyn-missing"
-printf '%s  %s\n' "$(sha256sum "$A/exec-dyn" | cut -d' ' -f1)" "exec-dyn"
-echo "dynamic-elf-check: reproducible artifacts, Loader/repacker parity, negative dependency, and exact staging agree"
+for name in $ARTIFACTS; do
+	printf '%s  %s\n' "$(sha256sum "$A/$name" | cut -d' ' -f1)" "$name"
+done
+echo "dynamic-elf-check: reproducible artifacts, Loader/repacker parity, transitive link plan, negative dependency, and exact staging agree"
