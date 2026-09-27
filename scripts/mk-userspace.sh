@@ -103,7 +103,7 @@ done
 build_one userspace/init.s userspace/userspace.ld initramfs-staging/sbin/init
 
 # Existing probes (reference sources until userspace/ supersedes them).
-for prog in argenv brk exec fork ipc_pp spin yield; do
+for prog in argenv brk exec faultrace fork ipc_pp spin yield; do
 	build_one "build-probe/$prog.s" "build-probe/$prog.ld" "initramfs-staging/bin/$prog"
 done
 

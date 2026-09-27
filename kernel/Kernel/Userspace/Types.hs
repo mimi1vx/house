@@ -10,10 +10,12 @@ Lock order: ... -> netSem -> userSem -> epSem . Never hold userSem across takeMV
 module Kernel.Userspace.Types (
   Pid (..),
   SharedObject (..),
+  StopAck,
   Process (..),
   pidNext,
   procMap,
   procExitMap,
+  procStopMap,
   userSem,
   processExitVar,
 )
@@ -31,6 +33,13 @@ import H.VirtualMemory (PageMap, VAddr)
 
 newtype Pid = Pid Int
   deriving (Eq, Ord, Show)
+
+{- | Per-pid acknowledgement that the process's EL0 session has ended. 'killPid'
+frees a root only after the target's park loop has seen the removal and
+returned, so pages that are still executing from are never handed back to the
+allocator.
+-}
+type StopAck = MVar ()
 
 {- | Finalized read-only pages of one dependency object. The metadata is
 retained by a live process so a later mapping can compare and share the
@@ -67,6 +76,10 @@ procExitMap = unsafePerformH (newRef Map.empty)
 {-# NOINLINE userSem #-}
 userSem :: QSem
 userSem = unsafePerformH (newQSem 1)
+
+{-# NOINLINE procStopMap #-}
+procStopMap :: Ref (Map Pid StopAck)
+procStopMap = unsafePerformH (newRef Map.empty)
 
 {-# NOINLINE processExitVar #-}
 processExitVar :: MVar Int

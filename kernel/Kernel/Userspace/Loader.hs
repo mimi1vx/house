@@ -41,6 +41,7 @@ module Kernel.Userspace.Loader (
   ldHousePath,
   stackPageStart,
   loadElf,
+  constructorInLoads,
   validateStaticRunElf,
   loadErrorToString,
   skipDynTag,
@@ -61,6 +62,8 @@ module Kernel.Userspace.Loader (
   maxDynSymbols,
   maxSymbolNameLen,
   maxInitArrayEntries,
+  verNdxGlobal,
+  verNdxLocal,
 )
 where
 
@@ -256,6 +259,13 @@ the object that declares it, so an index is never comparable across DSOs.
 verNdxGlobal :: Word16
 verNdxGlobal = 1
 
+{- | @VER_NDX_LOCAL@: a hidden definition, bindable only inside the object that
+defines it. It is an index like any other, so it has to be named rather than
+left to read as \"absent\".
+-}
+verNdxLocal :: Word16
+verNdxLocal = 0
+
 data LoadError
   = BadMagic
   | BadArch
@@ -312,6 +322,10 @@ data DynamicSymbols = DynamicSymbols {
   dynamicSymbolsOffset :: Int
   , dynamicSymbolsEntSize :: Int
   , dynamicSymbolEntries :: [DynamicSymbol]
+  , -- Built once in 'parseDynamicSymbols': a relocation names its symbol by
+    -- index, and walking the list per relocation is O(symbols x relocations)
+    -- over input the caps otherwise admit.
+    dynamicSymbolIndex :: Map Word32 DynamicSymbol
   }
   deriving (Eq, Show)
 
@@ -982,11 +996,20 @@ object's own PT_LOADs, so the runtime never calls an unbounded address.
 -}
 validateConstructorFn :: String -> [Segment] -> Word64 -> Either LoadError Word64
 validateConstructorFn label loads va
-  | any inside loads = Right va
+  | constructorInLoads 0 loads va = Right va
   | otherwise = Left (BadDyn (label ++ " outside LOAD"))
+
+{- | Whether @va@, relocated by @base@, names code inside one of the object's
+own PT_LOADs. One bound for both the @DT_INIT@ / @DT_FINI@ values the parser
+sees and the @DT_INIT_ARRAY@ / @DT_FINI_ARRAY@ targets the runtime reads out of
+the mapped image: the array's contents are only written by relocation, so the
+check on them cannot live at parse time.
+-}
+constructorInLoads :: Word64 -> [Segment] -> Word64 -> Bool
+constructorInLoads base loads va = any inside loads
   where
     inside segment =
-      let start = segVaddr segment
+      let start = base + segVaddr segment
           end = start + fromIntegral (segMemSz segment)
        in va >= start && va < end
 
@@ -1075,11 +1098,14 @@ parseDynamicSymbols bytes symVa count syment versions strSlice strSz loads = do
   let total = count * 24
   (off, tableSize) <- vaTableOff loads symVa total
   if tableSize /= total then Left (BadDyn "symtab bounds") else Right ()
-  parsed <- mapM (parseOne off) [0 .. count - 1]
+  -- The VERSYM table is index-aligned with the symbol table, so it is walked
+  -- alongside it: indexing a list once per symbol makes the parse quadratic in
+  -- the symbol count, which the cap admits.
+  parsed <- mapM (parseOne off) (zip [0 .. count - 1] (versions ++ repeat verNdxGlobal))
   let entries = catMaybes parsed
-  Right (DynamicSymbols off syment entries)
+  Right (DynamicSymbols off syment entries (Map.fromList (zip [0 ..] entries)))
   where
-    parseOne tableOff i = do
+    parseOne tableOff (i, version) = do
       let base = tableOff + i * 24
       nameOff <- getU32 bytes base
       info <- getU8 bytes (base + 4)
@@ -1089,10 +1115,7 @@ parseDynamicSymbols bytes symVa count syment versions strSlice strSz loads = do
       symbolSize <- getU64 bytes (base + 16)
       name <- resolveMaybeSymbolName strSlice strSz nameOff
       if (info .&. 0x0F) == sttTls then Left (BadDyn "TLS symbol unsupported") else Right ()
-      Right (Just (DynamicSymbol name info other shndx value symbolSize (versionAt i)))
-    versionAt i = case drop i versions of
-      version : _ -> version
-      [] -> verNdxGlobal
+      Right (Just (DynamicSymbol name info other shndx value symbolSize version))
 
 resolveMaybeSymbolName :: ByteString -> Int -> Word32 -> Either LoadError String
 resolveMaybeSymbolName strSlice strSz nameOff
@@ -1195,9 +1218,9 @@ parseRelocation typ sym rOff add loadsRequired symbols bindNow
       if not (relocTargetIn loadsRequired rOff True) then Left (BadDyn "rela target not writable") else Right ()
       symbol <- case symbols of
         Nothing -> Left (BadDyn "eager relocation without SYMTAB")
-        Just table -> case drop (fromIntegral sym) (dynamicSymbolEntries table) of
-          [] -> Left (BadDyn "eager relocation symbol index")
-          found : _ -> Right found
+        Just table -> case Map.lookup sym (dynamicSymbolIndex table) of
+          Nothing -> Left (BadDyn "eager relocation symbol index")
+          Just found -> Right found
       if null (dynamicSymbolName symbol)
         then Left (BadDyn "eager relocation symbol name")
         else Right ()

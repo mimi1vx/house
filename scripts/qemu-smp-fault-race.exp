@@ -1,0 +1,80 @@
+#!/usr/bin/expect -f
+# SMP demand-pager race harness: two EL0 processes that both grow their break
+# and store into the new page, so two cores enter the kernel's fault walk
+# concurrently. Asserts both reaped exit 0 and that the boot log never shows a
+# fatal sync exception or a lost process.
+# Usage: expect scripts/qemu-smp-fault-race.exp <kernel.bin> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set timeout_arg [lindex $argv 1]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 240 } else { set timeout 180 }
+} else {
+    set timeout $timeout_arg
+}
+
+proc fail_stage {stage} {
+    puts "\nFAIL: $stage"
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+
+proc expect_stage {pattern stage} {
+    expect {
+        -re $pattern {}
+        timeout {fail_stage "$stage timeout"}
+        eof {fail_stage "$stage eof"}
+    }
+}
+
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
+expect_stage "Welcome to the House shell" "welcome"
+expect_stage "> " "prompt"
+
+# Two live demand-pager walkers at once. A walk with no lock lets both allocate
+# and link the same missing level, which shows up as a lost process or a fatal
+# exception rather than as a wrong value.
+proc spawn_racer {stage} {
+    send "spawn /bin/faultrace\r"
+    expect {
+        -re {spawned pid ([0-9]+)} { set pid $expect_out(1,string) }
+        timeout {fail_stage "$stage timeout"}
+        eof {fail_stage "$stage eof"}
+    }
+    expect_stage "> " "prompt after $stage"
+    return $pid
+}
+set p1 [spawn_racer spawn1]
+set p2 [spawn_racer spawn2]
+if {$p1 == $p2} { fail_stage "pids not distinct ($p1)" }
+puts "\nPASS: two fault racers live ($p1, $p2)"
+
+# The shell must stay answerable with both walkers in flight, or a held lock
+# would show up here as a hang rather than as a lost process.
+send "jobs\r"
+expect_stage "jobs:" "jobs with two racers"
+expect_stage "> " "prompt after jobs"
+
+send "wait\r"
+expect_stage "reaped pid $p1 exit 0" "reap $p1"
+expect_stage "reaped pid $p2 exit 0" "reap $p2"
+expect_stage "> " "prompt after wait"
+puts "\nPASS: both fault racers reaped exit 0"
+
+send "shutdown -h\r"
+expect {
+    -re {fatal sync exception} { fail_stage "fatal sync exception" }
+    -re {ok exit 0} {}
+    timeout {fail_stage "shutdown timeout"}
+    eof {}
+}
+puts "\nPASS: smp demand-pager fault race ok"
+catch {exec kill -9 [exp_pid]}
+exit 0

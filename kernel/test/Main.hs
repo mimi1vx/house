@@ -40,6 +40,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isNothing)
 import Data.Set qualified as Set
 import Data.Word (Word16, Word32, Word64, Word8)
+import Foreign.Ptr (plusPtr)
+import H.AdHocMem (H, allocaArray, bytesEqual, peek, poke, pokeBytes)
 import H.FileSystem qualified as FS
 import H.Monad qualified as HM
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
@@ -1106,17 +1108,59 @@ main = do
               && Tramp.descriptorModeOffset 2 == 32
           )
       , check
-          "trampoline code is 23 words and fits its region"
-          (length Tramp.trampolineCode == 23 && Tramp.trampolineCodeOffset + 23 * 4 < Tramp.trampolineDescriptorOffset)
+          "trampoline code is 24 words and fits its region"
+          (length Tramp.trampolineCode == 24 && Tramp.trampolineCodeOffset + 24 * 4 < Tramp.trampolineDescriptorOffset)
       , check
           "trampoline branches land on the instruction the comment names"
-          (branchTargets Tramp.trampolineCode == [(5, 12), (11, 4), (17, 20), (22, 22)])
+          (branchTargets Tramp.trampolineCode == [(5, 12), (11, 4), (17, 21), (23, 23)])
+      , check
+          "trampoline scratch word clears the descriptor and stays on the page"
+          ( Tramp.trampolineScratchOffset
+              >= Tramp.trampolineDescriptorOffset + (1 + Tramp.maxTrampolineCalls + 2) * 8
+              && Tramp.trampolineScratchOffset + 8 <= 4096
+          )
+      , check
+          "no trampoline register the loop needs is read across a blr"
+          (null (callerSavedReadsAcrossCall Tramp.trampolineCode))
       , check
           "trampoline page is below the reserved stack page"
           (Tramp.trampolinePage < Ldr.stackPageStart && Tramp.trampolinePage `mod` 4096 == 0)
       , check
           "phdr and segment diagnostics differ"
           (Ldr.loadErrorToString Ldr.TooManyPhdrs /= Ldr.loadErrorToString Ldr.TooManySegments)
+      , checkIO
+          "bulk byte copy moves exactly the requested window"
+          ( HM.runH
+              ( allocaArray 8 $ \dst -> do
+                  mapM_ (\i -> poke (dst `plusPtr` i) (0xAA :: Word8)) [0 .. 7]
+                  pokeBytes dst (BS.pack [1 .. 8]) 2 4
+                  got <- mapM (\i -> peek (dst `plusPtr` i) :: H Word8) [0 .. 7]
+                  return (got == [3, 4, 5, 6, 0xAA, 0xAA, 0xAA, 0xAA])
+              )
+          )
+      , checkIO
+          "bulk byte compare agrees with the page contents"
+          ( HM.runH
+              ( allocaArray 4 $ \left ->
+                  allocaArray 4 $ \right -> do
+                    mapM_ (\i -> poke (left `plusPtr` i) (fromIntegral i :: Word8)) [0 .. 3]
+                    mapM_ (\i -> poke (right `plusPtr` i) (fromIntegral i :: Word8)) [0 .. 3]
+                    same <- bytesEqual left right 4
+                    poke (right `plusPtr` 2) (9 :: Word8)
+                    differ <- bytesEqual left right 4
+                    return (same && not differ)
+              )
+          )
+      , check
+          "constructor target bound is the object's own PT_LOADs"
+          ( Ldr.constructorInLoads 0 cSegs 0x1000
+              && Ldr.constructorInLoads 0 cSegs 0x1FFC
+              && Ldr.constructorInLoads 0x200000 cSegs 0x201000
+              && not (Ldr.constructorInLoads 0 cSegs 0x0)
+              && not (Ldr.constructorInLoads 0 cSegs 0x3000)
+              && not (Ldr.constructorInLoads 0x200000 cSegs 0x1000)
+              && not (Ldr.constructorInLoads 0x200000 cSegs 0x2000)
+          )
       , check "elf jump-slot accepted" (isDynRight elfJumpSlot True)
       , check "elf tls reject" (loadFixture elfTls == Left Ldr.TlsUnsupported)
       , assertLoadLeft "elf relro outside LOAD" elfRelroOutside (Ldr.BadDyn "relro outside LOAD")
@@ -1630,6 +1674,76 @@ branchTarget i w
   | w .&. 0xFC000000 == 0x14000000 = Just (i + signExtend 26 (fromIntegral (w .&. 0x03FFFFFF)))
   | otherwise = Nothing
 
+{- | Indices of reads that take a register the stub last wrote /before/ a @blr@
+into caller-saved territory. AAPCS64 makes @x0@-@x18@ and @x30@ caller-saved,
+so a value the loop still needs across a call has to be recomputed, live in
+@x19@-@x28@, or come back from memory. The word list alone cannot show this:
+every instruction in a clobbering stub still decodes as itself.
+
+Nothing to report is the pass condition, so a stub that gets this wrong is
+red rather than silently green.
+-}
+callerSavedReadsAcrossCall :: [Word32] -> [Int]
+callerSavedReadsAcrossCall code = go 0 Map.empty (-1) []
+  where
+    go i defined lastCall found
+      | i >= length code = found
+      | otherwise = case regEffect (code !! i) of
+          Nothing -> error ("trampoline decoder does not cover word " ++ show i)
+          Just (readRegs, written, isCall) ->
+            let stale = [i | r <- readRegs, callerSaved r, writtenBefore r defined lastCall]
+             in go (i + 1) (record written i defined) (if isCall then i else lastCall) (found ++ stale)
+    writtenBefore r defined lastCall = maybe False (< lastCall) (Map.lookup r defined)
+    record Nothing _ d = d
+    record (Just r) i d = Map.insert r i d
+
+callerSaved :: Int -> Bool
+callerSaved r = r <= 18 || r == 30
+
+{- | Register 31 is XZR in every form the stub uses: it reads nothing and
+writes nothing, so it never carries a value across a call.
+-}
+zp :: Int -> [Int]
+zp 31 = []
+zp r = [r]
+
+{- | The registers one instruction reads and the one it writes, plus whether
+it is a call. 'Nothing' for an encoding outside the stub's instruction set, so
+a new form has to be taught to the decoder before it can pass.
+-}
+regEffect :: Word32 -> Maybe ([Int], Maybe Int, Bool)
+regEffect w
+  -- adrp Xd
+  | w .&. 0x9F000000 == 0x90000000 = Just ([], Just (reg 0), False)
+  -- add Xd, Xn, #imm12
+  | w .&. 0xFF800000 == 0x91000000 = Just (zp (reg 5), Just (reg 0), False)
+  -- add Xd, Xn, Xm, lsl #shift
+  | w .&. 0xFF200000 == 0x8B000000 = Just (zp (reg 5) ++ zp (reg 16), Just (reg 0), False)
+  -- str Xt, [Xn, #imm12*8]
+  | w .&. 0xFFC00000 == 0xF9000000 = Just (zp (reg 5) ++ zp (reg 0), Nothing, False)
+  -- ldr Xt, [Xn, #imm12*8]
+  | w .&. 0xFFC00000 == 0xF9400000 = Just (zp (reg 5), Just (reg 0), False)
+  -- movz Xd, #imm16
+  | w .&. 0xFF800000 == 0xD2800000 = Just ([], Just (reg 0), False)
+  -- cmp Xn, Xm (subs XZR, Xn, Xm)
+  | w .&. 0xFF20001F == 0xEB00001F = Just (zp (reg 5) ++ zp (reg 16), Nothing, False)
+  -- cmp Xn, #imm12 (subs XZR, Xn, #imm12)
+  | w .&. 0xFF00001F == 0xF100001F = Just (zp (reg 5), Nothing, False)
+  -- mov Xd, Xm (orr Xd, XZR, Xm)
+  | w .&. 0xFF200000 == 0xAA000000 = Just (zp (reg 16), Just (reg 0), False)
+  -- blr Xn
+  | w .&. 0xFFFFFC1F == 0xD63F0000 = Just (zp (reg 5), Just 30, True)
+  -- br Xn
+  | w .&. 0xFFFFFC1F == 0xD61F0000 = Just (zp (reg 5), Nothing, False)
+  -- b.cond / b: no register operand
+  | w .&. 0xFF000010 == 0x54000000 = Just ([], Nothing, False)
+  | w .&. 0xFC000000 == 0x14000000 = Just ([], Nothing, False)
+  -- svc #imm16
+  | w .&. 0xFFE0001F == 0xD4000001 = Just ([], Nothing, False)
+  | otherwise = Nothing
+  where
+    reg n = fromIntegral ((w `shiftR` n) .&. 0x1F) :: Int
+
 {- | Read an @bits@-wide field as two's complement, so a backward branch
 reports a negative displacement.
 -}
@@ -1637,6 +1751,12 @@ signExtend :: Int -> Int -> Int
 signExtend bits value
   | testBit value (bits - 1) = value - (1 `shiftL` bits)
   | otherwise = value
+
+{- | Two single-page PT_LOADs at 0x1000 and 0x2000, for the constructor-target
+bound: everything inside either, and the one word past the last, is out.
+-}
+cSegs :: [Ldr.Segment]
+cSegs = [Ldr.Segment 0x1000 0 0x1000 0x1000 5, Ldr.Segment 0x2000 0x1000 0x1000 0x1000 4]
 
 elfBadArch :: [Word8]
 elfBadArch =

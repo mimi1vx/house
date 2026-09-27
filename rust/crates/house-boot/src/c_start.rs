@@ -92,6 +92,8 @@ unsafe extern "C" {
     fn psci_cpu_off() -> i64;
     fn house_smp_should_off(core: u32) -> i32;
     fn house_handle_user_fault(far: u64) -> i32;
+    fn house_tlb_shootdown_seq() -> u32;
+    fn house_tlb_shootdown_ack(seq: u32);
     fn house_is_ro_page(va: u64) -> i32;
     fn house_is_cow_page(va: u64) -> i32;
     fn house_el0_park_fault(elr: u64, sp_el0: u64, gpr: *const u64, far: u64) -> i32;
@@ -475,14 +477,18 @@ pub unsafe extern "C" fn c_handle_irq(gpr: *mut u64, _fpi: *mut u8) -> u64 {
         return elr;
     }
     if intid == 1 {
-        // SGI 1: TLB shootdown
+        // SGI 1: TLB shootdown. Read the generation before the flush and
+        // publish the ack after it, so a requester that sees the ack knows the
+        // peer is past the invalidation; `sev` is what wakes a requester in `wfe`.
         unsafe {
+            let seq = house_tlb_shootdown_seq();
             core::arch::asm!(
                 "dsb ish; tlbi vmalle1is; dsb ish; isb",
                 options(nostack, preserves_flags)
             );
+            house_tlb_shootdown_ack(seq);
             core::arch::asm!("msr ICC_EOIR1_EL1, {0}", in(reg) iar, options(nostack, preserves_flags));
-            core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+            core::arch::asm!("dsb sy; sev; isb", options(nostack, preserves_flags));
         }
         return elr;
     }

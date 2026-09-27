@@ -40,6 +40,12 @@ mainObjectName = "main"
 mainBase :: Word64
 mainBase = 0x01000000
 
+{- | Where a placed object must end. Deliberately narrower than the demand
+pager's 64 GiB window in @house-hal-aarch64::house_handle_user_fault@: that
+window also serves anonymous and demand-test mappings, where a fault costs one
+zero page, while this bounds where a whole image may be placed. The two bounds
+differ on purpose, so retuning this one does not move the other.
+-}
 maxUserEnd :: Word64
 maxUserEnd = 0x100000000
 
@@ -200,6 +206,13 @@ validateRuntimeObject :: String -> Ldr.Elf -> Either Ldr.LoadError ()
 validateRuntimeObject name elf = do
   let dynInfo = Ldr.elfDyn elf
   unless (Ldr.dynPresent dynInfo) (badLink (name ++ " has no PT_DYNAMIC"))
+  -- The link-plan gate, and it subsumes the parser's per-relocation rule: the
+  -- Loader lets an object with no bind-now through only if every eager
+  -- relocation it carries is R_AARCH64_ABS64, and this requires bind-now of
+  -- every object the plan places at all, which is a strictly smaller set. The
+  -- ABS64 exemption is therefore a parser-level statement about which
+  -- relocation types demand a binding instruction, not a licence to place a
+  -- non-bind-now object.
   unless (Ldr.dynBindNow dynInfo) (badLink (name ++ " is not bind-now"))
   unless (length (Ldr.dynNeeded dynInfo) <= Ldr.maxNeeded) (badLink (name ++ " NEEDED count exceeds cap"))
   unless (BS.length (Ldr.elfBytes elf) <= Ldr.maxElfBytes) (badLink (name ++ " exceeds maxElfBytes"))

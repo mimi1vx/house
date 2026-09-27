@@ -271,6 +271,12 @@ house-ipc-el0-check: house-build initrd
 	expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Userspace EL0 (Track 6): ELF loader 0x01000000 window, svc write/exit/brk + IPC 0x10..0x14 via Endpoint, TTBR0/ASID/pager
+# SMP demand-pager race: two EL0 processes faulting fresh pages at once, so two
+# cores enter house_handle_user_fault together. Only meaningful at -smp >= 2.
+house-smp-fault-race-check: house-build initrd
+	expect scripts/qemu-smp-fault-race.exp $(SPIKE_DIR)/build/house.bin 180 hvf $(SPIKE_MEM) 2
+	expect scripts/qemu-smp-fault-race.exp $(SPIKE_DIR)/build/house.bin 240 tcg $(SPIKE_MEM) 2
+
 house-userspace-check: house-build initrd
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
@@ -376,4 +382,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check

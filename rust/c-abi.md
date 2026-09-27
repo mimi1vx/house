@@ -186,11 +186,15 @@ demand pager + `mprotect` RO perm faults + `munmap` translation faults,
 | `house-hal-aarch64` | `house_set_recorded_pdir` | `void house_set_recorded_pdir(void *pdir)` | `userspace.c` |
 | `house-hal-aarch64` | `house_asid_for_pdir` | `uint64_t house_asid_for_pdir(void *pdir)` | `userspace.c` |
 | `house-hal-aarch64` | `house_flush_code_page` | `void house_flush_code_page(void *page)` | `userspace.rs` (new: clean and invalidate the instruction cache for one 4 KiB page the EL1 data path has just filled with code, so an EL0 entry into a freshly written trampoline cannot fetch stale bytes; the caller must not execute the page before this returns) |
-| `house-hal-aarch64` | `house_asid_forget_pdir` | `void house_asid_forget_pdir(void *pdir)` | `userspace.rs` (new: evict the `(pdir → ASID)` cache entry and `TLBI VMALLE1IS` when a page-directory root is released, so a recycled root cannot alias two images on one `(TTBR0, ASID)` pair) |
+| `house-hal-aarch64` | `house_asid_forget_pdir` | `int house_asid_forget_pdir(void *pdir)` | `userspace.rs` (new: evict the `(pdir → ASID)` cache entry and `TLBI VMALLE1IS` when a page-directory root is released, so a recycled root cannot alias two images on one `(TTBR0, ASID)` pair. Returns `1` when an entry was actually held, which is the only case that needs the flush) |
+| `house-hal-aarch64` | `house_release_pdir` | `int house_release_pdir(void *pdir)` | `userspace.rs` (new: release a root the loader is finished with — evict its ASID entry, reset the recorded pdir to the kernel root, `TLBI VMALLE1IS`, and report whether `TTBR0_EL1` still names `pdir`. Returns `1` while an EL0 session is live on it, and the caller must then not free the pages under it) |
+| `house-hal-aarch64` | `ASID_MAP_LEN` | `size_t ASID_MAP_LEN` | `userspace.rs` (new: live `(pdir → ASID)` bindings, read out of guest memory by the shell's leak check so a reaped process can be shown to have given its slot back) |
+| `house-hal-aarch64` | `house_tlb_shootdown_seq` | `uint32_t house_tlb_shootdown_seq(void)` | `userspace.rs` (new: the shootdown generation a SGI-1 handler must acknowledge — the newest flush any requester has asked for) |
+| `house-hal-aarch64` | `house_tlb_shootdown_ack` | `void house_tlb_shootdown_ack(uint32_t seq)` | `userspace.rs` (new: report that this core has completed a shootdown covering `seq`; a SGI-1 handler calls it once its own flush is visible, so a requester that sees the ack knows the peer is past the invalidation) |
 | `house-hal-aarch64` | `house_is_ro_page` | `int house_is_ro_page(uint64_t va)` | `userspace.c` |
 | `house-hal-aarch64` | `house_is_cow_page` | `int house_is_cow_page(uint64_t va)` | `userspace.rs` (new: SW bit-57 COW mark on an RO L3 page, `1` COW / `0` otherwise; trap-safe PTE read for the FAULT park gate) |
-| `house-hal-aarch64` | `house_tlb_shootdown` | `void house_tlb_shootdown(uint64_t vaddr)` | `userspace.c` |
-| `house-hal-aarch64` | `house_handle_user_fault` | `int house_handle_user_fault(uint64_t far)` | `userspace.c` |
+| `house-hal-aarch64` | `house_tlb_shootdown` | `void house_tlb_shootdown(uint64_t vaddr)` | `userspace.c` (now also stamps a generation, sends SGI 1 to every online peer, and waits for each peer's ack to reach that generation, so the caller cannot reuse a VA while a peer is still running the translation it invalidated) |
+| `house-hal-aarch64` | `house_handle_user_fault` | `int house_handle_user_fault(uint64_t far)` | `userspace.c` (the L0/L1/L2 create-and-link walk runs under a walk lock, so two cores cannot both allocate and link the same missing level) |
 | `house-hal-aarch64` | `min_user_addr` | `void *min_user_addr` | `userspace.c` |
 | `house-hal-aarch64` | `max_user_addr` | `void *max_user_addr` | `userspace.c` |
 

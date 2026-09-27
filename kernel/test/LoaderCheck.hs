@@ -130,9 +130,14 @@ printRelocations table = do
     )
 
 {- | Counts as (relative, eager, versioned). "versioned" is the eager
-relocations whose target symbol carries a @DT_VERSYM@ index above
-@VER_NDX_GLOBAL@, so a plan can show that a reference names a specific
-version without the loader ever selecting on it.
+relocations whose target symbol names a version beyond the two unversioned
+indices, so a plan can show that a reference names a specific version without
+the loader ever selecting on it.
+
+The test is @/= verNdxGlobal@ rather than @> 1@ because @VER_NDX_LOCAL@ is 0:
+a hidden symbol is a real index that names no version, so a toolchain that
+starts emitting it on an eager reference must not move this count without the
+diff saying why.
 -}
 relocationCounts :: [Ldr.Relocation] -> (Int, Int, Int)
 relocationCounts = foldr count (0, 0, 0)
@@ -140,8 +145,9 @@ relocationCounts = foldr count (0, 0, 0)
     count relocation (relative, eager, versioned) = case relocation of
       Ldr.RelativeBinding _ -> (relative + 1, eager, versioned)
       Ldr.EagerSymbolBinding eager'
-        | Ldr.eagerSymbolVersion eager' > 1 -> (relative, eager + 1, versioned + 1)
+        | versionedIndex (Ldr.eagerSymbolVersion eager') -> (relative, eager + 1, versioned + 1)
         | otherwise -> (relative, eager + 1, versioned)
+    versionedIndex index = index /= Ldr.verNdxGlobal && index /= Ldr.verNdxLocal
 
 printLinkPlan :: Linker.LinkPlan -> IO ()
 printLinkPlan plan = do

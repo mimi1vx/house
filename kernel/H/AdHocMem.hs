@@ -15,11 +15,14 @@ module H.AdHocMem (
 )
 where
 
+import Control.Monad (when)
 import Data.Array.IArray (IArray, assocs, bounds)
 import Data.Array.IO (IOUArray, MArray, freeze, newArray_, writeArray)
 
 -- For SPECIALIZE pragma:
 import Data.Array.Unboxed (UArray)
+import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe qualified as BSU
 import Data.Ix (Ix, index, range)
 import Data.Word (
   Word16,
@@ -66,6 +69,34 @@ peekElemOff p o = liftIO $ IO.peekElemOff p o
 
 moveBytes :: Ptr a -> Ptr a -> Int -> H ()
 moveBytes dst src n = liftIO $ IO.moveBytes dst src n
+
+{- | Copy @count@ bytes out of a strict 'BS.ByteString' into a raw pointer.
+
+One @memcpy@ instead of one 'H' step per byte: the ELF mapper copies a whole
+segment this way, page by page, and the per-byte form puts every byte through
+the interpreter.
+-}
+pokeBytes :: Ptr Word8 -> BS.ByteString -> Int -> Int -> H ()
+pokeBytes destination source sourceOffset count = liftIO $ BSU.unsafeUseAsCStringLen source $ \(raw, len) ->
+  when (sourceOffset >= 0 && count >= 0 && sourceOffset <= len && count <= len - sourceOffset) $
+    IO.moveBytes destination (castPtr raw `plusPtr` sourceOffset) count
+
+{- | Whether two raw buffers hold the same @count@ bytes.
+
+Early-exits on the first difference, so a page that is already known to differ
+stops being read instead of being walked to the end.
+-}
+bytesEqual :: Ptr Word8 -> Ptr Word8 -> Int -> H Bool
+bytesEqual left right count
+  | count <= 0 = return True
+  | otherwise = go (0 :: Int)
+  where
+    go i
+      | i >= count = return True
+      | otherwise = do
+          a <- peek (left `plusPtr` i) :: H Word8
+          b <- peek (right `plusPtr` i) :: H Word8
+          if a == b then go (i + 1) else return False
 
 copyArray :: (IO.Storable a) => Ptr a -> Ptr a -> Int -> H ()
 copyArray dst src n = liftIO $ IO.copyArray dst src n

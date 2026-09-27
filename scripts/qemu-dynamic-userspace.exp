@@ -68,9 +68,13 @@ expect_stage "ok exit 0" "dynamic deep exit"
 expect_prompt "dynamic deep after exit"
 
 # Constructor phases: _start reports the init array, the second fini_array entry
-# reports the fini array, and a skipped phase prints array MISSING instead.
+# reports the fini array, and a skipped phase prints array MISSING instead. The
+# init phase also carries a constructor that drives the AAPCS64 caller-saved set
+# as scratch, and one that stores to the stub page it is running on.
 send "run /bin/hello-dyn-init\r"
 expect_stage_absent "init array ok" "array MISSING" "dynamic init array"
+expect_stage_absent "init clobber ok" "init clobber MISSING" "dynamic init clobber"
+expect_stage_absent "stub page read-only" "stub page WRITABLE" "dynamic stub page"
 expect_stage_absent "fini array ok" "array MISSING" "dynamic fini array"
 expect_stage "ok exit 0" "dynamic init exit"
 expect_prompt "dynamic init after exit"

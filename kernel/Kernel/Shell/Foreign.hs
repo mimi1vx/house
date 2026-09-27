@@ -29,6 +29,7 @@ module Kernel.Shell.Foreign (
   c_is_ro_page,
   c_tlb_shootdown,
   c_asid_for,
+  c_asid_map_len,
 )
 where
 
@@ -120,3 +121,5 @@ foreign import ccall unsafe "house_is_ro_page" c_is_ro_page :: Word64 -> IO CInt
 foreign import ccall unsafe "house_tlb_shootdown" c_tlb_shootdown :: Word64 -> IO ()
 
 foreign import ccall unsafe "house_asid_for_pdir" c_asid_for :: Ptr Word64 -> IO Word64
+
+foreign import ccall unsafe "&ASID_MAP_LEN" c_asid_map_len :: Ptr Word64

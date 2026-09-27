@@ -35,8 +35,9 @@ import Data.Maybe (catMaybes, isJust)
 import Data.Set qualified as Set
 import Data.Word (Word32, Word64, Word8)
 import Foreign.C.Types (CInt (..))
+import Foreign.Marshal qualified as IO
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import H.AdHocMem (allocaArray, peek, peekElemOff, poke, pokeElemOff)
+import H.AdHocMem (allocaArray, bytesEqual, peek, peekElemOff, poke, pokeBytes, pokeElemOff)
 import H.Concurrency (MVar, forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
@@ -55,7 +56,7 @@ import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf,
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Sched qualified as Sched
 import Kernel.Userspace.Trampoline qualified as Tramp
-import Kernel.Userspace.Types (Pid (..), Process (..), SharedObject (..), pidNext, procExitMap, procMap, processExitVar, userSem)
+import Kernel.Userspace.Types (Pid (..), Process (..), SharedObject (..), StopAck, pidNext, procExitMap, procMap, procStopMap, processExitVar, userSem)
 import Numeric (showHex)
 import System.Timeout qualified as T
 
@@ -63,10 +64,11 @@ foreign import ccall unsafe "house_enter_el0" c_enter_el0 :: Word64 -> Word64 ->
 
 foreign import ccall unsafe "house_asid_for_pdir" c_asid_for :: Ptr Word64 -> IO Word64
 
--- Drops the HAL's (pdir -> ASID) cache entry before the root page returns to
--- the allocator, which would otherwise hand the same root -- and so the same
--- (TTBR0, ASID) pair -- to the next image.
-foreign import ccall unsafe "house_asid_forget_pdir" c_asid_forget :: Ptr Word64 -> IO ()
+-- Release a root the loader is done with: evict its ASID entry, reset the
+-- recorded root to the kernel L0, and flush. The HAL answers from TTBR0_EL1
+-- rather than from the recorded root, so it says no only while an EL0 session
+-- is genuinely live on the root.
+foreign import ccall unsafe "house_release_pdir" c_release_pdir :: Ptr Word64 -> IO CInt
 
 foreign import ccall unsafe "house_flush_code_page" c_flush_code_page :: Ptr Word8 -> IO ()
 
@@ -103,8 +105,6 @@ foreign import ccall unsafe "house_user_read_bytes" c_user_read_bytes :: Ptr Wor
 foreign import ccall unsafe "house_user_write_bytes" c_user_write_bytes :: Ptr Word64 -> Word64 -> Ptr Word8 -> Word64 -> IO CInt
 
 foreign import ccall unsafe "house_user_strlen" c_user_strlen :: Ptr Word64 -> Word64 -> Word64 -> Ptr Word64 -> IO CInt
-
-foreign import ccall unsafe "current_pdir" c_current_pdir :: IO (Ptr Word64)
 
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
 
@@ -249,14 +249,11 @@ collectDynamicRO pdir accesses = do
         _ -> return (Left (BadDyn "dynamic share page is not finalized read-only"))
 
 sameDynamicPage :: DynamicPage -> VM.PageInfo -> H Bool
-sameDynamicPage current source = go 0
-  where
-    go offset
-      | offset >= 4096 = return True
-      | otherwise = do
-          l <- peek (fromPhysPage (VM.physPage (dynamicPageInfo current)) `plusPtr` offset) :: H Word8
-          r <- peek (fromPhysPage (VM.physPage source) `plusPtr` offset) :: H Word8
-          if l == r then go (offset + 1) else return False
+sameDynamicPage current source =
+  bytesEqual
+    (fromPhysPage (VM.physPage (dynamicPageInfo current)))
+    (fromPhysPage (VM.physPage source))
+    4096
 
 sourceMatches :: VM.PageMap -> SharedObject -> [DynamicPage] -> H Bool
 sourceMatches sourcePdir shared current = do
@@ -384,11 +381,20 @@ data MappedImage = MappedImage {
   , mappedSharedObjects :: [SharedObject]
   , mappedInitSteps :: [Linker.LinkStep]
   , mappedFiniSteps :: [Linker.LinkStep]
+  , mappedLoadBounds :: LoadBounds
   }
 
 -- | Dynamic mappings are writable only while unpublished in the page map.
 data MapMode = FinalFlags | TemporaryRW
   deriving (Eq)
+
+{- | Every relocated PT_LOAD of every object in the image, as (placement base,
+segments). The constructor phases need it to bound the array targets they read
+out of the mapped image: a @DT_INIT_ARRAY@ word only becomes a pointer after
+relocation, so the runtime — not the parser — is the first place that can say
+whether it names code.
+-}
+type LoadBounds = [(Word64, [Segment])]
 
 runElf :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
 runElf = runElfIn Vfs.defaultNamespace
@@ -604,7 +610,7 @@ runPreparedBound pidInt image argv envp = do
                           startPc <- case mappedInitSteps mappedImage of
                             [] -> return (Right entry)
                             steps -> do
-                              prepared <- prepareConstructorPhase pdir steps entry Tramp.BranchToEntry
+                              prepared <- prepareConstructorPhase pdir (mappedLoadBounds mappedImage) steps entry sp Tramp.BranchToEntry
                               return (case prepared of Left err -> Left err; Right () -> Right Tramp.trampolinePage)
                           case startPc of
                             Left err -> do
@@ -614,14 +620,16 @@ runPreparedBound pidInt image argv envp = do
                               abort err
                             Right pc -> do
                               exitVar <- newEmptyMVar
+                              stopVar <- newEmptyMVar
                               modifyRef procExitMap (Map.insert pid exitVar)
+                              modifyRef procStopMap (Map.insert pid stopVar)
                               modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage)))
                               Sched.schedRegister pid
                               let finiSteps = mappedFiniSteps mappedImage
                               _ <- forkH $ do
                                 liftIO (c_set_pdir pdirPtr)
                                 liftIO (c_enter_el0 pc sp pdirPtr asid)
-                                parkLoop pdir pid pdirPtr asid exitVar sp finiSteps
+                                parkLoop pdir (mappedLoadBounds mappedImage) pid pdirPtr asid exitVar stopVar sp finiSteps
                                 return ()
                               return (Right pid)
 
@@ -678,11 +686,6 @@ shareAddrSpace src dst hi = do
     Nothing -> return (Right ())
     Just l1 -> go l1 VM.minVAddr 0 []
   where
-    userTable d
-      | d .&. 3 == 3
-      , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
-          Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
-      | otherwise = Nothing
     l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
     l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
     keyOf info = ptrToWord64 (fromPhysPage (VM.physPage info))
@@ -771,10 +774,7 @@ breakCow pid pdirVa = withQSem userSem $ do
                           return True
 
 copyPageBytes :: Ptr Word8 -> Ptr Word8 -> H ()
-copyPageBytes src dst =
-  forM_ [0 .. 4095] $ \i -> do
-    b <- peek (src `plusPtr` i) :: H Word8
-    poke (dst `plusPtr` i) b
+copyPageBytes src dst = liftIO (IO.moveBytes dst src 4096)
 
 {- | EL0 fork (svc 0x08): share the parent address space like 'forkProc',
 then wire the trap frame + EL0 session so the child starts runnable. The
@@ -809,7 +809,9 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                 then do freePDir childPdir; return (Left NoSpace)
                 else do
                   exitVar <- newEmptyMVar
+                  stopVar <- newEmptyMVar
                   modifyRef procExitMap (Map.insert child exitVar)
+                  modifyRef procStopMap (Map.insert child stopVar)
                   modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
                   Sched.schedRegister child
                   Vfs.vfsForkPid parentInt pidInt
@@ -820,6 +822,7 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                     then do
                       modifyRef procMap (Map.delete child)
                       modifyRef procExitMap (Map.delete child)
+                      modifyRef procStopMap (Map.delete child)
                       Vfs.vfsReleasePid pidInt
                       Fd.fdRelease child
                       liftIO (c_el0_unregister childPtr)
@@ -829,7 +832,7 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                       _ <- forkH $ do
                         liftIO (c_set_pdir childPtr)
                         _ <- liftIO (c_resume_el0 childPtr asid 0)
-                        parkLoop childPdir child childPtr asid exitVar 0 []
+                        parkLoop childPdir [] child childPtr asid exitVar stopVar 0 []
                         return ()
                       return (Right child)
 
@@ -847,11 +850,6 @@ freeUserPages pdir hi = do
     Nothing -> return ()
     Just l1 -> go l1 VM.minVAddr
   where
-    userTable d
-      | d .&. 3 == 3
-      , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
-          Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
-      | otherwise = Nothing
     l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
     l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
     go l1 va
@@ -1032,6 +1030,7 @@ waitPid pid@(Pid pidInt) = do
       Just pr -> do
         writeRef procMap (Map.delete pid mp)
         modifyRef procExitMap (Map.delete pid)
+        modifyRef procStopMap (Map.delete pid)
         m <- readRef pendingReply
         writeRef pendingReply (Map.delete pid m)
         return (Just pr, Map.lookup pid m)
@@ -1049,30 +1048,64 @@ waitPid pid@(Pid pidInt) = do
       liftIO (c_el0_unregister (VM.fromPageMap (procPdir pr)))
       return code
 
+{- | Poll for a killed process's park-loop acknowledgement. A CPU-bound guest
+is guaranteed to come back (the timer parks it), but a guest blocked in a
+rendezvous never resumes, so the poll is bounded: on timeout 'killPid' leaves
+the pages mapped rather than freeing them under a live translation.
+-}
+awaitStopAck :: StopAck -> H Bool
+awaitStopAck ack = go (200 :: Int)
+  where
+    go 0 = return False
+    go remaining = do
+      taken <- liftIO (tryTakeMVar ack)
+      case taken of
+        Just () -> return True
+        Nothing -> threadDelay 25000 >> go (remaining - 1)
+
+{- | Remove a process and release its root, but only once the target's park
+loop has seen the removal and returned. The session is entered by a thread
+that 'runElf' has already returned from, so a killed process may still be
+executing when this runs; the acknowledgement is what makes freeing the root
+safe. 'waitPid' needs none of this because the process has already exited.
+-}
 killPid :: Pid -> H ()
 killPid pid@(Pid pidInt) = do
-  (mProc, mStash) <- withQSem userSem $ do
+  mAck <- withQSem userSem $ do
     mp <- readRef procMap
     case Map.lookup pid mp of
-      Nothing -> return (Nothing, Nothing)
+      Nothing -> return Nothing
       Just pr -> do
         writeRef procMap (Map.delete pid mp)
         modifyRef procExitMap (Map.delete pid)
         m <- readRef pendingReply
         writeRef pendingReply (Map.delete pid m)
-        return (Just pr, Map.lookup pid m)
-  case mStash of
-    Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
+        a <- readRef procStopMap
+        writeRef procStopMap (Map.delete pid a)
+        return (Just (pr, Map.lookup pid m, Map.lookup pid a))
+  case mAck of
     Nothing -> return ()
-  Vfs.vfsReleasePid pidInt
-  Fd.fdRelease pid
-  Sched.schedUnregister pid
-  Sched.schedWakeAll
-  case mProc of
-    Nothing -> return ()
-    Just pr -> do
-      freePDir (procPdir pr)
-      liftIO (c_el0_unregister (VM.fromPageMap (procPdir pr)))
+    Just (mProc, mStash, mStop) -> do
+      case mStash of
+        Just h -> do
+          _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint))
+          return ()
+        Nothing -> return ()
+      Vfs.vfsReleasePid pidInt
+      Fd.fdRelease pid
+      Sched.schedUnregister pid
+      Sched.schedWakeAll
+      case mStop of
+        Nothing -> do
+          freePDir (procPdir mProc)
+          liftIO (c_el0_unregister (VM.fromPageMap (procPdir mProc)))
+        Just stop -> do
+          stopped <- awaitStopAck stop
+          case stopped of
+            False -> Dmesg.dmesgLog ("kill " ++ show pid ++ ": session still live, root retained")
+            True -> do
+              freePDir (procPdir mProc)
+              liftIO (c_el0_unregister (VM.fromPageMap (procPdir mProc)))
 
 {- | Park loop: the EL0 session returned from FFI (exit or park), so no RTS
 capability is pinned while this thread polls. EXIT wins over PARK; yield
@@ -1104,13 +1137,13 @@ resume the rendered byte count. Errors resume negative errnos:
 -2 ENOENT, -9 EBADF, -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
 -14 EFAULT, -17 EEXIST, -20 ENOTDIR, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
 -}
-parkLoop :: VM.PageMap -> Pid -> Ptr Word64 -> Word64 -> MVar Int -> Word64 -> [Linker.LinkStep] -> H ()
-parkLoop pmap pid@(Pid selfInt) pdir asid exitVar sp finiSteps = loop
+parkLoop :: VM.PageMap -> LoadBounds -> Pid -> Ptr Word64 -> Word64 -> MVar Int -> StopAck -> Word64 -> [Linker.LinkStep] -> H ()
+parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = loop
   where
     loop = do
       alive <- withQSem userSem (Map.member pid <$> readRef procMap)
       if not alive
-        then return ()
+        then putMVar stopVar ()
         else do
           mCode <- tryReadExitOnce pdir
           case mCode of
@@ -1150,7 +1183,7 @@ parkLoop pmap pid@(Pid selfInt) pdir asid exitVar sp finiSteps = loop
     -- still completes: refusing to exit would wedge the process for good.
     runFiniPhase code =
       unless (null finiSteps) $ do
-        outcome <- runConstructorPhase pmap finiSteps (fromIntegral code) sp pdir asid Tramp.ExitProcess
+        outcome <- runConstructorPhase pmap bounds finiSteps (fromIntegral code) sp pdir asid Tramp.ExitProcess
         case outcome of
           Left err -> Dmesg.dmesgLog ("fini constructors skipped: " ++ Ldr.loadErrorToString err)
           Right () -> return ()
@@ -1664,6 +1697,7 @@ mapPreparedImage pdir image = case image of
           , mappedSharedObjects = []
           , mappedInitSteps = []
           , mappedFiniSteps = []
+          , mappedLoadBounds = [(0, elfSegs elf)]
           }
   DynamicImage plan objects -> do
     case mapM plannedAccessFor objects of
@@ -1705,6 +1739,10 @@ mapPreparedImage pdir image = case image of
                                     , mappedSharedObjects = sharedObjects
                                     , mappedInitSteps = Linker.linkInitSteps plan
                                     , mappedFiniSteps = Linker.linkFiniSteps plan
+                                    , mappedLoadBounds =
+                                        [ (Linker.placedObjectBase (runtimePlaced object), elfSegs (runtimeElf object))
+                                        | object <- objects
+                                        ]
                                     }
                               )
 
@@ -1715,9 +1753,9 @@ process's own stack, not from EL1. The page is mapped once and reused by the
 exit phase; it is only rewritten while the process cannot be executing,
 because a process has a single EL0 session.
 -}
-runConstructorPhase :: VM.PageMap -> [Linker.LinkStep] -> Word64 -> Word64 -> Ptr Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
-runConstructorPhase pdir steps target sp pdirPtr asid mode = do
-  prepared <- prepareConstructorPhase pdir steps target mode
+runConstructorPhase :: VM.PageMap -> LoadBounds -> [Linker.LinkStep] -> Word64 -> Word64 -> Ptr Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+runConstructorPhase pdir bounds steps target sp pdirPtr asid mode = do
+  prepared <- prepareConstructorPhase pdir bounds steps target sp mode
   case prepared of
     Left err -> return (Left err)
     Right () -> do
@@ -1733,9 +1771,9 @@ expand the relocated addresses, bound them, map the trampoline page, and fill
 it. Kept apart from entering EL0 so a refusal is a failed load with nothing
 registered, rather than a live process that can never run.
 -}
-prepareConstructorPhase :: VM.PageMap -> [Linker.LinkStep] -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
-prepareConstructorPhase pdir steps target mode = do
-  expanded <- expandConstructorSteps pdir steps
+prepareConstructorPhase :: VM.PageMap -> LoadBounds -> [Linker.LinkStep] -> Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+prepareConstructorPhase pdir bounds steps target sp mode = do
+  expanded <- expandConstructorSteps pdir (arrayLabel mode) bounds steps
   case expanded of
     Left err -> return (Left err)
     Right calls
@@ -1744,17 +1782,21 @@ prepareConstructorPhase pdir steps target mode = do
           mapped <- ensureTrampolinePage pdir
           case mapped of
             Left err -> return (Left err)
-            Right () -> fillTrampoline pdir calls target mode
+            Right () -> fillTrampoline pdir calls target sp mode
+
+arrayLabel :: Tramp.TrampolineMode -> String
+arrayLabel Tramp.BranchToEntry = "init array entry"
+arrayLabel Tramp.ExitProcess = "fini array entry"
 
 -- | Flatten planned steps into the addresses to call, in order.
-expandConstructorSteps :: VM.PageMap -> [Linker.LinkStep] -> H (Either LoadError [Word64])
-expandConstructorSteps pdir steps = go steps []
+expandConstructorSteps :: VM.PageMap -> String -> LoadBounds -> [Linker.LinkStep] -> H (Either LoadError [Word64])
+expandConstructorSteps pdir label bounds steps = go steps []
   where
     go [] acc = return (Right (reverse acc))
     go (step : rest) acc = case step of
       Linker.LinkCall address -> go rest (address : acc)
       Linker.LinkArrayAt table count -> do
-        pointers <- mapM (readConstructorPointer pdir) [table, table + 8 .. table + fromIntegral count * 8 - 8]
+        pointers <- mapM (readConstructorPointer pdir label bounds) [table, table + 8 .. table + fromIntegral count * 8 - 8]
         case sequence pointers of
           Left err -> return (Left err)
           Right addresses -> go rest (reverse addresses ++ acc)
@@ -1764,8 +1806,8 @@ pointer word and must be eight-byte aligned; the value it holds is a code
 address, and AArch64 requires only four-byte instruction alignment, so an
 eight-byte requirement on the value would refuse a valid image.
 -}
-readConstructorPointer :: VM.PageMap -> Word64 -> H (Either LoadError Word64)
-readConstructorPointer pdir address
+readConstructorPointer :: VM.PageMap -> String -> LoadBounds -> Word64 -> H (Either LoadError Word64)
+readConstructorPointer pdir label bounds address
   | address .&. 7 /= 0 = return (Left (BadDyn "constructor slot unaligned"))
   | otherwise = do
       mapped <- VM.getPage pdir (address .&. complement 4095)
@@ -1777,7 +1819,10 @@ readConstructorPointer pdir address
               value <- peek (fromPhysPage (VM.physPage page) `plusPtr` offset) :: H Word64
               if value == 0 || value .&. 3 /= 0
                 then return (Left (BadDyn "constructor pointer is not a code address"))
-                else return (Right value)
+                else
+                  if not (any (\(base, segs) -> Ldr.constructorInLoads base segs value) bounds)
+                    then return (Left (BadDyn (label ++ " outside LOAD")))
+                    else return (Right value)
           where
             offset = fromIntegral (address .&. 4095)
 
@@ -1791,12 +1836,18 @@ unmapTrampolinePage pdir = do
       ok <- VM.setPage pdir Tramp.trampolinePage Nothing
       when ok (releaseBacking (fromPhysPage (VM.physPage info)))
 
--- | Map the trampoline page once per process, writable while it is filled.
+-- | Map the trampoline page once per process, writable so it can be filled.
 ensureTrampolinePage :: VM.PageMap -> H (Either LoadError ())
 ensureTrampolinePage pdir = do
   occupied <- VM.getPage pdir Tramp.trampolinePage
   case occupied of
-    Just _ -> return (Right ())
+    -- The exit phase refills the init phase's page, which 'fillTrampoline' left
+    -- read-only. 'prepareConstructorPhase' is the only place that may hold it
+    -- writable, and it always ends read-only again, so the process is never
+    -- running EL0 code with a writable stub.
+    Just info -> do
+      ok <- VM.setPage pdir Tramp.trampolinePage (Just info {VM.writable = True})
+      return (if ok then Right () else Left NoSpace)
     Nothing -> do
       mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
       case mp of
@@ -1811,37 +1862,49 @@ ensureTrampolinePage pdir = do
               HPages.freePage pg
               return (Left NoSpace)
 
-{- | Fill the trampoline page and then read the first code word back. Entering
-EL0 at a page whose content the loader has not confirmed would turn a write
-that went somewhere unexpected into an undefined instruction at EL0, which is
-the least diagnosable place to discover it.
+{- | Fill the trampoline page, drop it back to read-only, and then read the
+first code word back. Entering EL0 at a page whose content the loader has not
+confirmed would turn a write that went somewhere unexpected into an undefined
+instruction at EL0, which is the least diagnosable place to discover it — and
+entering it while it is still writable would let a constructor rewrite the
+instructions the loop is about to re-enter, so the read-only transition has to
+land before the phase is handed to 'runConstructorPhase'.
+
+The argument stack pointer goes into the scratch word here rather than in the
+stub: @x1@ is caller-saved, so the stub cannot hold it across the loop, and a
+read-only stub page cannot take it back.
 -}
-fillTrampoline :: VM.PageMap -> [Word64] -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
-fillTrampoline pdir calls target mode = do
+fillTrampoline :: VM.PageMap -> [Word64] -> Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+fillTrampoline pdir calls target sp mode = do
   mapped <- VM.getPage pdir Tramp.trampolinePage
   case mapped of
     Nothing -> return (Left (BadDyn "trampoline page unmapped"))
     Just page -> do
       let base = fromPhysPage (VM.physPage page) :: Ptr Word8
       pokeWords base (Tramp.trampolineCodeOffset + Tramp.trampolineDescriptorOffset) (Tramp.trampolineDescriptor calls target mode)
+      poke (castPtr (base `plusPtr` Tramp.trampolineScratchOffset) :: Ptr Word64) sp
       -- The stub is 32-bit instructions, so it cannot ride the descriptor's
       -- 8-byte stride: spaced that way every word is followed by a zero pad and
       -- EL0 decodes the padding.
       pokeCode base Tramp.trampolineCodeOffset Tramp.trampolineCode
+      protected <- VM.setPage pdir Tramp.trampolinePage (Just page {VM.writable = False})
       -- The stores above went through the data cache, so without this EL0 can
       -- enter a page whose instruction bytes it already holds stale.
       liftIO (c_flush_code_page base)
-      got0 <- peek (castPtr base :: Ptr Word32)
-      got1 <- peek (castPtr (base `plusPtr` 4) :: Ptr Word32)
-      case Tramp.trampolineCode of
-        firstWord : secondWord : _ ->
-          if got0 == firstWord && got1 == secondWord
-            then return (Right ())
-            else do
-              Dmesg.dmesgLog ("trampoline w0=" ++ showHexWord got0 ++ "/" ++ showHexWord firstWord)
-              Dmesg.dmesgLog ("trampoline w1=" ++ showHexWord got1 ++ "/" ++ showHexWord secondWord)
-              return (Left (BadDyn "trampoline page writeback mismatch"))
-        _ -> return (Left (BadDyn "trampoline code empty"))
+      if not protected
+        then return (Left (BadDyn "trampoline page not writable for fill"))
+        else do
+          got0 <- peek (castPtr base :: Ptr Word32)
+          got1 <- peek (castPtr (base `plusPtr` 4) :: Ptr Word32)
+          case Tramp.trampolineCode of
+            firstWord : secondWord : _ ->
+              if got0 == firstWord && got1 == secondWord
+                then return (Right ())
+                else do
+                  Dmesg.dmesgLog ("trampoline w0=" ++ showHexWord got0 ++ "/" ++ showHexWord firstWord)
+                  Dmesg.dmesgLog ("trampoline w1=" ++ showHexWord got1 ++ "/" ++ showHexWord secondWord)
+                  return (Left (BadDyn "trampoline page writeback mismatch"))
+            _ -> return (Left (BadDyn "trampoline code empty"))
   where
     showHexWord :: (Integral a) => a -> String
     showHexWord value = "0x" ++ showHex value ""
@@ -1981,12 +2044,8 @@ copyElfPageBytes source destination sourceOffset destinationOffset count
   | sourceOffset < 0 || destinationOffset < 0 || count < 0 = return (Left (BadSegment "file bytes outside image"))
   | sourceOffset > BS.length source - count = return (Left (BadSegment "file bytes outside image"))
   | otherwise = do
-      mapM_ copyOne [0 .. count - 1]
+      pokeBytes (destination `plusPtr` destinationOffset) source sourceOffset count
       return (Right ())
-  where
-    copyOne index = do
-      let byte = BS.index source (sourceOffset + index)
-      poke (destination `plusPtr` (destinationOffset + index)) byte
 
 applyPatches :: VM.PageMap -> Linker.LinkPlan -> [RuntimeObject] -> [(String, [(Word64, Linker.PageAccess)])] -> H (Either LoadError ())
 applyPatches pdir plan objects accesses = go (Linker.linkPatches plan)
@@ -2115,45 +2174,48 @@ checkedAddWord label left right
 
 freePDir :: VM.PageMap -> H ()
 freePDir pdir = do
-  curPtr <- liftIO c_current_pdir
   let l0 = VM.fromPageMap pdir
-      curL0 = curPtr
-  if l0 == curL0
+  live <- liftIO (c_release_pdir l0)
+  if live /= 0
     then return ()
     else do
-      liftIO (c_asid_forget l0)
       let pageEntries = 512
       let l0Idx = fromIntegral ((VM.minVAddr `div` (2 ^ (39 :: Int))) `mod` 512) :: Int
       -- Instead of recomputing, directly walk all L1 entries for the user window
       -- Simpler: iterate whole L1 table (512) and free reachable L2/L3
       d0 <- peekElemOff l0 l0Idx
-      case tableFromDesc d0 of
+      case userTable d0 of
         Nothing -> HPages.freePage l0
         Just l1 -> do
           forM_ [0 .. pageEntries - 1] $ \i1 -> do
             d1 <- peekElemOff l1 i1
-            case tableFromDesc d1 of
+            case userTable d1 of
               Nothing -> return ()
               Just l2 -> do
-                if not (HPages.validPage l2)
-                  then return ()
-                  else do
-                    forM_ [0 .. pageEntries - 1] $ \i2 -> do
-                      d2 <- peekElemOff l2 i2
-                      case tableFromDesc d2 of
-                        Nothing -> return ()
-                        Just l3 -> do
-                          if not (HPages.validPage l3)
-                            then return ()
-                            else do
-                              forM_ [0 .. 511] $ \i3 -> do
-                                d3 <- peekElemOff l3 i3
-                                when ((d3 .&. 1) /= 0) $ releaseBacking (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000))
-                              HPages.freePage l3
-                    HPages.freePage l2
+                forM_ [0 .. pageEntries - 1] $ \i2 -> do
+                  d2 <- peekElemOff l2 i2
+                  case userTable d2 of
+                    Nothing -> return ()
+                    Just l3 -> do
+                      forM_ [0 .. 511] $ \i3 -> do
+                        d3 <- peekElemOff l3 i3
+                        when ((d3 .&. 1) /= 0) $ releaseBacking (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000))
+                      HPages.freePage l3
+                HPages.freePage l2
           HPages.freePage l1
           HPages.freePage l0
-  where
-    tableFromDesc d
-      | even d = Nothing
-      | otherwise = Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
+
+{- | A user-window page-table descriptor: a level pointing at another table.
+Bit 1 set distinguishes a table from a 1 GiB or 2 MiB block, and the pointer
+has to name a page the buddy allocator actually owns — the pager splits
+identity-map blocks into 2 MiB and 1 GiB block descriptors, and a walker that
+accepted those would free whatever the block's address field happened to name.
+One predicate for all three walkers ('freePDir', 'shareAddrSpace' and
+'freeUserPages'), so they cannot drift apart again.
+-}
+userTable :: Word64 -> Maybe (Ptr Word64)
+userTable d
+  | d .&. 3 == 3
+  , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
+      Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
+  | otherwise = Nothing

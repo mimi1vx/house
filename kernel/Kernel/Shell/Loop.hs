@@ -24,8 +24,10 @@ import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.List (isPrefixOf)
+import Data.Maybe (isNothing)
 import Data.Word (Word8)
 import Foreign.C.String (withCString)
+import Foreign.Storable (peek)
 import GHC.Conc (
   getNumCapabilities,
   getNumProcessors,
@@ -33,7 +35,7 @@ import GHC.Conc (
   pseq,
   setNumCapabilities,
  )
-import H.Monad (runH)
+import H.Monad (liftIO, runH)
 import H.Mutable (writeRef)
 import H.VirtualMemory qualified as VM
 import Kernel.Driver.Dmesg qualified as Dmesg
@@ -60,7 +62,7 @@ import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (EndpointId (..), Message (..))
 import Kernel.LineEditor qualified as LE
 import Kernel.SMP qualified as SMP
-import Kernel.Shell.Foreign (c_uart_puts, conMirror)
+import Kernel.Shell.Foreign (c_asid_map_len, c_uart_puts, conMirror)
 import Kernel.Shell.Format (hexDigit, showFsError, showHex, toExecError)
 import Kernel.Shell.Mem (handleDetect, handleFree, handleMem, handlePalloc)
 import Kernel.Shell.Parse (parseIpv4)
@@ -620,7 +622,6 @@ loop = do
         Right () -> withCString "loaderrefs ok\n" c_uart_puts
     handleForktest = do
       r <- runH $ do
-        refs0 <- U.cowLiveCount
         mBytes <- FS.vfsRead FS.defaultNamespace "/bin/hello"
         case mBytes of
           Left e -> return (Left (showFsError e))
@@ -637,15 +638,56 @@ loop = do
                     Right pidB -> do
                       okShare <- forkShared pidA pidB
                       okDiverge <- if okShare then forkDiverge pidA pidB else return False
+                      -- A killed process keeps its pages unless its session
+                      -- acknowledged the stop, so the drain below is measured
+                      -- from the post-kill baseline: what is asserted is that a
+                      -- reaped process hands back its ASID slot and its shared
+                      -- pages, which is the path that has to free.
                       _ <- U.killPid pidA
                       _ <- U.killPid pidB
+                      refs0' <- U.cowLiveCount
+                      asids0' <- readAsidMapLen
+                      drained <- reapDrains elf asids0'
                       refs1 <- U.cowLiveCount
-                      if okShare && okDiverge && refs1 == refs0
+                      asids1 <- readAsidMapLen
+                      if okShare && okDiverge && refs1 == refs0' && asids1 == asids0' && isNothing drained
                         then return (Right ())
-                        else return (Left ("cow share=" ++ show okShare ++ " diverge=" ++ show okDiverge ++ " refs=" ++ show refs0 ++ "->" ++ show refs1))
+                        else
+                          return
+                            ( Left
+                                ( "cow share="
+                                    ++ show okShare
+                                    ++ " diverge="
+                                    ++ show okDiverge
+                                    ++ " refs="
+                                    ++ show refs0'
+                                    ++ "->"
+                                    ++ show refs1
+                                    ++ " asid_map="
+                                    ++ show asids0'
+                                    ++ "->"
+                                    ++ show asids1
+                                    ++ " drain="
+                                    ++ show drained
+                                )
+                            )
       case r of
         Left e -> withCString ("forktest fail " ++ e ++ "\n") c_uart_puts
         Right () -> withCString "forktest ok\n" c_uart_puts
+    readAsidMapLen = liftIO (peek c_asid_map_len)
+    -- A process that exits by itself and is then reaped must hand its ASID
+    -- slot and its shared pages back. It is the most recent session, so its
+    -- root is also the recorded one, and a reap that consults that record
+    -- instead of TTBR0 skips it: the binding and every table under the root
+    -- survive and the buddy never sees them again.
+    reapDrains elf asids0 = do
+      res <- U.runElf elf ["/bin/hello"] defaultEnv
+      case res of
+        Left le -> return (Just ("spawn " ++ toExecError le))
+        Right pid -> do
+          _ <- U.waitPid pid
+          after <- readAsidMapLen
+          return (if after == asids0 then Nothing else Just (show asids0 ++ "->" ++ show after))
     forkShared pidA pidB = do
       ma <- U.procInfo pidA
       mb <- U.procInfo pidB

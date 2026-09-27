@@ -1,6 +1,7 @@
 //! Userspace EL0 ASID pager — `userspace.c` transliteration.
 
 use crate::spinlock::RawSpinLock;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const PAGE_SIZE: usize = 4096;
 const PAGE_POOL_N: usize = 512;
@@ -18,7 +19,10 @@ static ASID_LOCK: RawSpinLock = RawSpinLock::new();
 static mut NEXT_ASID: u16 = 1;
 const ASID_MAP_CAP: usize = 64;
 static mut ASID_MAP: [(*mut u8, u16); 64] = [(core::ptr::null_mut(), 0); 64];
-static mut ASID_MAP_LEN: usize = 0;
+/// Live `(pdir -> ASID)` bindings. Exported so the shell's leak check can read
+/// it out of guest memory and prove a reaped process gave its slot back.
+#[unsafe(no_mangle)]
+pub static mut ASID_MAP_LEN: usize = 0;
 
 unsafe extern "C" {
     static ttbr0_l0: [u64; 512];
@@ -67,6 +71,19 @@ unsafe fn asid_for_pdir(pdir: *mut u8) -> u16 {
                 wrapped = true;
             }
         }
+        if ASID_MAP_LEN == ASID_MAP_CAP {
+            // Every live root already holds a slot, so none may keep its ASID
+            // while the map is rebuilt. A rebuild drops every cached binding
+            // without the ASID counter ever wrapping, so it needs the same
+            // all-ASID flush the wrap does: otherwise a still-running process
+            // is handed a fresh ASID for the same (TTBR0, ...) pair and nothing
+            // separates the two.
+            ASID_MAP = [(core::ptr::null_mut(), 0); ASID_MAP_CAP];
+            ASID_MAP_LEN = 0;
+            wrapped = true;
+        }
+        ASID_MAP[ASID_MAP_LEN] = (pdir, a);
+        ASID_MAP_LEN += 1;
         if wrapped {
             // SAFETY: flush all ASIDs before reuse.
             core::arch::asm!(
@@ -74,24 +91,11 @@ unsafe fn asid_for_pdir(pdir: *mut u8) -> u16 {
                 options(nostack, preserves_flags)
             );
         }
-        if ASID_MAP_LEN == ASID_MAP_CAP {
-            // Every live root already holds a slot, so none may keep its ASID
-            // while the map is rebuilt; the flush above already covers this.
-            ASID_MAP = [(core::ptr::null_mut(), 0); ASID_MAP_CAP];
-            ASID_MAP_LEN = 0;
-        }
-        ASID_MAP[ASID_MAP_LEN] = (pdir, a);
-        ASID_MAP_LEN += 1;
         ASID_LOCK.unlock();
         a
     }
 }
 
-/// Release a cached `(pdir -> ASID)` binding when its root page is about to be
-/// returned to the buddy allocator. The allocator hands the same root back to
-/// the next image, so a surviving entry would alias two processes on one
-/// `(TTBR0, ASID)` pair. The flush drops every entry tagged with that pair
-/// before the recycled root is populated with a different image.
 /// Make code the EL1 data path just wrote visible to the instruction side.
 ///
 /// # Safety
@@ -125,22 +129,95 @@ pub unsafe extern "C" fn house_flush_code_page(page: *mut u8) {
                 options(nostack, preserves_flags)
             );
         }
-        // `ic ialluis` retires to the inner-shareable domain, which is what a
-        // user page's inner shareable attribute makes it.
-        core::arch::asm!(
-            "dsb ish; ic ialluis; dsb ish; isb",
-            options(nostack, preserves_flags)
-        );
+        // The per-line `ic ivau` loop above already invalidated every line of
+        // this page, so a whole-PE `ic ialluis` here would only re-do that work
+        // for every inner-shareable PE, once per constructor phase.
+        core::arch::asm!("dsb ish; isb", options(nostack, preserves_flags));
     }
 }
 
+/// Drop a cached `(pdir -> ASID)` binding. The allocator hands the same root
+/// back to the next image, so a surviving entry would alias two processes on
+/// one `(TTBR0, ASID)` pair; the flush drops every entry tagged with that pair
+/// before the recycled root is populated with a different image.
+///
+/// Returns 1 when a binding was actually held, which is the only case that can
+/// need the flush.
+///
+/// # Safety
+///
+/// The caller must be about to return `pdir` to the buddy allocator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn house_asid_forget_pdir(pdir: *mut u8) {
+pub unsafe extern "C" fn house_asid_forget_pdir(pdir: *mut u8) -> i32 {
     if pdir.is_null() {
-        return;
+        return 0;
     }
     unsafe {
+        if evict_asid(pdir) {
+            // SAFETY: the root is recycled by the caller straight after this
+            // returns, so no entry may keep the pair this pdir was tagged with.
+            core::arch::asm!(
+                "dsb ishst; tlbi vmalle1is; dsb ish; isb",
+                options(nostack, preserves_flags)
+            );
+            1
+        } else {
+            // A root that was never cached — every pre-`house_el0_register`
+            // error path — cannot need a flush, and paying for one would hide
+            // the reason the eviction path has one at all.
+            0
+        }
+    }
+}
+
+/// Release a page directory the loader is finished with, and report whether
+/// the hardware was still running on it.
+///
+/// The answer comes from `TTBR0_EL1`, not from the software record:
+/// `svc_exit_trampoline` restores the kernel root before the session returns,
+/// so by the time any caller reaches this the live root is the kernel L0 and
+/// the record is only a leftover. Putting the kernel root back in the record
+/// also stops the same stale answer from re-arming on the next reap, which is
+/// what made the most recently entered process leak its tables and its ASID
+/// entry.
+///
+/// Returns 1 when `TTBR0_EL1` still names `pdir`, i.e. an EL0 session is live
+/// on it and the caller must not free the pages under it.
+///
+/// # Safety
+///
+/// The caller must have ended every EL0 session on `pdir` and must return
+/// `pdir` to the buddy allocator immediately after this returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_release_pdir(pdir: *mut u8) -> i32 {
+    if pdir.is_null() {
+        return 1;
+    }
+    unsafe {
+        // SAFETY: mrs ttbr0_el1 is always readable at EL1.
+        let ttbr0: u64;
+        core::arch::asm!("mrs {0}, ttbr0_el1", out(reg) ttbr0, options(nostack, preserves_flags));
+        let live = ((ttbr0 & 0x0000_FFFF_FFFF_F000) as *mut u8) == pdir;
+        if RECORDED_PDIR == pdir {
+            RECORDED_PDIR = ttbr0_l0.as_ptr() as *mut u8;
+        }
+        let _ = evict_asid(pdir);
+        // Unconditional, unlike `house_asid_forget_pdir`: this is the point of
+        // no return for the root, so whatever the map held, a recycled root
+        // must not inherit the old image's translations.
+        core::arch::asm!(
+            "dsb ishst; tlbi vmalle1is; dsb ish; isb",
+            options(nostack, preserves_flags)
+        );
+        live as i32
+    }
+}
+
+/// Remove `pdir` from the ASID cache, reporting whether it was there.
+fn evict_asid(pdir: *mut u8) -> bool {
+    unsafe {
         ASID_LOCK.lock();
+        let mut removed = false;
         let mut i = 0;
         while i < ASID_MAP_LEN {
             if ASID_MAP[i].0 == pdir {
@@ -148,17 +225,13 @@ pub unsafe extern "C" fn house_asid_forget_pdir(pdir: *mut u8) {
                 ASID_MAP[i] = ASID_MAP[last];
                 ASID_MAP[last] = (core::ptr::null_mut(), 0);
                 ASID_MAP_LEN = last;
+                removed = true;
                 break;
             }
             i += 1;
         }
         ASID_LOCK.unlock();
-        // SAFETY: the root is recycled by the caller straight after this
-        // returns, so no entry may keep the pair this pdir was tagged with.
-        core::arch::asm!(
-            "dsb ishst; tlbi vmalle1is; dsb ish; isb",
-            options(nostack, preserves_flags)
-        );
+        removed
     }
 }
 
@@ -294,6 +367,20 @@ pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
     }
 }
 
+// The page-table walk in `house_handle_user_fault` allocates and links levels.
+// Two cores can reach it for one root, and with no lock both take the "entry
+// invalid" path, both allocate, and one table is orphaned or clobbered. One
+// lock, not one per pdir: a pdir page is 512 descriptors wide with no room for
+// a lock word, the critical section is three page allocations and their
+// zeroing, and faults are rare, so a side table keyed by root would buy no
+// throughput and one more thing to keep in step with the allocator.
+static PDIR_WALK_LOCK: RawSpinLock = RawSpinLock::new();
+
+// TLB shootdown acknowledgements: `house_tlb_shootdown` stamps a generation,
+// sends SGI 1 to every peer, and waits for each peer's ack to reach it.
+static TLB_SD_SEQ: AtomicU32 = AtomicU32::new(0);
+static TLB_SD_ACK: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
     unsafe extern "C" {
@@ -309,28 +396,94 @@ pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
         core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags));
         let me = (me & 0xFF) as u32;
         let mask = core::ptr::read_volatile(&raw const house_smp_online_mask);
+        let seq = TLB_SD_SEQ.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let mut pending: u32 = 0;
         for core in 0..32u32 {
             if core == me {
                 continue;
             }
-            let bit = match 1u32.checked_shl(core) {
-                Some(b) => b,
-                None => continue,
+            let Some(bit) = 1u32.checked_shl(core) else {
+                continue;
             };
             if mask & bit != 0 {
                 house_gic_send_sgi_to_core(1, core);
+                pending |= bit;
+            }
+        }
+        // A peer that has not reported may still be running the translation this
+        // call invalidated, so the caller must not go on to reuse the VA. Peers
+        // echo `sev` after acking, so this sleeps rather than spins.
+        while pending != 0 {
+            for core in 0..32u32 {
+                let Some(bit) = 1u32.checked_shl(core) else {
+                    continue;
+                };
+                if pending & bit != 0 && TLB_SD_ACK[core as usize].load(Ordering::Acquire) == seq {
+                    pending &= !bit;
+                }
+            }
+            if pending == 0 {
+                break;
+            }
+            // A core that goes offline cannot ack; drop it rather than hang.
+            pending &= core::ptr::read_volatile(&raw const house_smp_online_mask);
+            if pending != 0 {
+                core::arch::asm!("wfe", options(nostack, preserves_flags));
             }
         }
         core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
     }
 }
 
+/// The shootdown generation a handler acknowledges: the newest flush any
+/// requester has asked for.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_tlb_shootdown_seq() -> u32 {
+    TLB_SD_SEQ.load(Ordering::Acquire)
+}
+
+/// Report that this core has completed a shootdown covering `seq`.
+///
+/// A shootdown handler calls this once its own flush is visible, so a requester
+/// that sees the ack knows the peer is past the invalidation it waited for.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_tlb_shootdown_ack(seq: u32) {
+    unsafe {
+        let mut me: u64;
+        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags));
+        TLB_SD_ACK[((me & 0xFF) as usize) & 31].store(seq, Ordering::Release);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
     const MIN_V: u64 = 0x01000000;
-    // Matches mm/vm.rs HOUSE_USER_VA_MAX: demand window covers anon base
-    // (17GB) and demand-test VAs (32GB), still below the RTS alias (264GB).
+    // Matches mm/vm.rs HOUSE_USER_VA_MAX. Deliberately wider than
+    // Linker.maxUserEnd (4 GiB): the window also serves anonymous and
+    // demand-test mappings, and a demand-zeroed anon page and a placed image are
+    // different things. Only the linker bounds where an image may land.
     const MAX_V: u64 = 0x1000000000;
+    // Don't handle kernel buddy region
+    if far >= 0x46000000 && far < 0x60000000 {
+        return 0;
+    }
+    if far < MIN_V || far > MAX_V {
+        return 0;
+    }
+    let pdir = unsafe { core::ptr::read_volatile(&raw const RECORDED_PDIR) };
+    if pdir.is_null() || (pdir as usize & 4095) != 0 {
+        return 0;
+    }
+    PDIR_WALK_LOCK.lock();
+    // SAFETY: the lock excludes a second walker; the walk only allocates from
+    // the buddy and writes the levels it just allocated.
+    let handled = unsafe { fault_locked(pdir, far) };
+    PDIR_WALK_LOCK.unlock();
+    handled
+}
+
+/// The demand-pager page-table walk, under `PDIR_WALK_LOCK`.
+unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
     const PTE_VALID: u64 = 1 << 0;
     const PTE_TABLE: u64 = 1 << 1;
     const PTE_AF: u64 = 1 << 10;
@@ -339,19 +492,8 @@ pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
     const PTE_UXN: u64 = 1 << 54;
     const PTE_PXN: u64 = 1 << 53;
     const PTE_AP_RW: u64 = 1 << 6;
-    // Don't handle kernel buddy region
-    if far >= 0x46000000 && far < 0x60000000 {
-        return 0;
-    }
-    if far < MIN_V || far > MAX_V {
-        return 0;
-    }
     let va = far & !4095;
     unsafe {
-        let pdir = RECORDED_PDIR;
-        if pdir.is_null() || (pdir as usize & 4095) != 0 {
-            return 0;
-        }
         let page = buddy_alloc_page();
         if page.is_null() {
             return 0;
