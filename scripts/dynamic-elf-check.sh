@@ -286,7 +286,63 @@ check_control() {
 	}
 }
 
+# The House-targeted image is the target the Loader is being built for, and its
+# main object is inside every bound: the tag allowlist, the interpreter pin,
+# SysV hash, bind-now, RELRO, both constructor arrays, the recorded VERSYM
+# table and all four relocation families. It must therefore parse end to end,
+# with the repacker reaching the same verdict. Its closure does not, and the
+# gate names the bound that stops it rather than leaving that to be discovered.
+check_house_image() {
+	house=build/dynamic-probe/house-image
+	if ! "$LOADER_CHECK" "$house/build/house-image" >"$WORK/house-main.loader" 2>"$WORK/house-main.err"; then
+		echo "dynamic-elf-check: the House image main object was refused by the Loader" >&2
+		cat "$WORK/house-main.err" >&2
+		exit 1
+	fi
+	python3 build-probe/repack.py "$house/build/house-image" "$WORK/house-main.repacked" >/dev/null
+	"$LOADER_CHECK" "$WORK/house-main.repacked" >"$WORK/house-main.repacked.loader"
+	sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/house-main.loader" >"$WORK/house-main.normalized"
+	sed -E 's/ offset=[0-9]+/ offset=<file-offset>/' "$WORK/house-main.repacked.loader" >"$WORK/house-main.repacked.normalized"
+	cmp "$WORK/house-main.normalized" "$WORK/house-main.repacked.normalized" || {
+		echo "dynamic-elf-check: Loader and repacker disagree on the House image main object" >&2
+		exit 1
+	}
+	expected_rela=$(sed -n '1s/.*rela_count=\([0-9]*\).*/\1/p' "$house/manifest")
+	parsed_rela=$(sed -n 's/.* total=\([0-9]*\).*/\1/p' "$WORK/house-main.loader" | awk '{n += $1} END {printf "%d\n", n}')
+	[ "$parsed_rela" = "$expected_rela" ] || {
+		echo "dynamic-elf-check: the Loader read $parsed_rela relocations from the House main object, the manifest records $expected_rela" >&2
+		exit 1
+	}
+	# The four versioned references are recorded and never acted on, so a move
+	# here is a toolchain change the Loader's decisions depend on.
+	cat >"$WORK/expected-house-main-relocs" <<'EOF'
+relocations=dynamic relative=14 eager=16 versioned=1 total=30
+relocations=plt relative=0 eager=7 versioned=3 total=7
+EOF
+	sed -n 's/^\(relocations=.*\) offset=.*/\1/p' "$WORK/house-main.loader" >"$WORK/house-main.relocs"
+	cmp "$WORK/expected-house-main-relocs" "$WORK/house-main.relocs" || {
+		echo "dynamic-elf-check: the House main object's relocation mix moved" >&2
+		cat "$WORK/house-main.relocs" >&2
+		exit 1
+	}
+	# The closure stops at a named bound, not at the GNU-hash refusal it would
+	# reach next: libm.so.6 carries a PT_LOAD past maxSegMemSz, and the caps
+	# are read before the dynamic table. The retune moves this line.
+	set -- $(tail -n +2 "$house/objects" | cut -f2)
+	if "$LOADER_CHECK" link "$house/build/house-image" "$@" >"$WORK/house-link.out" 2>"$WORK/house-link.err"; then
+		echo "dynamic-elf-check: the stock GHC closure linked, expected a named refusal" >&2
+		exit 1
+	fi
+	grep -q 'NoSpace: total pages >64 or memsz >256K' "$WORK/house-link.err" || {
+		echo "dynamic-elf-check: the House closure no longer stops at the first segment-size bound" >&2
+		cat "$WORK/house-link.err" >&2
+		exit 1
+	}
+}
+
 check_soname "$A/$SONAME" "$SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
+check_house_image
+
 check_soname "$A/$MID_SONAME" "$MID_SONAME" "$WORK/expected-exports-mid" "$WORK/expected-undefined-mid" "$SONAME "
 check_soname "$A/$MISSING_SONAME" "$MISSING_SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
 check_hello "$A/hello-dyn" "$SONAME"

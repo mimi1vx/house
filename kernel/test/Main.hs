@@ -956,7 +956,21 @@ main = do
       , assertLoadLeft "elf m2 hash bucket cap" elfM2HashBuckets (Ldr.BadDyn "hash buckets")
       , assertLoadLeft "elf m2 symbol count cap" elfM2SymbolCount (Ldr.BadDyn "symbol count")
       , assertLoadLeft "elf m2 GNU hash reject" elfM2GnuHash (Ldr.BadDyn "GNU hash unsupported")
-      , check "elf m2 VERSYM tolerated" (skippedTagsOf elfM2Version == [0x6FFFFFF0])
+      , -- DT_VERSYM is honoured, not tolerated: the index is parsed and recorded.
+        check "elf m2 VERSYM parsed per symbol" (symbolVersionsOf elfM2Version == [0, 2])
+      , check "elf m2 VERSYM recorded on the relocation" (eagerVersionsOf elfM2Version == [2])
+      , check "elf m2 VERSYM is not a skip" (null (skippedTagsOf elfM2Version))
+      , check "elf without VERSYM reads global" (symbolVersionsOf elfJumpSlot == [verNdxGlobalIndex, verNdxGlobalIndex])
+      , check "elf without VERSYM records global" (eagerVersionsOf elfJumpSlot == [verNdxGlobalIndex])
+      , assertLoadLeft "elf m2 VERSYM outside LOAD" elfM2VersionOutside (Ldr.BadDyn "table outside LOAD")
+      , assertLoadLeft "elf m2 VERSYM past LOAD bytes" elfM2VersionStraddle (Ldr.BadDyn "table outside LOAD")
+      , assertLoadLeft "elf m2 VERSYM without symbols" elfM2VersionNoSym (Ldr.BadDyn "VERSYM without symbol metadata")
+      , -- R_AARCH64_ABS64 is eager by construction, so it never asks for bind-now.
+        check "elf abs64 accepted" (isDynRight elfAbs64 True)
+      , check "elf abs64 eager" (hasEagerType elfAbs64 257)
+      , check "elf abs64 without bind-now" (isDynRight elfAbs64NoBind True)
+      , assertLoadLeft "elf abs64 zero symbol" elfAbs64NoSym (Ldr.BadDyn "eager relocation symbol zero")
+      , assertLoadLeft "elf abs64 non-writable target" elfAbs64NonWritable (Ldr.BadDyn "rela target not writable")
       , assertLoadLeft "elf m2 init array without size refuses" elfM2Init (Ldr.BadDyn "incomplete init array metadata")
       , assertLoadLeft "elf m2 TEXTREL reject" elfM2Textrel (Ldr.BadDyn "TEXTREL unsupported")
       , assertLoadLeft "elf m2 flags TEXTREL reject" elfM2FlagsTextrel (Ldr.BadDyn "TEXTREL unsupported")
@@ -989,6 +1003,9 @@ main = do
           "tolerated tag set matches the checked-in list"
           (Ldr.skippableDynTags == toleratedDynTags)
       , check
+          "no rejected tag is classified as tolerated"
+          (all (isNothing . Ldr.skipDynTag) rejectedDynTags)
+      , check
           "every tolerated tag is classified"
           (all (\tag -> case Ldr.skipDynTag tag of Just _ -> True; Nothing -> False) toleratedDynTags)
       , check
@@ -1003,7 +1020,7 @@ main = do
       , check
           "skip line names every tolerated reason"
           ( Ldr.skipSummaryLine "libc-house.so.0" (concatMap (\tag -> skipsOf (elfDynWithTag (tag, 0))) toleratedDynTags)
-              == Just "dyn skip libc-house.so.0: ver,rpath,relacount,xindex (8 tags)"
+              == Just "dyn skip libc-house.so.0: ver,rpath,relacount,xindex (7 tags)"
           )
       , check
           "skip line fits dmesg for the whole tolerated set"
@@ -1135,6 +1152,37 @@ main = do
               0x01000338
               0x01010100
               (defaultLink elfLinkMain)
+          )
+      , check
+          "link ABS64 resolves"
+          ( linkPatchMatches
+              Linker.LinkAbs64
+              "libc-house.so.0"
+              (Just "strlen")
+              0x01000338
+              0x01010100
+              (defaultLink elfAbs64Main)
+          )
+      , check
+          "link ABS64 addend is added to the symbol"
+          ( linkPatchMatches
+              Linker.LinkAbs64
+              "libc-house.so.0"
+              (Just "strlen")
+              0x01000338
+              0x01010300
+              ( linkWith
+                  elfAbs64Main
+                  (Right . setMainRelocations [eagerBinding 0x338 257 1 "strlen" 0x200] . setMainNeeded ["libc-house.so.0"])
+                  [("libc-house.so.0", elfLinkDep, validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1])]
+              )
+          )
+      , assertLinkLeft
+          "link ABS64 value overflow"
+          ( linkWith
+              elfAbs64Main
+              (Right . setMainRelocations [eagerBinding 0x338 257 1 "strlen" 0x110000] . setMainNeeded ["liba.so.0"])
+              [("liba.so.0", elfLinkDep, setDependencyNearTop (validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1]))]
           )
       , check
           "link GLOB_DAT resolves"
@@ -1346,6 +1394,20 @@ main = do
           )
           (Ldr.BadDyn "link: duplicate export house_pad")
       , assertLinkError
+          "versioned ambiguous reference fails closed"
+          ( linkWith
+              elfLinkMain
+              ( Right
+                  . setMainRelocations [eagerBinding 0x338 1026 1 "house_pad" 0]
+                  . setMainSymbolTable [(undefinedSymbol "house_pad") {Ldr.dynamicSymbolVersion = 3}]
+                  . setMainNeeded ["liba.so.0", "libb.so.0"]
+              )
+              [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "house_pad" 0x100 1])
+              , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" ["liba.so.0"] [definedSymbol "house_pad" 0x110 1])
+              ]
+          )
+          (Ldr.BadDyn "link: duplicate export house_pad")
+      , assertLinkError
           "link reserved main dependency"
           ( linkWith
               elfLinkMain
@@ -1464,19 +1526,51 @@ main = do
               )
               [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1])]
           )
-      , assertLinkLeft
-          "link weak symbol rejected"
-          ( linkWith
-              elfLinkMain
-              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
-              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [weakSymbol "strlen"])]
+      , check
+          "link weak definition resolves"
+          ( linkPatchMatches
+              Linker.LinkJumpSlot
+              "liba.so.0"
+              (Just "strlen")
+              0x01000338
+              0x01010100
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
+                  [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [weakSymbol "strlen"])]
+              )
+          )
+      , check
+          "link protected definition resolves"
+          ( linkPatchMatches
+              Linker.LinkJumpSlot
+              "liba.so.0"
+              (Just "strlen")
+              0x01000338
+              0x01010100
+              ( linkWith
+                  elfLinkMain
+                  (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
+                  [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [protectedSymbol "strlen"])]
+              )
           )
       , assertLinkLeft
-          "link protected visibility rejected"
+          "link weak reference rejected"
+          ( linkWith
+              elfLinkMain
+              ( Right
+                  . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0]
+                  . setMainSymbolTable [weakReference "strlen"]
+                  . setMainNeeded ["liba.so.0"]
+              )
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1])]
+          )
+      , assertLinkLeft
+          "link hidden visibility rejected"
           ( linkWith
               elfLinkMain
               (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0"])
-              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [protectedSymbol "strlen"])]
+              [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [hiddenSymbol "strlen"])]
           )
       , assertLinkLeft
           "link IFUNC rejected"
@@ -1887,11 +1981,14 @@ elfDynWithTags extras =
 
 -- | The tolerated set, written out here so widening it is a visible diff.
 toleratedDynTags :: [Word64]
-toleratedDynTags = [0x6FFFFFFE, 0x6FFFFFFF, 0x6FFFFFFC, 0x6FFFFFFD, 0x6FFFFFF0, 29, 0x6FFFFFF9, 34]
+toleratedDynTags = [0x6FFFFFFE, 0x6FFFFFFF, 0x6FFFFFFC, 0x6FFFFFFD, 29, 0x6FFFFFF9, 34]
 
--- | Tags near the tolerated ones that must still be rejected.
+{- | Tags near the tolerated ones that must still be rejected. DT_VERSYM was
+tolerated until C8 honoured it, so it belongs here: re-tolerating it has to
+show up in this list.
+-}
 rejectedDynTags :: [Word64]
-rejectedDynTags = [0x7FFFFFFD, 0x7FFFFFFF, 33, 35, 36, 37, 0x6FFFFEF5, 0x6FFFFFEF]
+rejectedDynTags = [0x7FFFFFFD, 0x7FFFFFFF, 33, 35, 36, 37, 0x6FFFFEF5, 0x6FFFFFEF, 0x6FFFFFF0]
 
 -- | Constructor metadata as the parser recorded it, or Nothing on refusal.
 constructorsOf :: [(Word64, Word64)] -> Maybe (Maybe Word64, Maybe Ldr.InitArray)
@@ -2017,8 +2114,48 @@ elfM2NonWritable = mkM2Elf m2JumpEnts 1026 1 4 0x500 True True
 elfM2GnuHash :: [Word8]
 elfM2GnuHash = mkM2Elf ((0x6FFFFEF5, 0) : filter ((/= 4) . fst) m2JumpEnts) 1026 1 6 0x500 True True
 
+{- | 0x1E0 is free space inside 'm2Blob' holding two Elf64_Half version
+indices, one per dynamic symbol, the second naming a specific version.
+-}
+m2Versions :: [Word16]
+m2Versions = [0, 2]
+
+-- | One image per DT_VERSYM address, so the vectors differ only in that tag.
+mkM2VersionElf :: Word64 -> [Word8]
+mkM2VersionElf versymVa =
+  mkM2ElfFromBlob
+    0x80
+    6
+    0x500
+    True
+    True
+    (length (mkDynArr ((0x6FFFFFF0, versymVa) : m2JumpEnts)))
+    (patchMany [(0x1E0, concatMap put16le m2Versions)] (m2Blob ((0x6FFFFFF0, versymVa) : m2JumpEnts) 1026 1))
+
 elfM2Version :: [Word8]
-elfM2Version = mkM2Elf ((0x6FFFFFF0, 0) : m2JumpEnts) 1026 1 6 0x500 True True
+elfM2Version = mkM2VersionElf 0x1E0
+
+elfM2VersionOutside :: [Word8]
+elfM2VersionOutside = mkM2VersionElf 0x500
+
+-- | The version table starts inside the LOAD but runs past its file bytes.
+elfM2VersionStraddle :: [Word8]
+elfM2VersionStraddle = mkM2VersionElf 0x3FE
+
+elfM2VersionNoSym :: [Word8]
+elfM2VersionNoSym = mkM2Elf [(0x6FFFFFF0, 0x1E0)] 1027 0 6 0x500 True True
+
+elfAbs64 :: [Word8]
+elfAbs64 = mkM2Elf m2JumpEnts 257 1 6 0x500 True True
+
+elfAbs64NoBind :: [Word8]
+elfAbs64NoBind = mkM2Elf [(tag, val) | (tag, val) <- m2JumpEnts, tag /= 24, tag /= 30, tag /= 0x6FFFFFFB] 257 1 6 0x500 True True
+
+elfAbs64NoSym :: [Word8]
+elfAbs64NoSym = mkM2Elf m2JumpEnts 257 0 6 0x500 True True
+
+elfAbs64NonWritable :: [Word8]
+elfAbs64NonWritable = mkM2Elf m2JumpEnts 257 1 4 0x500 True True
 
 elfM2Init :: [Word8]
 elfM2Init = mkM2Elf ((25, 0x240) : m2JumpEnts) 1026 1 6 0x500 True True
@@ -2114,6 +2251,9 @@ elfLinkMain = patchAt elfJumpSlot 0x2BE (put16le 0)
 
 elfLinkGlobMain :: [Word8]
 elfLinkGlobMain = patchAt elfGlobDat 0x2BE (put16le 0)
+
+elfAbs64Main :: [Word8]
+elfAbs64Main = patchAt elfAbs64 0x2BE (put16le 0)
 
 elfLinkDep :: [Word8]
 elfLinkDep =
@@ -2358,20 +2498,30 @@ clearDependencyRelro edit elf = do
 updateDyn :: (Ldr.DynInfo -> Ldr.DynInfo) -> Ldr.Elf -> Ldr.Elf
 updateDyn update elf = elf {Ldr.elfDyn = update (Ldr.elfDyn elf)}
 
+-- | @VER_NDX_GLOBAL@, the index a symbol without a @DT_VERSYM@ entry reads.
+verNdxGlobalIndex :: Word16
+verNdxGlobalIndex = 1
+
 nullDynamicSymbol :: Ldr.DynamicSymbol
-nullDynamicSymbol = Ldr.DynamicSymbol "" 0 0 0 0 0
+nullDynamicSymbol = Ldr.DynamicSymbol "" 0 0 0 0 0 verNdxGlobalIndex
 
 undefinedSymbol :: String -> Ldr.DynamicSymbol
-undefinedSymbol name = Ldr.DynamicSymbol name 0x12 0 0 0 0
+undefinedSymbol name = Ldr.DynamicSymbol name 0x12 0 0 0 0 verNdxGlobalIndex
 
 definedSymbol :: String -> Word64 -> Word64 -> Ldr.DynamicSymbol
-definedSymbol name = Ldr.DynamicSymbol name 0x12 0 1
+definedSymbol name value symbolSize = Ldr.DynamicSymbol name 0x12 0 1 value symbolSize verNdxGlobalIndex
 
 weakSymbol :: String -> Ldr.DynamicSymbol
 weakSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolInfo = 0x22}
 
+weakReference :: String -> Ldr.DynamicSymbol
+weakReference name = (undefinedSymbol name) {Ldr.dynamicSymbolInfo = 0x22}
+
+hiddenSymbol :: String -> Ldr.DynamicSymbol
+hiddenSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolOther = 2}
+
 protectedSymbol :: String -> Ldr.DynamicSymbol
-protectedSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolOther = 2}
+protectedSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolOther = 3}
 
 ifuncSymbol :: String -> Ldr.DynamicSymbol
 ifuncSymbol name = (definedSymbol name 0x100 1) {Ldr.dynamicSymbolInfo = 0x1A}
@@ -2381,7 +2531,7 @@ relativeBinding offset addend = Ldr.RelativeBinding (Ldr.RelativeRelocation offs
 
 eagerBinding :: Word64 -> Word32 -> Word32 -> String -> Word64 -> Ldr.Relocation
 eagerBinding offset relocationType symbolIndex name addend =
-  Ldr.EagerSymbolBinding (Ldr.EagerSymbolRelocation offset relocationType symbolIndex name addend)
+  Ldr.EagerSymbolBinding (Ldr.EagerSymbolRelocation offset relocationType symbolIndex name addend verNdxGlobalIndex)
 
 linkPatchMatches :: Linker.LinkRelocation -> String -> Maybe String -> Word64 -> Word64 -> Either Ldr.LoadError Linker.LinkPlan -> Bool
 linkPatchMatches relocation provider symbol target value result = case result of
@@ -2419,7 +2569,7 @@ relativeRelocation :: Word64 -> Word64 -> Ldr.Relocation
 relativeRelocation off add = Ldr.RelativeBinding (Ldr.RelativeRelocation off add)
 
 eagerRelocation :: Word64 -> Word32 -> Word32 -> String -> Word64 -> Ldr.Relocation
-eagerRelocation off typ sym name add = Ldr.EagerSymbolBinding (Ldr.EagerSymbolRelocation off typ sym name add)
+eagerRelocation off typ sym name add = Ldr.EagerSymbolBinding (Ldr.EagerSymbolRelocation off typ sym name add verNdxGlobalIndex)
 
 -- | Fixtures are constructed as byte lists; the loader takes a 'BS.ByteString'.
 loadFixture :: [Word8] -> Either Ldr.LoadError Ldr.Elf
@@ -2477,6 +2627,18 @@ hasEagerType bytes want = case loadFixture bytes of
       Ldr.EagerSymbolBinding eager -> Ldr.eagerType eager == typ
       Ldr.RelativeBinding _ -> False
 
+-- | The @DT_VERSYM@ index the parser recorded for each dynamic symbol.
+symbolVersionsOf :: [Word8] -> [Word16]
+symbolVersionsOf bytes = case loadFixture bytes of
+  Right e -> maybe [] (map Ldr.dynamicSymbolVersion . Ldr.dynamicSymbolEntries) (Ldr.dynSymbols (Ldr.elfDyn e))
+  Left _ -> []
+
+-- | The version index the parser recorded on each eager relocation.
+eagerVersionsOf :: [Word8] -> [Word16]
+eagerVersionsOf bytes = case loadFixture bytes of
+  Right e -> [Ldr.eagerSymbolVersion r | table <- Ldr.dynRelocations (Ldr.elfDyn e), Ldr.EagerSymbolBinding r <- Ldr.relocationTableEntries table]
+  Left _ -> []
+
 hasTableKind :: [Word8] -> Ldr.RelocationTableKind -> Bool
 hasTableKind bytes want = case loadFixture bytes of
   Right e -> any ((== want) . Ldr.relocationTableKind) (Ldr.dynRelocations (Ldr.elfDyn e))
@@ -2519,6 +2681,13 @@ parityVectors =
   , ("m2-symbol-count", elfM2SymbolCount)
   , ("m2-gnu-hash", elfM2GnuHash)
   , ("m2-version", elfM2Version)
+  , ("m2-version-outside", elfM2VersionOutside)
+  , ("m2-version-straddle", elfM2VersionStraddle)
+  , ("m2-version-no-sym", elfM2VersionNoSym)
+  , ("abs64", elfAbs64)
+  , ("abs64-no-bind", elfAbs64NoBind)
+  , ("abs64-no-sym", elfAbs64NoSym)
+  , ("abs64-non-writable", elfAbs64NonWritable)
   , ("m2-init", elfM2Init)
   , ("m2-textrel", elfM2Textrel)
   , ("m2-flags-textrel", elfM2FlagsTextrel)

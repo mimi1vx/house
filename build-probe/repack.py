@@ -105,13 +105,13 @@ SKIPPABLE_TAGS = frozenset(
         DT_VERNEEDNUM,
         DT_VERDEF,
         DT_VERDEFNUM,
-        DT_VERSYM,
         DT_RUNPATH,
         DT_RELA_COUNT,
         DT_SYMTAB_SHNDX,
     }
 )
 
+R_ABS64 = 257
 R_GLOB_DAT = 1025
 R_JUMP_SLOT = 1026
 R_RELATIVE = 1027
@@ -239,8 +239,11 @@ def check_relocations(
                 fail(f"UnsupportedReloc: {r_type}")
             if not va_in_segment(segs, r_offset, 8):
                 fail("BadDyn: rela outside LOAD")
-        elif r_type in (R_GLOB_DAT, R_JUMP_SLOT):
-            if not bind_now:
+        elif r_type in (R_GLOB_DAT, R_JUMP_SLOT, R_ABS64):
+            # ABS64 writes the absolute address itself rather than a PLT or
+            # GOT slot, so it is eager by construction; Loader.hs makes the
+            # same distinction and does not require bind-now for it.
+            if r_type != R_ABS64 and not bind_now:
                 fail("BadDyn: eager relocation without bind-now")
             if symbol_index == 0 or symbol_index >= len(symbol_names):
                 fail("BadDyn: eager relocation symbol index")
@@ -275,6 +278,7 @@ def check_dynamic(
     symtab_va: int | None = None
     syment: int | None = None
     hash_va: int | None = None
+    versym_va: int | None = None
     rela_va: int | None = None
     relasz: int | None = None
     relaent: int | None = None
@@ -318,6 +322,8 @@ def check_dynamic(
             syment = value
         elif tag == DT_HASH:
             hash_va = value
+        elif tag == DT_VERSYM:
+            versym_va = value
         elif tag == DT_RELA:
             rela_va = value
         elif tag == DT_RELASZ:
@@ -445,6 +451,12 @@ def check_dynamic(
             symbol_names.append(
                 resolve_string(strtab, strsz, name_off, "symbol", MAX_SYMBOL_NAME)
             )
+
+    if versym_va is not None and hash_va is None:
+        fail("BadDyn: VERSYM without symbol metadata")
+    if versym_va is not None:
+        if va_to_file(segs, versym_va, len(symbol_names) * 2) is None:
+            fail("BadDyn: versym bounds")
 
     bind_now = bind_now_tag or (flags & DF_BIND_NOW) != 0 or (flags_1 & DF_1_NOW) != 0
     if pltgot is not None and not va_in_segment(segs, pltgot):

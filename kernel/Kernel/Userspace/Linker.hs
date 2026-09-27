@@ -61,13 +61,18 @@ maxTotalPages = 256
 pfWrite :: Word32
 pfWrite = 2
 
-stbGlobal, stvDefault :: Word8
+stbGlobal, stbWeak, stvDefault, stvProtected :: Word8
 stbGlobal = 1
+stbWeak = 2
 stvDefault = 0
+stvProtected = 3
 
 shnUndef, shnReservedStart :: Word16
 shnUndef = 0
 shnReservedStart = 0xFF00
+
+rAarch64Abs64 :: Word32
+rAarch64Abs64 = 257
 
 rAarch64GlobDat, rAarch64JumpSlot :: Word32
 rAarch64GlobDat = 1025
@@ -78,6 +83,7 @@ data LinkRelocation
   = LinkRelative
   | LinkGlobDat
   | LinkJumpSlot
+  | LinkAbs64
   deriving (Eq, Show)
 
 -- | Final software access for one mapped dynamic page.
@@ -374,19 +380,29 @@ buildExportScope = foldM addObject Map.empty
     addSymbol planned scope symbol
       | null (Ldr.dynamicSymbolName symbol) = pure scope
       | otherwise = do
-          unless (symbolBinding symbol == stbGlobal) (badLink ("unsupported symbol binding for " ++ Ldr.dynamicSymbolName symbol))
-          unless (symbolVisibility symbol == stvDefault) (badLink ("unsupported symbol visibility for " ++ Ldr.dynamicSymbolName symbol))
-          unless (symbolType symbol `elem` [0, 1, 2]) (badLink ("unsupported symbol type for " ++ Ldr.dynamicSymbolName symbol))
-          let section = Ldr.dynamicSymbolSection symbol
-          if section == shnUndef
+          let name = Ldr.dynamicSymbolName symbol
+              section = Ldr.dynamicSymbolSection symbol
+              defined = section /= shnUndef
+          unless (admissibleBinding defined symbol) (badLink ("unsupported symbol binding for " ++ name))
+          unless (admissibleVisibility defined symbol) (badLink ("unsupported symbol visibility for " ++ name))
+          unless (symbolType symbol `elem` [0, 1, 2]) (badLink ("unsupported symbol type for " ++ name))
+          if not defined
             then pure scope
             else
               if section >= shnReservedStart
-                then badLink ("unsupported symbol section for " ++ Ldr.dynamicSymbolName symbol)
+                then badLink ("unsupported symbol section for " ++ name)
                 else do
                   address <- exportedAddress planned symbol
-                  when (Map.member (Ldr.dynamicSymbolName symbol) scope) (badLink ("duplicate export " ++ Ldr.dynamicSymbolName symbol))
-                  pure (Map.insert (Ldr.dynamicSymbolName symbol) (ExportedSymbol (plannedName planned) address) scope)
+                  when (Map.member name scope) (badLink ("duplicate export " ++ name))
+                  pure (Map.insert name (ExportedSymbol (plannedName planned) address) scope)
+    -- A weak or protected definition still leaves its name with exactly one
+    -- provider, because the duplicate-export refusal above rejects any name
+    -- a second object defines. Choosing between providers is what stays
+    -- unimplemented, so a weak or non-default *reference* is refused.
+    admissibleBinding True symbol = symbolBinding symbol `elem` [stbGlobal, stbWeak]
+    admissibleBinding False symbol = symbolBinding symbol == stbGlobal
+    admissibleVisibility True symbol = symbolVisibility symbol `elem` [stvDefault, stvProtected]
+    admissibleVisibility False symbol = symbolVisibility symbol == stvDefault
 
 planPatches :: [PlannedObject] -> Map String ExportedSymbol -> Either Ldr.LoadError [RelocationPatch]
 planPatches planned exports = concat <$> mapM planObject planned
@@ -460,6 +476,7 @@ relocationKind :: Word32 -> Either Ldr.LoadError LinkRelocation
 relocationKind relocationType
   | relocationType == rAarch64GlobDat = Right LinkGlobDat
   | relocationType == rAarch64JumpSlot = Right LinkJumpSlot
+  | relocationType == rAarch64Abs64 = Right LinkAbs64
   | otherwise = Left (Ldr.UnsupportedReloc relocationType)
 
 validateEagerSymbol :: PlannedObject -> Ldr.EagerSymbolRelocation -> Either Ldr.LoadError ()

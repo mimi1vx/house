@@ -227,6 +227,9 @@ dtTlsMod = 0x6FFFFEF9
 dtTlsLo = 0x6FFFFEFA
 dtTlsHi = 0x6FFFFEFB
 
+rAarch64Abs64 :: Word32
+rAarch64Abs64 = 257
+
 rAarch64GlobDat, rAarch64JumpSlot, rAarch64Relative :: Word32
 rAarch64GlobDat = 1025
 rAarch64JumpSlot = 1026
@@ -245,6 +248,13 @@ df1Now = 0x1
 
 sttTls :: Word8
 sttTls = 6
+
+{- | @VER_NDX_GLOBAL@: the symbol is not bound to a named version. A higher
+index names one @VERDEF@ / @VERNEED@ entry, and that numbering is private to
+the object that declares it, so an index is never comparable across DSOs.
+-}
+verNdxGlobal :: Word16
+verNdxGlobal = 1
 
 data LoadError
   = BadMagic
@@ -294,6 +304,7 @@ data DynamicSymbol = DynamicSymbol {
   , dynamicSymbolSection :: Word16
   , dynamicSymbolValue :: Word64
   , dynamicSymbolSize :: Word64
+  , dynamicSymbolVersion :: Word16
   }
   deriving (Eq, Show)
 
@@ -321,6 +332,7 @@ data EagerSymbolRelocation = EagerSymbolRelocation {
   , eagerSymbolIndex :: Word32
   , eagerSymbolName :: String
   , eagerAddend :: Word64
+  , eagerSymbolVersion :: Word16
   }
   deriving (Eq, Show)
 
@@ -384,7 +396,7 @@ into a silent misparse.
 -}
 skipDynTag :: Word64 -> Maybe SkipReason
 skipDynTag tag
-  | tag `elem` [dtVerNeed, dtVerNeedNum, dtVerDef, dtVerDefNum, dtVerSym] = Just SkipVersionedResolution
+  | tag `elem` [dtVerNeed, dtVerNeedNum, dtVerDef, dtVerDefNum] = Just SkipVersionedResolution
   | tag == dtRunPath = Just SkipRunPath
   | tag == dtRelaCount = Just SkipRelocationHint
   | tag == dtSymtabShndx = Just SkipExtendedSymbolIndex
@@ -392,7 +404,7 @@ skipDynTag tag
 
 -- | The same set, enumerated so a test can pin it against a literal list.
 skippableDynTags :: [Word64]
-skippableDynTags = [dtVerNeed, dtVerNeedNum, dtVerDef, dtVerDefNum, dtVerSym, dtRunPath, dtRelaCount, dtSymtabShndx]
+skippableDynTags = [dtVerNeed, dtVerNeedNum, dtVerDef, dtVerDefNum, dtRunPath, dtRelaCount, dtSymtabShndx]
 
 -- | Short reason codes, in first-seen order, for the one dmesg line.
 skipReasonCode :: SkipReason -> String
@@ -453,6 +465,7 @@ data DynAcc = DynAcc {
   , accStrsz :: Maybe Word64
   , accSymtab :: Maybe Word64
   , accSyment :: Maybe Word64
+  , accVerSym :: Maybe Word64
   , accHash :: Maybe Word64
   , accRela :: Maybe Word64
   , accRelasz :: Maybe Word64
@@ -485,6 +498,7 @@ emptyDynAcc =
     , accStrsz = Nothing
     , accSymtab = Nothing
     , accSyment = Nothing
+    , accVerSym = Nothing
     , accHash = Nothing
     , accRela = Nothing
     , accRelasz = Nothing
@@ -864,6 +878,7 @@ stepDyn tag val a
   | tag == dtStrsz = setOnce "STRSZ" accStrsz (\x v -> x {accStrsz = v}) val a
   | tag == dtSymtab = setOnce "SYMTAB" accSymtab (\x v -> x {accSymtab = v}) val a
   | tag == dtSyment = setOnce "SYMENT" accSyment (\x v -> x {accSyment = v}) val a
+  | tag == dtVerSym = setOnce "VERSYM" accVerSym (\x v -> x {accVerSym = v}) val a
   | tag == dtHash = setOnce "HASH" accHash (\x v -> x {accHash = v}) val a
   | tag == dtRela = setOnce "RELA" accRela (\x v -> x {accRela = v}) val a
   | tag == dtRelasz = setOnce "RELASZ" accRelasz (\x v -> x {accRelasz = v}) val a
@@ -1007,6 +1022,7 @@ parseHashAndSymbols bytes acc strSlice strSz loads =
   case (accHash acc, accSymtab acc) of
     (Nothing, Nothing)
       | isJust (accSyment acc) -> Left (BadDyn "SYMENT without symbol metadata")
+      | isJust (accVerSym acc) -> Left (BadDyn "VERSYM without symbol metadata")
       | otherwise -> Right (NoHash, Nothing)
     (Just hashVa, Just symVa) -> do
       hash <- parseSysvHash bytes hashVa loads
@@ -1015,9 +1031,22 @@ parseHashAndSymbols bytes acc strSlice strSz loads =
         Just n
           | n == 24 -> Right 24
           | otherwise -> Left (BadDyn "syment")
-      symbols <- parseDynamicSymbols bytes symVa (sysvHashSymbols hash) syment strSlice strSz loads
+      versions <- parseSymbolVersions bytes (accVerSym acc) (sysvHashSymbols hash) loads
+      symbols <- parseDynamicSymbols bytes symVa (sysvHashSymbols hash) syment versions strSlice strSz loads
       Right (SysVHash hash, Just symbols)
     _ -> Left (BadDyn "incomplete symbol metadata")
+
+{- | One @Elf64_Half@ per dynamic symbol, index-aligned with the symbol
+table. An object carrying no @DT_VERSYM@ versions nothing, so every symbol
+reads as 'verNdxGlobal'.
+-}
+parseSymbolVersions :: ByteString -> Maybe Word64 -> Int -> [Segment] -> Either LoadError [Word16]
+parseSymbolVersions _ Nothing _ _ = Right []
+parseSymbolVersions bytes (Just va) count loads = do
+  let total = count * 2
+  (off, tableSize) <- vaTableOff loads va total
+  if tableSize /= total then Left (BadDyn "versym bounds") else Right ()
+  mapM (\i -> getU16 bytes (off + 2 * i)) [0 .. count - 1]
 
 parseSysvHash :: ByteString -> Word64 -> [Segment] -> Either LoadError SysvHash
 parseSysvHash bytes hashVa loads = do
@@ -1041,8 +1070,8 @@ parseSysvHash bytes hashVa loads = do
       chainIndex <- getU32 bytes (tableOff + 8 + 4 * bucketCount + 4 * i)
       if chainIndex /= 0 && chainIndex >= count then Left (BadDyn "hash chain index") else Right ()
 
-parseDynamicSymbols :: ByteString -> Word64 -> Int -> Int -> ByteString -> Int -> [Segment] -> Either LoadError DynamicSymbols
-parseDynamicSymbols bytes symVa count syment strSlice strSz loads = do
+parseDynamicSymbols :: ByteString -> Word64 -> Int -> Int -> [Word16] -> ByteString -> Int -> [Segment] -> Either LoadError DynamicSymbols
+parseDynamicSymbols bytes symVa count syment versions strSlice strSz loads = do
   let total = count * 24
   (off, tableSize) <- vaTableOff loads symVa total
   if tableSize /= total then Left (BadDyn "symtab bounds") else Right ()
@@ -1060,7 +1089,10 @@ parseDynamicSymbols bytes symVa count syment strSlice strSz loads = do
       symbolSize <- getU64 bytes (base + 16)
       name <- resolveMaybeSymbolName strSlice strSz nameOff
       if (info .&. 0x0F) == sttTls then Left (BadDyn "TLS symbol unsupported") else Right ()
-      Right (Just (DynamicSymbol name info other shndx value symbolSize))
+      Right (Just (DynamicSymbol name info other shndx value symbolSize (versionAt i)))
+    versionAt i = case drop i versions of
+      version : _ -> version
+      [] -> verNdxGlobal
 
 resolveMaybeSymbolName :: ByteString -> Int -> Word32 -> Either LoadError String
 resolveMaybeSymbolName strSlice strSz nameOff
@@ -1154,19 +1186,22 @@ parseRelocation typ sym rOff add loadsRequired symbols bindNow
       if sym /= 0 then Left (UnsupportedReloc typ) else Right ()
       if not (relocTargetIn loadsRequired rOff False) then Left (BadDyn "rela outside LOAD") else Right ()
       Right (Just (RelativeBinding (RelativeRelocation rOff add)))
-  | typ == rAarch64GlobDat || typ == rAarch64JumpSlot = do
-      if not bindNow then Left (BadDyn "eager relocation without bind-now") else Right ()
+  | typ == rAarch64GlobDat || typ == rAarch64JumpSlot || typ == rAarch64Abs64 = do
+      {- ABS64 writes the absolute address itself rather than a PLT or GOT
+      slot, so it is eager by construction: refusing it without bind-now
+      would refuse every library that does not ask to be bind-now. -}
+      if typ /= rAarch64Abs64 && not bindNow then Left (BadDyn "eager relocation without bind-now") else Right ()
       if sym == 0 then Left (BadDyn "eager relocation symbol zero") else Right ()
       if not (relocTargetIn loadsRequired rOff True) then Left (BadDyn "rela target not writable") else Right ()
-      name <- case symbols of
+      symbol <- case symbols of
         Nothing -> Left (BadDyn "eager relocation without SYMTAB")
         Just table -> case drop (fromIntegral sym) (dynamicSymbolEntries table) of
           [] -> Left (BadDyn "eager relocation symbol index")
-          symbol : _ -> Right (dynamicSymbolName symbol)
-      if null name
+          found : _ -> Right found
+      if null (dynamicSymbolName symbol)
         then Left (BadDyn "eager relocation symbol name")
         else Right ()
-      Right (Just (EagerSymbolBinding (EagerSymbolRelocation rOff typ sym name add)))
+      Right (Just (EagerSymbolBinding (EagerSymbolRelocation rOff typ sym (dynamicSymbolName symbol) add (dynamicSymbolVersion symbol))))
   | typ >= rAarch64TlsFirst && typ /= rAarch64IRelative = Left TlsUnsupported
   | typ == rAarch64IRelative = Left (BadDyn "IRELATIVE unsupported")
   | otherwise = Left (UnsupportedReloc typ)

@@ -108,7 +108,7 @@ printHash style = case style of
 
 printRelocations :: Ldr.RelocationTable -> IO ()
 printRelocations table = do
-  let (relative, eager) = relocationCounts (Ldr.relocationTableEntries table)
+  let (relative, eager, versioned) = relocationCounts (Ldr.relocationTableEntries table)
       kind = case Ldr.relocationTableKind table of
         Ldr.DynamicRelocations -> "dynamic"
         Ldr.PltRelocations -> "plt"
@@ -119,6 +119,8 @@ printRelocations table = do
         ++ show relative
         ++ " eager="
         ++ show eager
+        ++ " versioned="
+        ++ show versioned
         ++ " total="
         ++ show (relative + eager)
         ++ " offset="
@@ -127,12 +129,19 @@ printRelocations table = do
         ++ show (Ldr.relocationTableSize table)
     )
 
-relocationCounts :: [Ldr.Relocation] -> (Int, Int)
-relocationCounts = foldr count (0, 0)
+{- | Counts as (relative, eager, versioned). "versioned" is the eager
+relocations whose target symbol carries a @DT_VERSYM@ index above
+@VER_NDX_GLOBAL@, so a plan can show that a reference names a specific
+version without the loader ever selecting on it.
+-}
+relocationCounts :: [Ldr.Relocation] -> (Int, Int, Int)
+relocationCounts = foldr count (0, 0, 0)
   where
-    count relocation (relative, eager) = case relocation of
-      Ldr.RelativeBinding _ -> (relative + 1, eager)
-      Ldr.EagerSymbolBinding _ -> (relative, eager + 1)
+    count relocation (relative, eager, versioned) = case relocation of
+      Ldr.RelativeBinding _ -> (relative + 1, eager, versioned)
+      Ldr.EagerSymbolBinding eager'
+        | Ldr.eagerSymbolVersion eager' > 1 -> (relative, eager + 1, versioned + 1)
+        | otherwise -> (relative, eager + 1, versioned)
 
 printLinkPlan :: Linker.LinkPlan -> IO ()
 printLinkPlan plan = do
@@ -172,6 +181,7 @@ relocationName relocation = case relocation of
   Linker.LinkRelative -> "R_AARCH64_RELATIVE"
   Linker.LinkGlobDat -> "R_AARCH64_GLOB_DAT"
   Linker.LinkJumpSlot -> "R_AARCH64_JUMP_SLOT"
+  Linker.LinkAbs64 -> "R_AARCH64_ABS64"
 
 commaJoin :: [String] -> String
 commaJoin [] = "<none>"
