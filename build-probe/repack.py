@@ -13,7 +13,10 @@ import sys
 from typing import NoReturn
 
 MAX_ELF_BYTES = 1024 * 1024
-MAX_PHNUM = 8
+# Total program headers (parse work) and size-bearing segments (mapping work)
+# are separate bounds; the loader keeps them apart in Loader.hs too.
+MAX_PHNUM = 16
+MAX_SEGMENTS = 8
 MAX_SEG_MEM = 256 * 1024
 MAX_PAGES = 64
 MAX_INTERP = 256
@@ -24,6 +27,7 @@ MAX_DYN_ENT = 64
 MAX_NEEDED_NAME = 128
 MAX_HASH_BUCKETS = 4096
 MAX_SYMBOLS = 4096
+MAX_INIT_ARRAY = 64
 MAX_SYMBOL_NAME = 256
 MIN_EXEC_VADDR = 0x01000000
 MAX_VADDR = 0xFFFFFFFF
@@ -70,10 +74,12 @@ DT_RUNPATH = 29
 DT_FLAGS = 30
 DT_PREINIT_ARRAY = 32
 DT_PREINIT_ARRAYSZ = 33
-DT_PREINIT_ARRAYSZ_ENT = 34
-DT_RELR = 36
+DT_SYMTAB_SHNDX = 34
 DT_RELRSZ = 35
+DT_RELR = 36
 DT_RELRENT = 37
+DT_VERDEFNUM = 0x6FFFFFFD
+DT_VERNEEDNUM = 0x6FFFFFFF
 DT_RELA_COUNT = 0x6FFFFFF9
 DT_GNU_HASH = 0x6FFFFEF5
 DT_FLAGS_1 = 0x6FFFFFFB
@@ -90,6 +96,22 @@ DF_BIND_NOW = 0x8
 DF_TEXTREL = 0x4
 DF_1_NOW = 0x1
 STT_TLS = 6
+# Tags Loader.skipDynTag tolerates, each with a recorded reason. Anything
+# outside this set is still rejected, so an unknown tag cannot become a
+# silent misparse.
+SKIPPABLE_TAGS = frozenset(
+    {
+        DT_VERNEED,
+        DT_VERNEEDNUM,
+        DT_VERDEF,
+        DT_VERDEFNUM,
+        DT_VERSYM,
+        DT_RUNPATH,
+        DT_RELA_COUNT,
+        DT_SYMTAB_SHNDX,
+    }
+)
+
 R_GLOB_DAT = 1025
 R_JUMP_SLOT = 1026
 R_RELATIVE = 1027
@@ -263,6 +285,9 @@ def check_dynamic(
     flags = 0
     flags_1 = 0
     bind_now_tag = False
+    constructor_single: dict[int, int] = {}
+    constructor_array: dict[int, int] = {}
+    constructor_array_size: dict[int, int] = {}
     seen: set[int] = set()
     saw_null = False
 
@@ -274,6 +299,8 @@ def check_dynamic(
             break
         if tag == DT_NEEDED:
             needed_offs.append(value)
+            continue
+        if tag in SKIPPABLE_TAGS:
             continue
         if tag in seen:
             fail(f"BadDyn: duplicate DT_{tag}")
@@ -315,30 +342,20 @@ def check_dynamic(
             bind_now_tag = True
         elif tag == DT_DEBUG:
             pass
-        elif tag == DT_RELA_COUNT:
-            fail("BadDyn: RELACOUNT unsupported")
         elif tag == DT_GNU_HASH:
             fail("BadDyn: GNU hash unsupported")
-        elif tag in (DT_VERSYM, DT_VERDEF, DT_VERNEED):
-            fail("BadDyn: symbol versioning unsupported")
         elif tag == DT_TEXTREL:
             fail("BadDyn: TEXTREL unsupported")
         elif tag in (DT_REL, DT_RELSZ, DT_RELENT):
             fail("BadDyn: S REL unsupported")
-        elif tag in (
-            DT_INIT,
-            DT_FINI,
-            DT_INIT_ARRAY,
-            DT_FINI_ARRAY,
-            DT_INIT_ARRAYSZ,
-            DT_FINI_ARRAYSZ,
-            DT_PREINIT_ARRAY,
-            DT_PREINIT_ARRAYSZ,
-            DT_PREINIT_ARRAYSZ_ENT,
-        ):
-            fail("BadDyn: init/fini arrays unsupported")
-        elif tag in (DT_RUNPATH, 34):
-            fail(f"BadDyn: unsupported DT_{tag}")
+        elif tag in (DT_INIT, DT_FINI):
+            constructor_single[tag] = value
+        elif tag in (DT_INIT_ARRAY, DT_FINI_ARRAY):
+            constructor_array[tag] = value
+        elif tag in (DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ):
+            constructor_array_size[tag] = value
+        elif tag in (DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ):
+            fail("BadDyn: preinit array unsupported")
         elif tag in (DT_RELR, DT_RELRSZ, DT_RELRENT):
             fail("BadDyn: RELR unsupported")
         elif tag in (
@@ -433,6 +450,26 @@ def check_dynamic(
     if pltgot is not None and not va_in_segment(segs, pltgot):
         fail("BadDyn: PLTGOT outside LOAD")
 
+    for tag, value in constructor_single.items():
+        if not va_in_segment(segs, value, 1):
+            fail(f"BadDyn: {'DT_INIT' if tag == DT_INIT else 'DT_FINI'} outside LOAD")
+    for address_tag, size_tag, label in (
+        (DT_INIT_ARRAY, DT_INIT_ARRAYSZ, "init"),
+        (DT_FINI_ARRAY, DT_FINI_ARRAYSZ, "fini"),
+    ):
+        address = constructor_array.get(address_tag)
+        size = constructor_array_size.get(size_tag)
+        if address is None and size is None:
+            continue
+        if address is None or size is None:
+            fail(f"BadDyn: incomplete {label} array metadata")
+        if size % 8 != 0:
+            fail(f"BadDyn: {label} array size")
+        if size // 8 > MAX_INIT_ARRAY:
+            fail(f"BadDyn: {label} array entries exceed cap")
+        if va_to_file(segs, address, size) is None:
+            fail(f"BadDyn: {label} array outside LOAD")
+
     rela_count = table_count("RELA", rela_va, relasz, relaent)
     if (rela_va is None) != (relasz is None) or (relasz is None) != (relaent is None):
         fail("BadDyn: incomplete RELA metadata")
@@ -522,8 +559,8 @@ def repack_static(
     if pages > 64:
         fail("NoSpace: total pages >64 or memsz >256K")
     n = len(blobs)
-    if n > 8:
-        fail("TooManyPhdrs: >8")
+    if n > MAX_SEGMENTS:
+        fail(f"TooManySegments: >{MAX_SEGMENTS} size-bearing segments")
     ehdr = struct.pack(
         "<16sHHIQQQIHHHHHH",
         bytes([0x7F]) + b"ELF" + bytes([2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
@@ -666,7 +703,7 @@ def repack_dynamic(
         + (1 if relro is not None else 0)
     )
     if phnum > MAX_PHNUM:
-        fail("TooManyPhdrs: >8")
+        fail(f"TooManyPhdrs: >{MAX_PHNUM} program headers")
     ehdr = struct.pack(
         "<16sHHIQQQIHHHHHH",
         bytes([0x7F]) + b"ELF" + bytes([2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
@@ -770,7 +807,7 @@ def main(src: str, dst: str) -> None:
     phentsz = u16(img, 54)
     phnum = u16(img, 56)
     if phnum > MAX_PHNUM:
-        fail("TooManyPhdrs: >8")
+        fail(f"TooManyPhdrs: >{MAX_PHNUM} program headers")
     if phentsz not in (0, 56) and phnum > 0:
         fail("BadSegment: phentsz !=56")
     if phoff + phnum * (phentsz or 56) > len(img):

@@ -25,6 +25,7 @@ where
 import Control.Concurrent (tryPutMVar, tryTakeMVar)
 import Control.Monad (foldM, forM_, unless, void, when)
 import Data.Bits (complement, shiftR, (.&.))
+import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.IORef (atomicModifyIORef')
 import Data.Int (Int64)
@@ -53,7 +54,9 @@ import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateStaticRunElf)
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Sched qualified as Sched
+import Kernel.Userspace.Trampoline qualified as Tramp
 import Kernel.Userspace.Types (Pid (..), Process (..), SharedObject (..), pidNext, procExitMap, procMap, processExitVar, userSem)
+import Numeric (showHex)
 import System.Timeout qualified as T
 
 foreign import ccall unsafe "house_enter_el0" c_enter_el0 :: Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO ()
@@ -64,6 +67,8 @@ foreign import ccall unsafe "house_asid_for_pdir" c_asid_for :: Ptr Word64 -> IO
 -- the allocator, which would otherwise hand the same root -- and so the same
 -- (TTBR0, ASID) pair -- to the next image.
 foreign import ccall unsafe "house_asid_forget_pdir" c_asid_forget :: Ptr Word64 -> IO ()
+
+foreign import ccall unsafe "house_flush_code_page" c_flush_code_page :: Ptr Word8 -> IO ()
 
 foreign import ccall unsafe "house_get_exit_code" c_get_exit :: IO CInt
 
@@ -377,6 +382,8 @@ data MappedImage = MappedImage {
   , mappedBreak :: Word64
   , mappedObjects :: [(String, [VM.VAddr])]
   , mappedSharedObjects :: [SharedObject]
+  , mappedInitSteps :: [Linker.LinkStep]
+  , mappedFiniSteps :: [Linker.LinkStep]
   }
 
 -- | Dynamic mappings are writable only while unpublished in the page map.
@@ -398,6 +405,7 @@ prepareImage :: Vfs.NamespaceId -> Elf -> H (Either LoadError PreparedImage)
 prepareImage ns elf
   | elfIsDyn elf = do
       checkLibVersionSkew ns
+      logSkippedDynTags "main" (Ldr.dynSkipped (Ldr.elfDyn elf))
       resolved <- resolveDependencies ns elf
       pure (resolved >>= prepareDynamicImage elf)
   | otherwise =
@@ -424,13 +432,22 @@ resolveDependencies ns main = go (Ldr.dynNeeded (Ldr.elfDyn main)) Map.empty Set
               Dmesg.dmesgLog ("needed " ++ name ++ ": no initramfs or mounted-root candidate")
               return (Left (DependencyMissing name))
             Left _ -> return (Left (BadDyn ("dependency " ++ name ++ " unavailable")))
-            Right bytes -> case loadElf bytes of
+            Right bytes -> case loadElf (BS.pack bytes) of
               Left err -> return (Left err)
-              Right dependency ->
+              Right dependency -> do
+                logSkippedDynTags name (Ldr.dynSkipped (Ldr.elfDyn dependency))
                 go
                   (Ldr.dynNeeded (Ldr.elfDyn dependency) ++ rest)
                   (Map.insert name dependency deps)
                   (Set.insert name seen)
+
+{- | One bounded dmesg line per image naming the dynamic tags this loader
+chose to ignore, so a tolerated tag is visible in the boot log rather than
+silent. Bounded by the size of the tolerated enumeration, not by the number
+of tags an image carries.
+-}
+logSkippedDynTags :: String -> [Ldr.DynSkip] -> H ()
+logSkippedDynTags name skipped = forM_ (Ldr.skipSummaryLine name skipped) Dmesg.dmesgLog
 
 -- | Where a layer records the digest of its own @/lib@ content.
 libVersionPath :: FilePath
@@ -580,16 +597,33 @@ runPreparedBound pidInt image argv envp = do
                           freePDir pdir
                           abort NoSpace
                         else do
-                          exitVar <- newEmptyMVar
-                          modifyRef procExitMap (Map.insert pid exitVar)
-                          modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage)))
-                          Sched.schedRegister pid
-                          _ <- forkH $ do
-                            liftIO (c_set_pdir pdirPtr)
-                            liftIO (c_enter_el0 entry sp pdirPtr asid)
-                            parkLoop pid pdirPtr asid exitVar
-                            return ()
-                          return (Right pid)
+                          -- The constructor phase is prepared before the process
+                          -- is published: a refusal here is a failed load, and
+                          -- the caller sees the reason instead of a live
+                          -- process that could never enter EL0.
+                          startPc <- case mappedInitSteps mappedImage of
+                            [] -> return (Right entry)
+                            steps -> do
+                              prepared <- prepareConstructorPhase pdir steps entry Tramp.BranchToEntry
+                              return (case prepared of Left err -> Left err; Right () -> Right Tramp.trampolinePage)
+                          case startPc of
+                            Left err -> do
+                              unmapTrampolinePage pdir
+                              unmapStackPage pdir stk
+                              freePDir pdir
+                              abort err
+                            Right pc -> do
+                              exitVar <- newEmptyMVar
+                              modifyRef procExitMap (Map.insert pid exitVar)
+                              modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage)))
+                              Sched.schedRegister pid
+                              let finiSteps = mappedFiniSteps mappedImage
+                              _ <- forkH $ do
+                                liftIO (c_set_pdir pdirPtr)
+                                liftIO (c_enter_el0 pc sp pdirPtr asid)
+                                parkLoop pdir pid pdirPtr asid exitVar sp finiSteps
+                                return ()
+                              return (Right pid)
 
 {- | Fork slice (Track O + COW, no signals): share the parent address space
 into a fresh PageMap + Pid. Every present user page maps into the child with
@@ -795,7 +829,7 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                       _ <- forkH $ do
                         liftIO (c_set_pdir childPtr)
                         _ <- liftIO (c_resume_el0 childPtr asid 0)
-                        parkLoop child childPtr asid exitVar
+                        parkLoop childPdir child childPtr asid exitVar 0 []
                         return ()
                       return (Right child)
 
@@ -862,7 +896,7 @@ execReplace pid@(Pid pidInt) pdir path = do
   mBytes <- Vfs.vfsRead ns path
   case mBytes of
     Left _ -> return (Left (BadSegment "enoent"))
-    Right bytes -> case loadElf bytes of
+    Right bytes -> case loadElf (BS.pack bytes) of
       Left err -> return (Left err)
       Right elf -> do
         prepared <- prepareImage ns elf
@@ -1070,8 +1104,8 @@ resume the rendered byte count. Errors resume negative errnos:
 -2 ENOENT, -9 EBADF, -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
 -14 EFAULT, -17 EEXIST, -20 ENOTDIR, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
 -}
-parkLoop :: Pid -> Ptr Word64 -> Word64 -> MVar Int -> H ()
-parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
+parkLoop :: VM.PageMap -> Pid -> Ptr Word64 -> Word64 -> MVar Int -> Word64 -> [Linker.LinkStep] -> H ()
+parkLoop pmap pid@(Pid selfInt) pdir asid exitVar sp finiSteps = loop
   where
     loop = do
       alive <- withQSem userSem (Map.member pid <$> readRef procMap)
@@ -1081,6 +1115,7 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
           mCode <- tryReadExitOnce pdir
           case mCode of
             Just c -> do
+              runFiniPhase c
               mq <- Sched.schedSuccessor pid
               forM_ mq Sched.schedWake
               Sched.schedUnregister pid
@@ -1110,6 +1145,15 @@ parkLoop pid@(Pid selfInt) pdir asid exitVar = loop
                 Just (ReqFault x0 va) -> do handleCowFault x0 va; loop
                 Just (ReqPreempt x0) -> do handlePreempt x0; loop
                 Just (ReqUnknown _) -> do resumeWith negENOSYS; loop
+    -- Constructors run before the process is reaped, while its pages and its
+    -- argument stack are still mapped. A failure here is logged and the exit
+    -- still completes: refusing to exit would wedge the process for good.
+    runFiniPhase code =
+      unless (null finiSteps) $ do
+        outcome <- runConstructorPhase pmap finiSteps (fromIntegral code) sp pdir asid Tramp.ExitProcess
+        case outcome of
+          Left err -> Dmesg.dmesgLog ("fini constructors skipped: " ++ Ldr.loadErrorToString err)
+          Right () -> return ()
     resumeWith res = void (liftIO (c_resume_el0 pdir asid res))
     negENOSYS = fromIntegral (-38 :: Int) :: Word64
     negENOENT = fromIntegral (-2 :: Int) :: Word64
@@ -1618,6 +1662,8 @@ mapPreparedImage pdir image = case image of
           , mappedBreak = initBreak elf
           , mappedObjects = [("static", sortOn id pages)]
           , mappedSharedObjects = []
+          , mappedInitSteps = []
+          , mappedFiniSteps = []
           }
   DynamicImage plan objects -> do
     case mapM plannedAccessFor objects of
@@ -1657,8 +1703,154 @@ mapPreparedImage pdir image = case image of
                                     , mappedBreak = brk
                                     , mappedObjects = objectPages
                                     , mappedSharedObjects = sharedObjects
+                                    , mappedInitSteps = Linker.linkInitSteps plan
+                                    , mappedFiniSteps = Linker.linkFiniSteps plan
                                     }
                               )
+
+{- | Run one constructor phase. The addresses are read out of the mapped,
+already relocated image, written into the loader's trampoline page, and the
+stub is entered at EL0 — so every constructor instruction runs at EL0 on the
+process's own stack, not from EL1. The page is mapped once and reused by the
+exit phase; it is only rewritten while the process cannot be executing,
+because a process has a single EL0 session.
+-}
+runConstructorPhase :: VM.PageMap -> [Linker.LinkStep] -> Word64 -> Word64 -> Ptr Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+runConstructorPhase pdir steps target sp pdirPtr asid mode = do
+  prepared <- prepareConstructorPhase pdir steps target mode
+  case prepared of
+    Left err -> return (Left err)
+    Right () -> do
+      -- The svc #EXIT ending the first session left the recorded pdir on the
+      -- kernel L0, and the svc path walks that global to translate user
+      -- pointers — so a constructor that calls one faults in the kernel's tables.
+      liftIO (c_set_pdir pdirPtr)
+      liftIO (c_enter_el0 Tramp.trampolinePage sp pdirPtr asid)
+      return (Right ())
+
+{- | Everything a constructor phase needs *before* the process is published:
+expand the relocated addresses, bound them, map the trampoline page, and fill
+it. Kept apart from entering EL0 so a refusal is a failed load with nothing
+registered, rather than a live process that can never run.
+-}
+prepareConstructorPhase :: VM.PageMap -> [Linker.LinkStep] -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+prepareConstructorPhase pdir steps target mode = do
+  expanded <- expandConstructorSteps pdir steps
+  case expanded of
+    Left err -> return (Left err)
+    Right calls
+      | length calls > Tramp.maxTrampolineCalls -> return (Left (BadDyn "constructor call cap exceeded"))
+      | otherwise -> do
+          mapped <- ensureTrampolinePage pdir
+          case mapped of
+            Left err -> return (Left err)
+            Right () -> fillTrampoline pdir calls target mode
+
+-- | Flatten planned steps into the addresses to call, in order.
+expandConstructorSteps :: VM.PageMap -> [Linker.LinkStep] -> H (Either LoadError [Word64])
+expandConstructorSteps pdir steps = go steps []
+  where
+    go [] acc = return (Right (reverse acc))
+    go (step : rest) acc = case step of
+      Linker.LinkCall address -> go rest (address : acc)
+      Linker.LinkArrayAt table count -> do
+        pointers <- mapM (readConstructorPointer pdir) [table, table + 8 .. table + fromIntegral count * 8 - 8]
+        case sequence pointers of
+          Left err -> return (Left err)
+          Right addresses -> go rest (reverse addresses ++ acc)
+
+{- | One relocated constructor pointer. The slot it is read from is a
+pointer word and must be eight-byte aligned; the value it holds is a code
+address, and AArch64 requires only four-byte instruction alignment, so an
+eight-byte requirement on the value would refuse a valid image.
+-}
+readConstructorPointer :: VM.PageMap -> Word64 -> H (Either LoadError Word64)
+readConstructorPointer pdir address
+  | address .&. 7 /= 0 = return (Left (BadDyn "constructor slot unaligned"))
+  | otherwise = do
+      mapped <- VM.getPage pdir (address .&. complement 4095)
+      case mapped of
+        Nothing -> return (Left (BadDyn "constructor pointer page unmapped"))
+        Just page
+          | offset > 4088 -> return (Left (BadDyn "constructor pointer crosses page"))
+          | otherwise -> do
+              value <- peek (fromPhysPage (VM.physPage page) `plusPtr` offset) :: H Word64
+              if value == 0 || value .&. 3 /= 0
+                then return (Left (BadDyn "constructor pointer is not a code address"))
+                else return (Right value)
+          where
+            offset = fromIntegral (address .&. 4095)
+
+-- | Release the trampoline page, if one was ever mapped for this process.
+unmapTrampolinePage :: VM.PageMap -> H ()
+unmapTrampolinePage pdir = do
+  mapped <- VM.getPage pdir Tramp.trampolinePage
+  case mapped of
+    Nothing -> return ()
+    Just info -> do
+      ok <- VM.setPage pdir Tramp.trampolinePage Nothing
+      when ok (releaseBacking (fromPhysPage (VM.physPage info)))
+
+-- | Map the trampoline page once per process, writable while it is filled.
+ensureTrampolinePage :: VM.PageMap -> H (Either LoadError ())
+ensureTrampolinePage pdir = do
+  occupied <- VM.getPage pdir Tramp.trampolinePage
+  case occupied of
+    Just _ -> return (Right ())
+    Nothing -> do
+      mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
+      case mp of
+        Nothing -> return (Left NoSpace)
+        Just pg -> do
+          HPages.zeroPage pg
+          let info = VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}
+          ok <- VM.setPage pdir Tramp.trampolinePage (Just info)
+          if ok
+            then return (Right ())
+            else do
+              HPages.freePage pg
+              return (Left NoSpace)
+
+{- | Fill the trampoline page and then read the first code word back. Entering
+EL0 at a page whose content the loader has not confirmed would turn a write
+that went somewhere unexpected into an undefined instruction at EL0, which is
+the least diagnosable place to discover it.
+-}
+fillTrampoline :: VM.PageMap -> [Word64] -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+fillTrampoline pdir calls target mode = do
+  mapped <- VM.getPage pdir Tramp.trampolinePage
+  case mapped of
+    Nothing -> return (Left (BadDyn "trampoline page unmapped"))
+    Just page -> do
+      let base = fromPhysPage (VM.physPage page) :: Ptr Word8
+      pokeWords base (Tramp.trampolineCodeOffset + Tramp.trampolineDescriptorOffset) (Tramp.trampolineDescriptor calls target mode)
+      -- The stub is 32-bit instructions, so it cannot ride the descriptor's
+      -- 8-byte stride: spaced that way every word is followed by a zero pad and
+      -- EL0 decodes the padding.
+      pokeCode base Tramp.trampolineCodeOffset Tramp.trampolineCode
+      -- The stores above went through the data cache, so without this EL0 can
+      -- enter a page whose instruction bytes it already holds stale.
+      liftIO (c_flush_code_page base)
+      got0 <- peek (castPtr base :: Ptr Word32)
+      got1 <- peek (castPtr (base `plusPtr` 4) :: Ptr Word32)
+      case Tramp.trampolineCode of
+        firstWord : secondWord : _ ->
+          if got0 == firstWord && got1 == secondWord
+            then return (Right ())
+            else do
+              Dmesg.dmesgLog ("trampoline w0=" ++ showHexWord got0 ++ "/" ++ showHexWord firstWord)
+              Dmesg.dmesgLog ("trampoline w1=" ++ showHexWord got1 ++ "/" ++ showHexWord secondWord)
+              return (Left (BadDyn "trampoline page writeback mismatch"))
+        _ -> return (Left (BadDyn "trampoline code empty"))
+  where
+    showHexWord :: (Integral a) => a -> String
+    showHexWord value = "0x" ++ showHex value ""
+    pokeWords :: Ptr Word8 -> Int -> [Word64] -> H ()
+    pokeWords base byteOffset values =
+      mapM_ (\pair -> poke (castPtr (base `plusPtr` (byteOffset + fst pair * 8)) :: Ptr Word64) (snd pair)) (zip [0 :: Int ..] values)
+    pokeCode :: Ptr Word8 -> Int -> [Word32] -> H ()
+    pokeCode base byteOffset values =
+      mapM_ (\pair -> poke (castPtr (base `plusPtr` (byteOffset + fst pair * 4)) :: Ptr Word32) (snd pair)) (zip [0 :: Int ..] values)
 
 plannedAccess :: RuntimeObject -> Either LoadError [(Word64, Linker.PageAccess)]
 plannedAccess object =
@@ -1709,7 +1901,7 @@ segmentMappingLayout base segment = do
         | otherwise = fromIntegral ((spanBytes - 1) `div` 4096 + 1)
   pure (pageBase, fromIntegral delta, pages, delta)
 
-mapOneSegment :: VM.PageMap -> Word64 -> [Word8] -> Segment -> MapMode -> H (Either LoadError [VM.VAddr])
+mapOneSegment :: VM.PageMap -> Word64 -> BS.ByteString -> Segment -> MapMode -> H (Either LoadError [VM.VAddr])
 mapOneSegment pdir base bytes segment mode = do
   let layout = segmentMappingLayout base segment
   case layout of
@@ -1784,25 +1976,17 @@ mapOneSegment pdir base bytes segment mode = do
                               return (Left NoSpace)
                             else loop pageBase pageCount deltaWord (idx + 1) (acc ++ [curVa])
 
-copyElfPageBytes :: [Word8] -> Ptr Word8 -> Int -> Int -> Int -> H (Either LoadError ())
-copyElfPageBytes source destination sourceOffset destinationOffset count = do
-  let copied = mapM (\index -> indexBytesAt source (sourceOffset + index)) [0 .. count - 1]
-  case copied of
-    Nothing -> return (Left (BadSegment "file bytes outside image"))
-    Just bytes -> do
-      mapM_ (\(index, byte) -> poke (destination `plusPtr` (destinationOffset + index)) byte) (zip [0 ..] bytes)
+copyElfPageBytes :: BS.ByteString -> Ptr Word8 -> Int -> Int -> Int -> H (Either LoadError ())
+copyElfPageBytes source destination sourceOffset destinationOffset count
+  | sourceOffset < 0 || destinationOffset < 0 || count < 0 = return (Left (BadSegment "file bytes outside image"))
+  | sourceOffset > BS.length source - count = return (Left (BadSegment "file bytes outside image"))
+  | otherwise = do
+      mapM_ copyOne [0 .. count - 1]
       return (Right ())
-
-indexBytesAt :: [Word8] -> Int -> Maybe Word8
-indexBytesAt bytes index
-  | index < 0 = Nothing
-  | otherwise = go bytes index
   where
-    go [] _ = Nothing
-    go (byte : _) 0 = Just byte
-    go (_ : rest) offset
-      | offset < 0 = Nothing
-      | otherwise = go rest (offset - 1)
+    copyOne index = do
+      let byte = BS.index source (sourceOffset + index)
+      poke (destination `plusPtr` (destinationOffset + index)) byte
 
 applyPatches :: VM.PageMap -> Linker.LinkPlan -> [RuntimeObject] -> [(String, [(Word64, Linker.PageAccess)])] -> H (Either LoadError ())
 applyPatches pdir plan objects accesses = go (Linker.linkPatches plan)

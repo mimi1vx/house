@@ -114,6 +114,17 @@ ld.lld -pie --gc-sections --fatal-warnings \
 	--no-undefined --build-id=none \
 	-L"$OUT" -o "$OUT/hello-dyn" "$OUT/hello.o" "-l:$SONAME"
 
+gcc -c build-probe/hello-dyn-init.s -o "$OUT/hello-init.o"
+nm "$OUT/hello-init.o" | awk '$1 == "U" && $2 == "strlen" {found = 1} END {exit !found}' || {
+	echo "mk-dynamic-probe: hello-dyn-init.s does not import strlen" >&2
+	exit 1
+}
+ld.lld -pie --gc-sections --fatal-warnings \
+	--dynamic-linker=/lib/ld-house.so.0 --hash-style=sysv \
+	-z now -z relro -z noseparate-code \
+	--no-undefined --build-id=none \
+	-L"$OUT" -o "$OUT/hello-dyn-init" "$OUT/hello-init.o" "-l:$SONAME"
+
 cat >"$OUT/mid-exports.map" <<'EOF'
 {
   global:
@@ -169,11 +180,21 @@ gcc -c build-probe/exec-dyn.s -o "$OUT/exec-dyn.o"
 ld.lld --gc-sections --fatal-warnings --build-id=none \
 	-T build-probe/exec.ld -o "$OUT/exec-dyn" "$OUT/exec-dyn.o"
 
+cat >"$OUT/c-hello.c" <<'EOF'
+#include <stdio.h>
+int main(void) { printf("Hello from C\n"); return 0; }
+EOF
+# Compiled from inside $OUT so the recorded input name is the bare basename and
+# cannot leak the per-build output path into the artifact.
+(cd "$OUT" && gcc -O0 -o c-hello c-hello.c)
+
 printf '%s  %s\n' "$(sha256sum "$OUT/$SONAME" | cut -d' ' -f1)" "$SONAME"
 printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn" | cut -d' ' -f1)" "hello-dyn"
+printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn-init" | cut -d' ' -f1)" "hello-dyn-init"
 printf '%s  %s\n' "$(sha256sum "$OUT/$MID_SONAME" | cut -d' ' -f1)" "$MID_SONAME"
 printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn-deep" | cut -d' ' -f1)" "hello-dyn-deep"
 printf '%s  %s\n' "$(sha256sum "$OUT/libc-missing.so.0" | cut -d' ' -f1)" "libc-missing.so.0"
 printf '%s  %s\n' "$(sha256sum "$OUT/hello-dyn-missing" | cut -d' ' -f1)" "hello-dyn-missing"
 printf '%s  %s\n' "$(sha256sum "$OUT/exec-dyn" | cut -d' ' -f1)" "exec-dyn"
+printf '%s  %s\n' "$(sha256sum "$OUT/c-hello" | cut -d' ' -f1)" "c-hello"
 echo "mk-dynamic-probe: $OUT"

@@ -29,7 +29,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (foldM, forM, unless)
-import Data.Bits (shiftL, shiftR, (.|.))
+import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.Either (fromRight, isLeft)
@@ -52,6 +52,7 @@ import Kernel.Initramfs.Unpack qualified as Unpack
 import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Process qualified as Proc
+import Kernel.Userspace.Trampoline qualified as Tramp
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
@@ -97,7 +98,7 @@ assertLeft name = check name . isLeft
 -- | Assert loadElf never throws and returns the expected Left.
 assertLoadLeft :: String -> [Word8] -> Ldr.LoadError -> IO Bool
 assertLoadLeft name bytes want = do
-  r <- try (evaluate (Ldr.loadElf bytes)) :: IO (Either SomeException (Either Ldr.LoadError Ldr.Elf))
+  r <- try (evaluate (loadFixture bytes)) :: IO (Either SomeException (Either Ldr.LoadError Ldr.Elf))
   case r of
     Left _ -> check name False
     Right (Left got) -> check name (got == want)
@@ -955,12 +956,12 @@ main = do
       , assertLoadLeft "elf m2 hash bucket cap" elfM2HashBuckets (Ldr.BadDyn "hash buckets")
       , assertLoadLeft "elf m2 symbol count cap" elfM2SymbolCount (Ldr.BadDyn "symbol count")
       , assertLoadLeft "elf m2 GNU hash reject" elfM2GnuHash (Ldr.BadDyn "GNU hash unsupported")
-      , assertLoadLeft "elf m2 versioning reject" elfM2Version (Ldr.BadDyn "symbol versioning unsupported")
-      , assertLoadLeft "elf m2 init array reject" elfM2Init (Ldr.BadDyn "init/fini arrays unsupported")
+      , check "elf m2 VERSYM tolerated" (skippedTagsOf elfM2Version == [0x6FFFFFF0])
+      , assertLoadLeft "elf m2 init array without size refuses" elfM2Init (Ldr.BadDyn "incomplete init array metadata")
       , assertLoadLeft "elf m2 TEXTREL reject" elfM2Textrel (Ldr.BadDyn "TEXTREL unsupported")
       , assertLoadLeft "elf m2 flags TEXTREL reject" elfM2FlagsTextrel (Ldr.BadDyn "TEXTREL unsupported")
       , assertLoadLeft "elf m2 strsz without strtab" elfM2StrszNoStrtab (Ldr.BadDyn "missing STRTAB")
-      , assertLoadLeft "elf m2 RELACOUNT reject" elfM2RelaCount (Ldr.BadDyn "RELACOUNT unsupported")
+      , check "elf m2 RELACOUNT tolerated" (skippedTagsOf elfM2RelaCount == [0x6FFFFFF9])
       , assertLoadLeft "elf m2 RELR reject" elfM2Relr (Ldr.BadDyn "RELR unsupported")
       , assertLoadLeft "elf m2 IRELATIVE reject" elfM2Irelative (Ldr.BadDyn "IRELATIVE unsupported")
       , assertLoadLeft "elf bad type" elfBadType Ldr.BadType
@@ -972,17 +973,158 @@ main = do
       , assertLoadLeft "elf strsz overrun" elfStrszOverrun (Ldr.BadDyn "strsz overrun")
       , assertLoadLeft "elf rela outside LOAD" elfRelaOutside (Ldr.BadDyn "rela outside LOAD")
       , assertLoadLeft "elf rela count cap" elfRelaCount (Ldr.BadDyn "rela count")
+      , check "elf size-bearing segment cap" (loadFixture elfManySegments == Left Ldr.TooManySegments)
+      , check "elf total phdr cap" (loadFixture elfManyPhdrs == Left Ldr.TooManyPhdrs)
+      , check "elf gcc-shaped header count parses" (isDynRight elfGccShaped False)
+      , check
+          "rela duplicate offset keeps last write"
+          ( Ldr.applyRelativeRelocs
+              0x01000000
+              [relativeRelocation 0x01000008 0x2000, relativeRelocation 0x01000008 0x3000]
+              (BS.pack (replicate 16 0))
+              == Right (BS.pack (replicate 8 0 ++ put64le 0x01003000))
+          )
+      , -- C2: a tolerated tag must change nothing but the recorded skip list.
+        check
+          "tolerated tag set matches the checked-in list"
+          (Ldr.skippableDynTags == toleratedDynTags)
+      , check
+          "every tolerated tag is classified"
+          (all (\tag -> case Ldr.skipDynTag tag of Just _ -> True; Nothing -> False) toleratedDynTags)
+      , check
+          "tolerated tag parses and is recorded"
+          (all (\tag -> skippedTagsOf (elfDynWithTag (tag, 0)) == [tag]) toleratedDynTags)
+      , check
+          "tolerated tag leaves the parse identical to its absence"
+          (all (\tag -> withoutSkips (loadFixture (elfDynWithTag (tag, 0))) == withoutSkips (loadFixture elfDynGood)) toleratedDynTags)
+      , check
+          "unlisted tag still fails"
+          (all (\tag -> case loadFixture (elfDynWithTag (tag, 0)) of Left _ -> True; Right _ -> False) rejectedDynTags)
+      , check
+          "skip line names every tolerated reason"
+          ( Ldr.skipSummaryLine "libc-house.so.0" (concatMap (\tag -> skipsOf (elfDynWithTag (tag, 0))) toleratedDynTags)
+              == Just "dyn skip libc-house.so.0: ver,rpath,relacount,xindex (8 tags)"
+          )
+      , check
+          "skip line fits dmesg for the whole tolerated set"
+          ( case Ldr.skipSummaryLine "libHSghc-internal-9.1401.0-ghc9.14.1.so" (concatMap (\tag -> skipsOf (elfDynWithTag (tag, 0))) toleratedDynTags) of
+              Nothing -> False
+              Just line -> length line <= 120
+          )
+      , check "no skip line without a skip" (isNothing (Ldr.skipSummaryLine "main" (skipsOf elfDynGood)))
+      , -- C5: constructor metadata is parsed, validated, and fail-closed.
+        check
+          "DT_INIT parsed"
+          (fmap fst (constructorsOf [(12, 0x01000000)]) == Just (Just 0x01000000))
+      , check
+          "DT_INIT_ARRAY parsed with its size"
+          ( fmap snd (constructorsOf [(25, 0x01000100), (27, 8)])
+              == Just (Just (Ldr.InitArray 0x01000100 1))
+          )
+      , check
+          "DT_FINI_ARRAY parsed with its size"
+          (finiArrayOf [(26, 0x01000100), (28, 24)] == Just (Ldr.InitArray 0x01000100 3))
+      , assertLoadLeft
+          "fini array without its size refuses"
+          (elfDynWithTags [(26, 0x01000100)])
+          (Ldr.BadDyn "incomplete fini array metadata")
+      , assertLoadLeft
+          "init array without its size refuses"
+          (elfDynWithTags [(25, 0x01000200)])
+          (Ldr.BadDyn "incomplete init array metadata")
+      , assertLoadLeft
+          "init array size not a pointer count"
+          (elfDynWithTags [(25, 0x01000200), (27, 12)])
+          (Ldr.BadDyn "init array size")
+      , assertLoadLeft
+          "init array entry cap"
+          (elfDynWithTags [(25, 0x01000200), (27, 8 * 65)])
+          (Ldr.BadDyn "init array entries exceed cap")
+      , assertLoadLeft
+          "init array outside LOAD refuses"
+          (elfDynWithTags [(25, 0x02F00000), (27, 8)])
+          (Ldr.BadDyn "init array outside LOAD")
+      , assertLoadLeft
+          "DT_INIT outside LOAD refuses"
+          (elfDynWithTags [(12, 0x02F00000)])
+          (Ldr.BadDyn "DT_INIT outside LOAD")
+      , assertLoadLeft
+          "duplicate DT_INIT refuses"
+          (elfDynWithTags [(12, 0x01000000), (12, 0x01000010)])
+          (Ldr.BadDyn "duplicate INIT")
+      , check
+          "no constructors when the table has none"
+          (constructorsOf [] == Just (Nothing, Nothing))
+      , check
+          "init order is dependencies first, main last"
+          ( fmap Linker.linkInitSteps constructorPlan
+              == Right
+                [ Linker.LinkArrayAt 0x01020100 1
+                , Linker.LinkCall 0x01010010
+                , Linker.LinkCall 0x01000020
+                , Linker.LinkArrayAt 0x01000100 2
+                ]
+          )
+      , check
+          "fini order mirrors init, main first"
+          ( fmap Linker.linkFiniSteps constructorPlan
+              == Right
+                [ Linker.LinkArrayAt 0x01000100 2
+                , Linker.LinkCall 0x01000300
+                , Linker.LinkCall 0x01010200
+                , Linker.LinkArrayAt 0x01020100 1
+                , Linker.LinkCall 0x01020280
+                ]
+          )
+      , check
+          "trampoline descriptor layout"
+          ( Tramp.trampolineDescriptor [0x11, 0x22] 0x33 Tramp.ExitProcess
+              == [2, 0x11, 0x22, 0x33, 1]
+          )
+      , check
+          "trampoline descriptor offsets"
+          ( Tramp.descriptorCallOffset 0 == 8
+              && Tramp.descriptorCallOffset 2 == 24
+              && Tramp.descriptorTargetOffset 2 == 24
+              && Tramp.descriptorModeOffset 2 == 32
+          )
+      , check
+          "trampoline code is 23 words and fits its region"
+          (length Tramp.trampolineCode == 23 && Tramp.trampolineCodeOffset + 23 * 4 < Tramp.trampolineDescriptorOffset)
+      , check
+          "trampoline branches land on the instruction the comment names"
+          (branchTargets Tramp.trampolineCode == [(5, 12), (11, 4), (17, 20), (22, 22)])
+      , check
+          "trampoline page is below the reserved stack page"
+          (Tramp.trampolinePage < Ldr.stackPageStart && Tramp.trampolinePage `mod` 4096 == 0)
+      , check
+          "phdr and segment diagnostics differ"
+          (Ldr.loadErrorToString Ldr.TooManyPhdrs /= Ldr.loadErrorToString Ldr.TooManySegments)
       , check "elf jump-slot accepted" (isDynRight elfJumpSlot True)
-      , check "elf tls reject" (Ldr.loadElf elfTls == Left Ldr.TlsUnsupported)
+      , check "elf tls reject" (loadFixture elfTls == Left Ldr.TlsUnsupported)
       , assertLoadLeft "elf relro outside LOAD" elfRelroOutside (Ldr.BadDyn "relro outside LOAD")
       , check "needed cycle a->b->a" (Ldr.findNeededCycle [("a", ["b"]), ("b", ["a"])] == Left Ldr.NeededCycle)
       , check "needed self cycle" (Ldr.findNeededCycle [("a", ["a"])] == Left Ldr.NeededCycle)
       , check "needed acyclic" (Ldr.findNeededCycle [("a", ["b"]), ("b", [])] == Right ())
       , check "needed diamond ok" (Ldr.findNeededCycle [("a", ["b", "c"]), ("b", ["d"]), ("c", ["d"]), ("d", [])] == Right ())
-      , check "rela slide good" (Ldr.applyRelativeRelocs 0x01000000 [relativeRelocation 0x01000008 0x2000] (replicate 16 0) == Right (replicate 8 0 ++ put64le 0x01002000))
-      , check "rela slide overflow" (Ldr.applyRelativeRelocs 0x01000000 [relativeRelocation 0x01000008 maxBound] (replicate 16 0) == Left Ldr.OverlapSize)
-      , check "rela slide jump reject" (Ldr.applyRelativeRelocs 0x01000000 [eagerRelocation 0x01000008 1026 1 "strlen" 0] (replicate 16 0) == Left (Ldr.UnsupportedReloc 1026))
-      , check "rela file slide good" (Ldr.applyRelocsToFile [Ldr.Segment 0x01000000 288 512 512 5] 0x01000000 [relativeRelocation 0x01000008 0x2000] (replicate 512 0) == Right (replicate 296 0 ++ put64le 0x01002000 ++ replicate 208 0))
+      , check
+          "rela slide good"
+          ( Ldr.applyRelativeRelocs 0x01000000 [relativeRelocation 0x01000008 0x2000] (BS.pack (replicate 16 0))
+              == Right (BS.pack (replicate 8 0 ++ put64le 0x01002000))
+          )
+      , check
+          "rela slide overflow"
+          (Ldr.applyRelativeRelocs 0x01000000 [relativeRelocation 0x01000008 maxBound] (BS.pack (replicate 16 0)) == Left Ldr.OverlapSize)
+      , check
+          "rela slide jump reject"
+          ( Ldr.applyRelativeRelocs 0x01000000 [eagerRelocation 0x01000008 1026 1 "strlen" 0] (BS.pack (replicate 16 0))
+              == Left (Ldr.UnsupportedReloc 1026)
+          )
+      , check
+          "rela file slide good"
+          ( Ldr.applyRelocsToFile [Ldr.Segment 0x01000000 288 512 512 5] 0x01000000 [relativeRelocation 0x01000008 0x2000] (BS.pack (replicate 512 0))
+              == Right (BS.pack (replicate 296 0 ++ put64le 0x01002000 ++ replicate 208 0))
+          )
       , -- M2.1 pure dependency, placement, symbol, and relocation planner
         check
           "link JUMP_SLOT resolves"
@@ -1378,6 +1520,30 @@ main = do
   unless (and results) exitFailure
   putStrLn "all pure tests passed"
 
+{- | Every branch in the trampoline stub, as (index, index it targets). A
+miscomputed branch offset still decodes as a branch and still leaves every
+word looking right, so the word list cannot catch it; only the decoded
+destination can. The expected pairs are @b.hs done@, @b loop@, @b.ne
+exiting@ and @b .@, so the loop back edge must reach the compare above the
+branch and not the index reset below the entry.
+-}
+branchTargets :: [Word32] -> [(Int, Int)]
+branchTargets code = [(i, target) | (i, w) <- zip [0 ..] code, Just target <- [branchTarget i w]]
+
+branchTarget :: Int -> Word32 -> Maybe Int
+branchTarget i w
+  | w .&. 0xFC000000 == 0x54000000 = Just (i + signExtend 19 (fromIntegral ((w `shiftR` 5) .&. 0x7FFFF)))
+  | w .&. 0xFC000000 == 0x14000000 = Just (i + signExtend 26 (fromIntegral (w .&. 0x03FFFFFF)))
+  | otherwise = Nothing
+
+{- | Read an @bits@-wide field as two's complement, so a backward branch
+reports a negative displacement.
+-}
+signExtend :: Int -> Int -> Int
+signExtend bits value
+  | testBit value (bits - 1) = value - (1 `shiftL` bits)
+  | otherwise = value
+
 elfBadArch :: [Word8]
 elfBadArch =
   [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -1676,6 +1842,114 @@ elfBadVersion = patchAt elfExecMin 6 [2]
 elfPhentZero :: [Word8]
 elfPhentZero = patchAt elfDynGood 54 [0, 0]
 
+{- | @total@ program headers of which the first @loads@ are one-page
+@PT_LOAD@s; the rest are zero-sized @PT_NOTE@s. Separates the total header
+bound from the size-bearing-segment bound.
+-}
+mkHeaderCountElf :: Int -> Int -> [Word8]
+mkHeaderCountElf total loads =
+  let base = 64 + 56 * total
+      loadSegs =
+        [ mkPhdr 1 5 (fromIntegral (base + i * 0x1000)) (0x01000000 + fromIntegral i * 0x1000) 0x1000 0x1000 0
+        | i <- [0 .. loads - 1]
+        ]
+      noteSegs = [mkPhdr 4 4 0 0 0 0 0 | _ <- [loads .. total - 1]]
+   in mkEhdr 2 0x01000000 total ++ concat loadSegs ++ concat noteSegs ++ replicate (base + loads * 0x1000) 0
+
+-- | One more size-bearing segment than the mapping bound allows.
+elfManySegments :: [Word8]
+elfManySegments = mkHeaderCountElf (Ldr.maxSegments + 1) (Ldr.maxSegments + 1)
+
+-- | One more total header than the parse bound allows, with two LOADs.
+elfManyPhdrs :: [Word8]
+elfManyPhdrs = mkHeaderCountElf (Ldr.maxPhnum + 1) 2
+
+-- | The shape a gcc/glibc link emits: ten headers, two of which carry bytes.
+elfGccShaped :: [Word8]
+elfGccShaped = mkHeaderCountElf 10 2
+
+-- | The good dynamic fixture with one extra @DT_*@ entry in its table.
+elfDynWithTag :: (Word64, Word64) -> [Word8]
+elfDynWithTag = elfDynWithTags . (: [])
+
+-- | The good dynamic fixture with several extra @DT_*@ entries.
+elfDynWithTags :: [(Word64, Word64)] -> [Word8]
+elfDynWithTags extras =
+  let ents = goodDynEnts ++ extras
+   in mkDynElf
+        3
+        0x01000000
+        (mkDynBlob interpGoodBs ents (1027, 0x01000008, 0x2000))
+        [(0x10, 19)]
+        [(0x100, 0x01000100, length (mkDynArr ents))]
+        [(0x01000000, 0x10)]
+        []
+
+-- | The tolerated set, written out here so widening it is a visible diff.
+toleratedDynTags :: [Word64]
+toleratedDynTags = [0x6FFFFFFE, 0x6FFFFFFF, 0x6FFFFFFC, 0x6FFFFFFD, 0x6FFFFFF0, 29, 0x6FFFFFF9, 34]
+
+-- | Tags near the tolerated ones that must still be rejected.
+rejectedDynTags :: [Word64]
+rejectedDynTags = [0x7FFFFFFD, 0x7FFFFFFF, 33, 35, 36, 37, 0x6FFFFEF5, 0x6FFFFFEF]
+
+-- | Constructor metadata as the parser recorded it, or Nothing on refusal.
+constructorsOf :: [(Word64, Word64)] -> Maybe (Maybe Word64, Maybe Ldr.InitArray)
+constructorsOf extras = case loadFixture (elfDynWithTags extras) of
+  Left _ -> Nothing
+  Right elf -> Just (Ldr.dynInitFn (Ldr.elfDyn elf), Ldr.dynInitArray (Ldr.elfDyn elf))
+
+-- | The parsed DT_FINI_ARRAY, for the same reason constructorsOf is separate.
+finiArrayOf :: [(Word64, Word64)] -> Maybe Ldr.InitArray
+finiArrayOf extras = case loadFixture (elfDynWithTags extras) of
+  Left _ -> Nothing
+  Right elf -> Ldr.dynFiniArray (Ldr.elfDyn elf)
+
+skippedTagsOf :: [Word8] -> [Word64]
+skippedTagsOf bytes = case loadFixture bytes of
+  Right elf -> map Ldr.dynSkipTag (Ldr.dynSkipped (Ldr.elfDyn elf))
+  Left _ -> []
+
+{- | A three-object plan whose main and both dependencies declare
+constructors, so the planned init and fini order is observable.
+-}
+constructorPlan :: Either Ldr.LoadError Linker.LinkPlan
+constructorPlan =
+  linkWith
+    elfLinkMain
+    (setConstructors (Just 0x20) (Just 0x300) (Just 2) . setMainRelocations [] . setMainNeeded ["liba.so.0", "libb.so.0"])
+    [ ("liba.so.0", elfLinkDep, dependencyWithConstructors "liba.so.0" (Just 0x10) (Just 0x200) Nothing)
+    , ("libb.so.0", elfLinkDep, dependencyWithConstructors "libb.so.0" Nothing (Just 0x280) (Just 1))
+    ]
+
+{- | Give a parsed object constructor metadata at addresses inside its own
+image, without going back through the dynamic table: the Linker only reads
+the recorded values, so this is the same input a real image would produce.
+-}
+setConstructors :: Maybe Word64 -> Maybe Word64 -> Maybe Int -> ElfEdit
+setConstructors initFn finiFn entries elf =
+  Right (updateDyn (\dynInfo -> dynInfo {Ldr.dynInitFn = initFn, Ldr.dynFiniFn = finiFn, Ldr.dynInitArray = array, Ldr.dynFiniArray = array}) elf)
+  where
+    array = Ldr.InitArray 0x100 <$> entries
+
+dependencyWithConstructors :: String -> Maybe Word64 -> Maybe Word64 -> Maybe Int -> ElfEdit
+dependencyWithConstructors name initFn finiFn entries elf =
+  validDependency name [] [] elf >>= setConstructors initFn finiFn entries
+
+skipsOf :: [Word8] -> [Ldr.DynSkip]
+skipsOf bytes = case loadFixture bytes of
+  Right elf -> Ldr.dynSkipped (Ldr.elfDyn elf)
+  Left _ -> []
+
+{- | The derived metadata with the image bytes and the recorded skip list
+cleared, so a tolerated tag can be compared against its own absence. The
+bytes differ by construction — the tag is in one image and not the other —
+so "ignoring the tag changes nothing" means exactly this and nothing else.
+-}
+withoutSkips :: Either Ldr.LoadError Ldr.Elf -> Either Ldr.LoadError Ldr.Elf
+withoutSkips (Right elf) = Right elf {Ldr.elfBytes = BS.empty, Ldr.elfDyn = (Ldr.elfDyn elf) {Ldr.dynSkipped = []}}
+withoutSkips other = other
+
 elfDynAlign8192 :: [Word8]
 elfDynAlign8192 = patchMany [(72, put64le 0), (112, put64le 8192)] elfDynGood
 
@@ -1867,12 +2141,12 @@ type ElfEdit = Ldr.Elf -> Either Ldr.LoadError Ldr.Elf
 
 linkWith :: [Word8] -> ElfEdit -> [(String, [Word8], ElfEdit)] -> Either Ldr.LoadError Linker.LinkPlan
 linkWith mainBytes editMain dependencyEdits = do
-  mainElf <- Ldr.loadElf mainBytes >>= editMain
+  mainElf <- loadFixture mainBytes >>= editMain
   dependencies <- foldM addDependency Map.empty dependencyEdits
   Linker.linkDynamic mainElf dependencies
   where
     addDependency dependencies (name, bytes, edit) = do
-      elf <- Ldr.loadElf bytes
+      elf <- loadFixture bytes
       edited <- edit elf
       pure (Map.insert name edited dependencies)
 
@@ -1922,7 +2196,7 @@ dependencyCapPlan count =
 
 plannedAccessFor :: Word64 -> Word64 -> ([Ldr.Segment], Ldr.RelroRange) -> Either Ldr.LoadError [(Word64, Linker.PageAccess)]
 plannedAccessFor base pages (segments, relro) = do
-  elf <- Ldr.loadElf elfLinkMain
+  elf <- loadFixture elfLinkMain
   Linker.plannedPageAccess
     (Linker.PlacedObject "main" base 0x01000080 pages)
     elf {Ldr.elfSegs = segments, Ldr.elfRelro = Just relro}
@@ -1971,9 +2245,9 @@ boundaryRelro = Ldr.RelroRange 0x801 0x1000
 
 finalPageAccess :: Either Ldr.LoadError [(Word64, Linker.PageAccess)]
 finalPageAccess = do
-  mainElf <- Ldr.loadElf elfLinkMain
+  mainElf <- loadFixture elfLinkMain
   let mainEdited = setAccessLayout (setMainRelocations [eagerBinding 0x1138 1026 1 "strlen" 0] (setMainNeeded ["libc-house.so.0"] mainElf))
-  depElf <- Ldr.loadElf elfLinkDep >>= validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1]
+  depElf <- loadFixture elfLinkDep >>= validDependency "libc-house.so.0" [] [definedSymbol "strlen" 0x100 1]
   let depEdited = setAccessLayout depElf
   plan <- Linker.linkDynamic mainEdited (Map.singleton "libc-house.so.0" depEdited)
   let objects = Map.fromList [("main", mainEdited), ("libc-house.so.0", depEdited)]
@@ -2147,51 +2421,55 @@ relativeRelocation off add = Ldr.RelativeBinding (Ldr.RelativeRelocation off add
 eagerRelocation :: Word64 -> Word32 -> Word32 -> String -> Word64 -> Ldr.Relocation
 eagerRelocation off typ sym name add = Ldr.EagerSymbolBinding (Ldr.EagerSymbolRelocation off typ sym name add)
 
+-- | Fixtures are constructed as byte lists; the loader takes a 'BS.ByteString'.
+loadFixture :: [Word8] -> Either Ldr.LoadError Ldr.Elf
+loadFixture = Ldr.loadElf . BS.pack
+
 -- | Total field probes over a parsed fixture (Left counts as mismatch).
 isDynRight :: [Word8] -> Bool -> Bool
-isDynRight bytes wantDyn = case Ldr.loadElf bytes of
+isDynRight bytes wantDyn = case loadFixture bytes of
   Right e -> Ldr.elfIsDyn e == wantDyn
   Left _ -> False
 
 validateElf :: [Word8] -> Either Ldr.LoadError ()
-validateElf bytes = case Ldr.loadElf bytes of
+validateElf bytes = case loadFixture bytes of
   Left err -> Left err
   Right elf -> Ldr.validateStaticRunElf elf
 
 dynInterpIs :: [Word8] -> Maybe String -> Bool
-dynInterpIs bytes want = case Ldr.loadElf bytes of
+dynInterpIs bytes want = case loadFixture bytes of
   Right e -> Ldr.elfInterp e == want
   Left _ -> False
 
 dynRelaCountIs :: [Word8] -> Int -> Bool
-dynRelaCountIs bytes n = case Ldr.loadElf bytes of
+dynRelaCountIs bytes n = case loadFixture bytes of
   Right e -> sum (map (length . Ldr.relocationTableEntries) (Ldr.dynRelocations (Ldr.elfDyn e))) == n
   Left _ -> False
 
 dynRelroIs :: [Word8] -> Maybe Ldr.RelroRange -> Bool
-dynRelroIs bytes want = case Ldr.loadElf bytes of
+dynRelroIs bytes want = case loadFixture bytes of
   Right e -> Ldr.elfRelro e == want
   Left _ -> False
 
 dynNeededIs :: [Word8] -> [String] -> Bool
-dynNeededIs bytes want = case Ldr.loadElf bytes of
+dynNeededIs bytes want = case loadFixture bytes of
   Right e -> Ldr.dynNeeded (Ldr.elfDyn e) == want
   Left _ -> False
 
 dynSonameIs :: [Word8] -> Maybe String -> Bool
-dynSonameIs bytes want = case Ldr.loadElf bytes of
+dynSonameIs bytes want = case loadFixture bytes of
   Right e -> Ldr.dynSoname (Ldr.elfDyn e) == want
   Left _ -> False
 
 isSysvHash :: [Word8] -> Bool
-isSysvHash bytes = case Ldr.loadElf bytes of
+isSysvHash bytes = case loadFixture bytes of
   Right e -> case Ldr.dynHashStyle (Ldr.elfDyn e) of
     Ldr.SysVHash _ -> True
     Ldr.NoHash -> False
   Left _ -> False
 
 hasEagerType :: [Word8] -> Word32 -> Bool
-hasEagerType bytes want = case Ldr.loadElf bytes of
+hasEagerType bytes want = case loadFixture bytes of
   Right e -> any (any (isEager want) . Ldr.relocationTableEntries) (Ldr.dynRelocations (Ldr.elfDyn e))
   Left _ -> False
   where
@@ -2200,7 +2478,7 @@ hasEagerType bytes want = case Ldr.loadElf bytes of
       Ldr.RelativeBinding _ -> False
 
 hasTableKind :: [Word8] -> Ldr.RelocationTableKind -> Bool
-hasTableKind bytes want = case Ldr.loadElf bytes of
+hasTableKind bytes want = case loadFixture bytes of
   Right e -> any ((== want) . Ldr.relocationTableKind) (Ldr.dynRelocations (Ldr.elfDyn e))
   Left _ -> False
 
@@ -2250,6 +2528,19 @@ parityVectors =
   , ("m2-irelative", elfM2Irelative)
   , ("tls", elfTls)
   , ("relro-outside", elfRelroOutside)
+  , ("many-segments", elfManySegments)
+  , ("many-phdrs", elfManyPhdrs)
+  , ("gcc-shaped", elfGccShaped)
+  , ("skipped-runpath", elfDynWithTag (29, 0))
+  , ("rejected-auxiliary", elfDynWithTag (0x7FFFFFFD, 0))
+  , ("ctor-good", elfDynWithTags [(12, 0x01000000), (25, 0x01000100), (27, 8)])
+  , ("ctor-incomplete", elfDynWithTags [(25, 0x01000100)])
+  , ("ctor-bad-size", elfDynWithTags [(25, 0x01000100), (27, 12)])
+  , ("ctor-cap", elfDynWithTags [(25, 0x01000100), (27, 8 * 65)])
+  , ("ctor-outside", elfDynWithTags [(25, 0x02F00000), (27, 8)])
+  , ("ctor-init-outside", elfDynWithTags [(12, 0x02F00000)])
+  , ("ctor-fini", elfDynWithTags [(26, 0x01000100), (28, 16), (13, 0x01000000)])
+  , ("ctor-preinit", elfDynWithTags [(32, 0x01000000), (33, 8)])
   ]
 
 findRepack :: IO (Maybe FilePath)
@@ -2282,7 +2573,7 @@ parityCheck = do
           Left e -> hPutStrLn stderr ("parity spawn failed: " ++ show e) >> return False
           Right (code, _, _) -> do
             let repackAccept = code == ExitSuccess
-                loaderAccept = case Ldr.loadElf bytes of
+                loaderAccept = case loadFixture bytes of
                   Right _ -> True
                   Left _ -> False
             if repackAccept == loaderAccept

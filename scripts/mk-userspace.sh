@@ -109,7 +109,8 @@ done
 
 # Remove only prior dynamic outputs before the frozen static manifest check.
 rm -f initramfs-staging/bin/hello-dyn initramfs-staging/bin/hello-dyn-missing \
-	initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/exec-dyn \
+	initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/hello-dyn-init \
+	initramfs-staging/bin/exec-dyn \
 	initramfs-staging/lib/libc-house.so.0 initramfs-staging/lib/libmid-house.so.0
 mkdir -p initramfs-staging/lib
 
@@ -139,19 +140,25 @@ sh scripts/mk-dynamic-probe.sh staging
 	build/dynamic-probe/staging/hello-dyn-deep \
 	initramfs-staging/bin/hello-dyn-deep
 "$PYTHON3" build-probe/repack.py \
+	build/dynamic-probe/staging/hello-dyn-init \
+	initramfs-staging/bin/hello-dyn-init
+"$PYTHON3" build-probe/repack.py \
 	build/dynamic-probe/staging/libc-house.so.0 \
 	initramfs-staging/lib/libc-house.so.0
 "$PYTHON3" build-probe/repack.py \
 	build/dynamic-probe/staging/libmid-house.so.0 \
 	initramfs-staging/lib/libmid-house.so.0
 chmod 755 initramfs-staging/bin/hello-dyn initramfs-staging/bin/hello-dyn-missing \
-	initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/exec-dyn
+	initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/hello-dyn-init \
+	initramfs-staging/bin/exec-dyn
 chmod 644 initramfs-staging/lib/libc-house.so.0 initramfs-staging/lib/libmid-house.so.0
 touch -d '@0' initramfs-staging/bin/hello-dyn initramfs-staging/bin/hello-dyn-missing \
-	initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/exec-dyn \
+	initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/hello-dyn-init \
+	initramfs-staging/bin/exec-dyn \
 	initramfs-staging/lib/libc-house.so.0 initramfs-staging/lib/libmid-house.so.0
 find initramfs-staging/bin initramfs-staging/lib -type f \( \
-	-name hello-dyn -o -name hello-dyn-missing -o -name hello-dyn-deep -o -name exec-dyn \
+	-name hello-dyn -o -name hello-dyn-missing -o -name hello-dyn-deep \
+	-o -name hello-dyn-init -o -name exec-dyn \
 	-o -name libc-house.so.0 -o -name libmid-house.so.0 \
 	\) -print | LC_ALL=C sort |
 	while IFS= read -r path; do sha256sum "$path"; done >"$dynamic_manifest"

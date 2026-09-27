@@ -94,6 +94,7 @@ library
     Kernel.Userspace.Process
     Kernel.Userspace.Sched
     Kernel.Userspace.Syscall
+    Kernel.Userspace.Trampoline
     Kernel.Userspace.Types
     Monad.Util
     Util.CmdLineParser
@@ -103,6 +104,7 @@ library
   build-depends:
     base >= 4.22 && < 5
     , array
+    , bytestring
     , containers
     , mtl
     , pretty

@@ -12,6 +12,7 @@ values. It performs no I/O and mutates no input object or byte buffer.
 module Kernel.Userspace.Linker (
   LinkPlan (..),
   LinkRelocation (..),
+  LinkStep (..),
   PageAccess (..),
   PlacedObject (..),
   RelocationPatch (..),
@@ -23,6 +24,7 @@ where
 
 import Control.Monad (foldM, unless, when)
 import Data.Bits (shiftR, (.&.))
+import Data.ByteString qualified as BS
 import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
@@ -104,10 +106,28 @@ data RelocationPatch = RelocationPatch {
   }
   deriving (Eq, Show)
 
--- | Deterministic placement and relocation data for one dynamic main object.
+{- | One constructor to run, or one relocated array of them. An array is
+recorded by location because its contents are only written by relocation:
+the loader reads the addresses out of the mapped image, never out of the
+file.
+-}
+data LinkStep
+  = -- | call this absolute address
+    LinkCall Word64
+  | -- | call the @entries@ relocated pointers at this absolute address
+    LinkArrayAt Word64 Int
+  deriving (Eq, Show)
+
+{- | Deterministic placement and relocation data for one dynamic main object,
+plus the constructor order for both phases. Constructors run dependencies
+first and the main object last, and the exit phase is the exact reverse, so
+a DSO is initialised before anything that binds to it and finalised after.
+-}
 data LinkPlan = LinkPlan {
   linkObjects :: [PlacedObject]
   , linkPatches :: [RelocationPatch]
+  , linkInitSteps :: [LinkStep]
+  , linkFiniSteps :: [LinkStep]
   }
   deriving (Eq, Show)
 
@@ -131,11 +151,31 @@ linkDynamic main deps = do
   placed <- placeObjects ((mainObjectName, main) : orderedDeps) mainBase 0
   exports <- buildExportScope placed
   patches <- planPatches placed exports
+  let mainObject = take 1 placed
+      dependencies = drop 1 placed
+      initOrder = reverse dependencies ++ mainObject
+      finiOrder = reverse initOrder
   pure
     LinkPlan {
       linkObjects = map plannedObject placed
       , linkPatches = patches
+      , linkInitSteps = concatMap initStepsOf initOrder
+      , linkFiniSteps = concatMap finiStepsOf finiOrder
       }
+  where
+    initStepsOf planned = callSteps (Ldr.dynInitFn dyn) (Ldr.dynInitArray dyn) planned
+      where
+        dyn = Ldr.elfDyn (plannedElf planned)
+    finiStepsOf planned = reverse (callSteps (Ldr.dynFiniFn dyn) (Ldr.dynFiniArray dyn) planned)
+      where
+        dyn = Ldr.elfDyn (plannedElf planned)
+
+-- | One object's constructors, in that object's own order.
+callSteps :: Maybe Word64 -> Maybe Ldr.InitArray -> PlannedObject -> [LinkStep]
+callSteps single array planned = maybe [] (\va -> [LinkCall (relocate va)]) single ++ maybe [] arrayStep array
+  where
+    relocate va = plannedBase planned + va
+    arrayStep table = [LinkArrayAt (relocate (Ldr.initArrayVaddr table)) (Ldr.initArrayEntries table)]
 
 validateMain :: Ldr.Elf -> Either Ldr.LoadError ()
 validateMain elf = do
@@ -156,7 +196,7 @@ validateRuntimeObject name elf = do
   unless (Ldr.dynPresent dynInfo) (badLink (name ++ " has no PT_DYNAMIC"))
   unless (Ldr.dynBindNow dynInfo) (badLink (name ++ " is not bind-now"))
   unless (length (Ldr.dynNeeded dynInfo) <= Ldr.maxNeeded) (badLink (name ++ " NEEDED count exceeds cap"))
-  unless (length (Ldr.elfBytes elf) <= Ldr.maxElfBytes) (badLink (name ++ " exceeds maxElfBytes"))
+  unless (BS.length (Ldr.elfBytes elf) <= Ldr.maxElfBytes) (badLink (name ++ " exceeds maxElfBytes"))
   pages <- objectPageCount name elf
   when (pages > maxObjectPages) (badLink (name ++ " exceeds object page cap"))
   validateRelro name elf

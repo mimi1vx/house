@@ -15,6 +15,7 @@ module Kernel.Init (
 where
 
 import Control.Concurrent (forkIO)
+import Data.ByteString qualified as BS
 import Foreign.C.String (withCString)
 import H.Monad (runH)
 import Kernel.Driver.Dmesg qualified as Dmesg
@@ -31,7 +32,7 @@ launchPid1 = do
     mBytes <- FS.vfsRead FS.defaultNamespace "/sbin/init"
     case mBytes of
       Left _ -> return (Left "no init")
-      Right bytes -> case ULdr.loadElf bytes of
+      Right bytes -> case ULdr.loadElf (BS.pack bytes) of
         Left le -> return (Left (toExecError le))
         Right elf -> do
           res <- U.runElf elf ["/sbin/init"] ["HOUSE=1", "PATH=/bin"]

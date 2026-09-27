@@ -16,6 +16,7 @@ module Kernel.Boot (
 where
 
 import Control.Monad (forM_)
+import Data.ByteString qualified as BS
 import Data.Char (chr)
 import Data.Word (Word8)
 import Foreign.C.String (withCString)
@@ -81,7 +82,7 @@ spawnServers = do
                     _ <- NS.nsUnregister name
                     IPC.freeEndpoint ep
                     return (Left (showFsError e))
-                  Right elfBytes -> case ULdr.loadElf elfBytes of
+                  Right elfBytes -> case ULdr.loadElf (BS.pack elfBytes) of
                     Left le -> do
                       _ <- NS.nsUnregister name
                       IPC.freeEndpoint ep

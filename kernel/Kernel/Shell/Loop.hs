@@ -21,6 +21,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (forM_, void, when)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.List (isPrefixOf)
 import Data.Word (Word8)
@@ -301,7 +302,7 @@ loop = do
             mBytes <- FS.vfsRead FS.defaultNamespace "/bin/ipc_pp"
             case mBytes of
               Left e -> return (Left (showFsError e))
-              Right bytes -> case ULdr.loadElf bytes of
+              Right bytes -> case ULdr.loadElf (BS.pack bytes) of
                 Left le -> return (Left (toExecError le))
                 Right elf -> do
                   sRes <- U.runElf elf ("/bin/ipc_pp" : ["server", show w]) defaultEnv
@@ -594,7 +595,7 @@ loop = do
         mBytes <- FS.vfsRead FS.defaultNamespace imagePath
         case mBytes of
           Left e -> return (Left (showFsError e))
-          Right bytes -> case ULdr.loadElf bytes of
+          Right bytes -> case ULdr.loadElf (BS.pack bytes) of
             Left le -> return (Left (toExecError le))
             Right elf -> do
               first <- U.runElf elf [imagePath] defaultEnv
@@ -623,7 +624,7 @@ loop = do
         mBytes <- FS.vfsRead FS.defaultNamespace "/bin/hello"
         case mBytes of
           Left e -> return (Left (showFsError e))
-          Right bytes -> case ULdr.loadElf bytes of
+          Right bytes -> case ULdr.loadElf (BS.pack bytes) of
             Left le -> return (Left (toExecError le))
             Right elf -> do
               res <- U.runElf elf ["/bin/hello"] defaultEnv
@@ -709,7 +710,7 @@ loop = do
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> do
-            case ULdr.loadElf bytes of
+            case ULdr.loadElf (BS.pack bytes) of
               Left le -> return (Left (toExecError le))
               Right elf -> do
                 res <- U.runElf elf (bin : args) defaultEnv
@@ -728,7 +729,7 @@ loop = do
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> do
-            case ULdr.loadElf bytes of
+            case ULdr.loadElf (BS.pack bytes) of
               Left le -> return (Left (toExecError le))
               Right elf -> do
                 res <- U.runElf elf (path : args) defaultEnv
@@ -746,7 +747,7 @@ loop = do
         case mBytes of
           Left e -> return (Left (showFsError e))
           Right bytes -> do
-            case ULdr.loadElf bytes of
+            case ULdr.loadElf (BS.pack bytes) of
               Left le -> return (Left (toExecError le))
               Right elf -> do
                 res <- U.runElf elf (path : args) defaultEnv

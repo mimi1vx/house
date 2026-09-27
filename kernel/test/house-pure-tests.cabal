@@ -58,6 +58,7 @@ test-suite house-pure
     Kernel.Userspace.Loader
     Kernel.Userspace.Process
     Kernel.Userspace.Sched
+    Kernel.Userspace.Trampoline
     Kernel.Userspace.Types
     Util.Word12
   c-sources: cbits/stubs.c

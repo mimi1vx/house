@@ -11,12 +11,15 @@ SONAME=libc-house.so.0
 MID_SONAME=libmid-house.so.0
 MISSING_SONAME=libc-missing.so.0
 DEEP_MAIN=hello-dyn-deep
+INIT_MAIN=hello-dyn-init
+C_HELLO=c-hello
 INTERP=/lib/ld-house.so.0
-ARTIFACTS="$SONAME $MID_SONAME $MISSING_SONAME hello-dyn $DEEP_MAIN hello-dyn-missing exec-dyn"
+ARTIFACTS="$SONAME $MID_SONAME $MISSING_SONAME hello-dyn $DEEP_MAIN $INIT_MAIN hello-dyn-missing exec-dyn $C_HELLO"
 EXPECTED_SONAME_SHA=ebcc38e958debe4eb18caec30ca5302c3a649aa25741bbb137d0dcbec86f8cbe
 EXPECTED_MID_SONAME_SHA=60f5ec18e338e678b75bce377f8f9b51cfe2ff7214ce3b21a7474fa8df8b6a9a
 EXPECTED_HELLO_SHA=26e1f4265882441b717bfc5a963295c65ff962cf9fdef20d21b6b325e8503fe7
 EXPECTED_DEEP_MAIN_SHA=62c71320f772008535f616955dee29ce01c66c909625d70bc3f877a95f7e0960
+EXPECTED_INIT_MAIN_SHA=381b5148e7d9de23a120359696d8c372e90bd7905422210a30e43e6e4258c50e
 EXPECTED_MISSING_SONAME_SHA=abc7acfa562c5b2dfbda2ea943da70ad29a15590c33fedb0b6f400bf938b8b55
 EXPECTED_MISSING_HELLO_SHA=50725e3a1cfe6344666ada25b5cd7d0c0502deab329f21fb89dece4834f1a943
 EXPECTED_EXEC_SHA=f251fec290c2899d03d57be6e687a230566a1de2d87eda3d736d1d224223edf3
@@ -48,6 +51,7 @@ for name in $ARTIFACTS; do
 	"$MISSING_SONAME") expected_sha=$EXPECTED_MISSING_SONAME_SHA ;;
 	hello-dyn) expected_sha=$EXPECTED_HELLO_SHA ;;
 	"$DEEP_MAIN") expected_sha=$EXPECTED_DEEP_MAIN_SHA ;;
+	"$INIT_MAIN") expected_sha=$EXPECTED_INIT_MAIN_SHA ;;
 	hello-dyn-missing) expected_sha=$EXPECTED_MISSING_HELLO_SHA ;;
 	exec-dyn) expected_sha=$EXPECTED_EXEC_SHA ;;
 	*) expected_sha= ;;
@@ -57,6 +61,17 @@ for name in $ARTIFACTS; do
 		exit 1
 	}
 done
+
+# The House-targeted dynamic Haskell image the Loader is being built for: the
+# link recipe is pinned, so a toolchain change that moves any dynamic property
+# the Loader decides on fails here rather than at run time. Checked against the
+# recorded manifest, not a hash, because the properties themselves are the pin.
+sh scripts/mk-house-image.sh house-image
+cmp scripts/house-image.manifest build/dynamic-probe/house-image/manifest || {
+	echo "dynamic-elf-check: the House image manifest drifted from scripts/house-image.manifest" >&2
+	diff -u scripts/house-image.manifest build/dynamic-probe/house-image/manifest >&2 || true
+	exit 1
+}
 
 cabal build exe:house-loader-check
 LOADER_CHECK=$(cabal list-bin exe:house-loader-check 2>/dev/null | tail -1)
@@ -238,15 +253,53 @@ check_deep_hello() {
 	audit_common "$artifact"
 }
 
+# The shape control: a stock gcc/GNU-ld/glibc link, not an ld.lld fixture. It
+# carries 10 program headers where the lld links land on 8, which is the shape
+# the old total-header bound rejected. The Loader's dynamic policy still
+# refuses it (house interp, SysV hash, no init/fini arrays), so the invariant
+# worth pinning is which bound refuses it: the dynamic allowlist, never a
+# header count. The repacker has to reach the identical verdict.
+check_control() {
+	artifact=$1
+	phnum=$(readelf -hW "$artifact" | sed -n 's/.*Number of program headers: *//p')
+	[ -n "$phnum" ] && [ "$phnum" -ge 9 ] || {
+		echo "dynamic-elf-check: $C_HELLO has $phnum program headers, expected >= 9 (an ld.lld link lands on 8)" >&2
+		exit 1
+	}
+	if "$LOADER_CHECK" "$artifact" >"$WORK/$C_HELLO.loader.out" 2>"$WORK/$C_HELLO.loader.err"; then
+		echo "dynamic-elf-check: $C_HELLO is expected to be refused by the Loader" >&2
+		exit 1
+	fi
+	grep -q 'BadDyn: ' "$WORK/$C_HELLO.loader.err" || {
+		echo "dynamic-elf-check: $C_HELLO was not refused by the dynamic allowlist" >&2
+		cat "$WORK/$C_HELLO.loader.err" >&2
+		exit 1
+	}
+	if python3 build-probe/repack.py "$artifact" "$WORK/$C_HELLO.repacked" >"$WORK/$C_HELLO.repack.out" 2>"$WORK/$C_HELLO.repack.err"; then
+		echo "dynamic-elf-check: the repacker accepted $C_HELLO" >&2
+		exit 1
+	fi
+	sed 's/^house-loader-check: //' "$WORK/$C_HELLO.loader.err" >"$WORK/$C_HELLO.loader.normalized"
+	cmp "$WORK/$C_HELLO.loader.normalized" "$WORK/$C_HELLO.repack.err" || {
+		echo "dynamic-elf-check: Loader and repacker disagree on $C_HELLO" >&2
+		exit 1
+	}
+}
+
 check_soname "$A/$SONAME" "$SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
 check_soname "$A/$MID_SONAME" "$MID_SONAME" "$WORK/expected-exports-mid" "$WORK/expected-undefined-mid" "$SONAME "
 check_soname "$A/$MISSING_SONAME" "$MISSING_SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
 check_hello "$A/hello-dyn" "$SONAME"
+check_hello "$A/$INIT_MAIN" "$SONAME"
 check_hello "$A/hello-dyn-missing" "$MISSING_SONAME"
 check_deep_hello "$A/$DEEP_MAIN" "$MID_SONAME" "$SONAME"
 audit_exec "$A/exec-dyn"
 
 for name in $ARTIFACTS; do
+	if [ "$name" = "$C_HELLO" ]; then
+		check_control "$A/$name"
+		continue
+	fi
 	loader_name=$(printf '%s' "$name" | tr '.-' '__')
 	"$LOADER_CHECK" "$A/$name" >"$WORK/$loader_name.loader"
 	python3 build-probe/repack.py "$A/$name" "$WORK/$loader_name.repacked" >/dev/null
@@ -401,7 +454,8 @@ fi
 grep -q 'file exceeds maxElfBytes' "$WORK/oversized.link.err"
 
 STAGED="initramfs-staging/bin/exec-dyn initramfs-staging/bin/hello-dyn \
-initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/hello-dyn-missing \
+initramfs-staging/bin/hello-dyn-deep initramfs-staging/bin/hello-dyn-init \
+initramfs-staging/bin/hello-dyn-missing \
 initramfs-staging/lib/libc-house.so.0 initramfs-staging/lib/libmid-house.so.0"
 for path in $STAGED; do
 	[ -f "$path" ] || {
@@ -410,7 +464,8 @@ for path in $STAGED; do
 	}
 done
 find initramfs-staging/bin initramfs-staging/lib -type f \( \
-	-name hello-dyn -o -name hello-dyn-missing -o -name hello-dyn-deep -o -name exec-dyn \
+	-name hello-dyn -o -name hello-dyn-missing -o -name hello-dyn-deep \
+	-o -name hello-dyn-init -o -name exec-dyn \
 	-o -name libc-house.so.0 -o -name libmid-house.so.0 \
 	\) -print | LC_ALL=C sort >"$WORK/staged.dynamic"
 printf '%s\n' $STAGED >"$WORK/expected.staged.dynamic"
@@ -419,6 +474,10 @@ sha256sum $STAGED >"$WORK/staged.manifest"
 cmp scripts/dynamic-userspace.sha256 "$WORK/staged.manifest"
 if find initramfs-staging -type f \( -name 'ld-house.so*' -o -name 'libc-missing.so*' \) -print -quit | grep -q .; then
 	echo "dynamic-elf-check: forbidden negative/interpreter artifact is staged" >&2
+	exit 1
+fi
+if find initramfs-staging -name "$C_HELLO" -print -quit | grep -q .; then
+	echo "dynamic-elf-check: the unstaged shape control $C_HELLO is under initramfs-staging" >&2
 	exit 1
 fi
 

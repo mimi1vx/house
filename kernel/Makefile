@@ -10,8 +10,8 @@
 GHC      ?= ghc
 BUILD    := build
 
-# Packages needed by the closure (H layer + console + parsers + Set)
-PKGS := -package mtl -package array -package containers -package pretty
+# Packages needed by the closure (H layer + console + parsers + Set + ByteString)
+PKGS := -package mtl -package array -package bytestring -package containers -package pretty
 
 # GHC2024 language standard; replaces the legacy
 # -fglasgow-exts -fallow-undecidable-instances set. Verified that the closure

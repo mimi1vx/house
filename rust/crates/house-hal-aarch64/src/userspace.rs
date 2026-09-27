@@ -92,6 +92,48 @@ unsafe fn asid_for_pdir(pdir: *mut u8) -> u16 {
 /// the next image, so a surviving entry would alias two processes on one
 /// `(TTBR0, ASID)` pair. The flush drops every entry tagged with that pair
 /// before the recycled root is populated with a different image.
+/// Make code the EL1 data path just wrote visible to the instruction side.
+///
+/// # Safety
+///
+/// `page` must be a page the caller has just filled with instructions, and
+/// the caller must not execute them until this returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_flush_code_page(page: *mut u8) {
+    const CACHE_LINE: usize = 64;
+    if page.is_null() {
+        return;
+    }
+    // SAFETY: the caller owns `page` and holds it mapped for the duration;
+    // the cache operations touch nothing but that page's own lines.
+    unsafe {
+        // Clean every line to the point of unification first: the stores
+        // above went through the data cache, and an instruction fetch that
+        // overtakes them would see stale bytes.
+        for offset in (0..PAGE_SIZE).step_by(CACHE_LINE) {
+            core::arch::asm!(
+                "dc cvau, {addr}",
+                addr = in(reg) page.add(offset),
+                options(nostack, preserves_flags)
+            );
+        }
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+        for offset in (0..PAGE_SIZE).step_by(CACHE_LINE) {
+            core::arch::asm!(
+                "ic ivau, {addr}",
+                addr = in(reg) page.add(offset),
+                options(nostack, preserves_flags)
+            );
+        }
+        // `ic ialluis` retires to the inner-shareable domain, which is what a
+        // user page's inner shareable attribute makes it.
+        core::arch::asm!(
+            "dsb ish; ic ialluis; dsb ish; isb",
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_asid_forget_pdir(pdir: *mut u8) {
     if pdir.is_null() {

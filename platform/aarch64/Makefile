@@ -43,6 +43,7 @@ UNITDIR_gint := $(shell ghc-pkg field ghc-internal import-dirs --simple-output |
 UNITDIR_cont := $(shell ghc-pkg field containers import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_pretty := $(shell ghc-pkg field pretty import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_mtl  := $(shell ghc-pkg field mtl import-dirs --simple-output | awk '{print $$1}')
+UNITDIR_bytes := $(shell ghc-pkg field bytestring import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_arr  := $(shell ghc-pkg field array import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_trans := $(shell ghc-pkg field transformers import-dirs --simple-output | awk '{print $$1}')
 UNITDIR_deep := $(shell ghc-pkg field deepseq import-dirs --simple-output | awk '{print $$1}')
@@ -55,6 +56,7 @@ GINT_A := $(shell ls $(UNITDIR_gint)/libHSghc-internal-*.a | head -1)
 CONT_A := $(shell ls $(UNITDIR_cont)/libHScontainers-*.a | head -1)
 PRETTY_A := $(shell ls $(UNITDIR_pretty)/libHSpretty-*.a | head -1)
 MTL_A  := $(shell ls $(UNITDIR_mtl)/libHSmtl-*.a 2>/dev/null | head -1)
+BYTES_A:= $(shell ls $(UNITDIR_bytes)/libHSbytestring-*.a 2>/dev/null | head -1)
 ARRAY_A:= $(shell ls $(UNITDIR_arr)/libHSarray-*.a | head -1)
 TRANS_A:= $(shell ls $(UNITDIR_trans)/libHStransformers-*.a | head -1)
 DEEP_A := $(shell ls $(UNITDIR_deep)/libHSdeepseq-*.a | head -1)
@@ -99,7 +101,7 @@ build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
 	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
 	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS_HOUSE_DEPS)) $$(find ../../kernel/build -name '*.o') \
 	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) \
-	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
+	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(BYTES_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	    /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
 	  $(shell $(CC) -print-libgcc-file-name)
 	@size $@

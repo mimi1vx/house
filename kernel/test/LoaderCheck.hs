@@ -64,7 +64,7 @@ loadForCheck path = do
   bounded <- readBounded path
   case bounded of
     Left err -> pure (Left err)
-    Right bytes -> pure $ case Ldr.loadElf (BS.unpack bytes) of
+    Right bytes -> pure $ case Ldr.loadElf bytes of
       Left err -> Left (Ldr.loadErrorToString err)
       Right elf -> Right elf
 
