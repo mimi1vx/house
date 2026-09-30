@@ -25,7 +25,7 @@ jobs:
       # source), so the toolchain prefix is cached across runs. Bump the
       # `v1-` prefix when the GHC/fourmolu/hlint pins move.
       - name: Cache Haskell toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.ghcup
@@ -39,7 +39,7 @@ jobs:
       # Incremental Cabal builds: store + dist-newstyle keyed on the solver
       # inputs (cabal.project index-state + every .cabal file).
       - name: Cache Cabal store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cabal/store
@@ -101,7 +101,7 @@ jobs:
       # `make check-tcg` stays incremental once third-party deps land
       # (today the workspace is path-only, so the win is the target dir).
       - name: Restore container volume caches
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/house-volcache
           key: house-vol-v1-${{ hashFiles('rust/Cargo.lock', 'rust-toolchain.toml', 'rust/deny.toml') }}
