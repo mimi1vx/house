@@ -99,7 +99,9 @@ container builder start -c 4 -m 4G              # 4 CPU / 4 GB floor (Apple path
 
 Linux CI instead uses Docker (`$(RUNNER)` selects it) with
 `sudo apt-get install -y qemu-system-arm qemu-utils socat expect jq cpio file`
-plus a GHCup Haskell toolchain, and runs `make check-tcg`.
+plus a GHCup Haskell toolchain (GHC + Cabal via ghcup, fourmolu from its
+official linux-arm64 release zip, hlint 3.10 built once with an older GHC
+since it has no aarch64 binary), and runs `make check-tcg`.
 
 Install Apple's `container` CLI (macOS) and `jq` before using the root Makefile.
 Do not export `CONTAINER_DEFAULT_PLATFORM`; the root Makefile scopes it to
