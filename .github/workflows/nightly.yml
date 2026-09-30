@@ -15,7 +15,7 @@ jobs:
       - name: Install host deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils socat expect jq cpio file ipxe-qemu
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Build toolchain image
         uses: docker/build-push-action@v6
         with:

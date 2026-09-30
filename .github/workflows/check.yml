@@ -79,7 +79,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Container rebuilds (ghcup + rustup + apt layers) are the other slow
       # leg; the GHA cache backend makes them incremental. `load: true`
