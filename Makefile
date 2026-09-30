@@ -12,6 +12,16 @@ else
   RUNNER ?= docker
 endif
 
+# Docker on Linux leaves bind-mounted outputs root-owned while Apple
+# `container` mounts stay writable, so restore host ownership before any
+# host-side step that follows a container step (initrd packing, Cabal).
+ifeq ($(RUNNER),container)
+  FIXUP_OWNERSHIP :=
+else
+  FIXUP_OWNERSHIP = $(RUNNER) run --rm -v "$(CURDIR)":/work $(IMAGE) \
+    chown -R $(shell id -u):$(shell id -g) /work/build /work/initramfs-staging /work/dist-newstyle
+endif
+
 # Named-volume container runner (house-ng pattern, step 5).
 # Sources cross on the bind mount; write-heavy caches live on volumes so only
 # *.elf/*.bin cross back. house-ng mounts target at /work/target because its
@@ -247,6 +257,7 @@ DYNAMIC_INITRD_SRCS := build-probe/hello-dyn.s build-probe/exec-dyn.s build-prob
 initrd: build/initramfs.cpio
 build/initramfs.cpio: $(USERSPACE_SRCS) $(DYNAMIC_INITRD_SRCS) build-probe/repack.py scripts/mk-userspace.sh scripts/mkinitramfs.sh scripts/static-userspace.sha256 $(STAGING_STATIC) | volumes
 	$(RUN_IN_CONTAINER) sh scripts/mk-userspace.sh
+	$(FIXUP_OWNERSHIP)
 	sh scripts/mkinitramfs.sh
 	file build/initramfs.cpio
 
