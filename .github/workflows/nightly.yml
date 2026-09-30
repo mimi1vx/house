@@ -27,7 +27,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Restore container volume caches
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/house-volcache
           key: house-vol-v1-${{ hashFiles('rust/Cargo.lock', 'rust-toolchain.toml', 'rust/deny.toml') }}
