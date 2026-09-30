@@ -85,7 +85,7 @@ jobs:
       # leg; the GHA cache backend makes them incremental. `load: true`
       # exposes house-port:latest to the `make *-build` docker-run steps.
       - name: Build toolchain image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Containerfile
