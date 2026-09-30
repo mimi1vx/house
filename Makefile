@@ -99,11 +99,20 @@ house-build: volumes
 	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) house
 
-rust-check: volumes
+rust-abi-check: volumes
+	$(RUN_IN_CONTAINER) cargo build --manifest-path rust/Cargo.toml --target aarch64-unknown-none
+	$(RUN_IN_CONTAINER) sh -c 'test $$(grep -R "\[panic_handler" rust/crates/house-libc --include="*.rs" | wc -l) -eq 1 || { echo "FAIL: house-libc must own exactly one [panic_handler]" >&2; grep -R "\[panic_handler" rust/crates/house-libc --include="*.rs"; exit 1; }; test $$(grep -R "\[panic_handler" rust/crates/house-el0-tiny --include="*.rs" | wc -l) -eq 1 || { echo "FAIL: house-el0-tiny must own exactly one [panic_handler] (separate EL0 link unit)" >&2; exit 1; }; test $$(grep -R "\[panic_handler" rust/crates --include="*.rs" | wc -l) -eq 2 || { echo "FAIL: expected exactly two [panic_handler] (house-libc EL1 + house-el0-tiny EL0)" >&2; grep -R "\[panic_handler" rust/crates --include="*.rs"; exit 1; }'
+	$(RUN_IN_CONTAINER) sh -c 'nm rust/target/aarch64-unknown-none/debug/libhouse_libc.a | grep -q "__stack_chk_guard" || { echo "FAIL: __stack_chk_guard missing in libhouse_libc.a" >&2; exit 1; }; nm rust/target/aarch64-unknown-none/debug/libhouse_libc.a | grep -q "__stack_chk_fail" || { echo "FAIL: __stack_chk_fail missing in libhouse_libc.a" >&2; exit 1; }'
+	$(RUN_IN_CONTAINER) cargo build -p house-hal --manifest-path rust/Cargo.toml --no-default-features --features riscv64
+	sh scripts/abi-symbols.sh check
+
+rust-check: volumes rust-abi-check
 	$(RUN_IN_CONTAINER) \
 	  cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings
 	$(RUN_IN_CONTAINER) \
 	  bash -c 'cd rust && cargo fmt --check'
+	$(RUN_IN_CONTAINER) \
+	  cargo deny --manifest-path rust/Cargo.toml check
 
 rust-clean: volumes
 	$(RUN_IN_CONTAINER) \
@@ -128,9 +137,7 @@ lint: volumes
 _lint-inner:
 	cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings
 	bash -c 'cd rust && cargo fmt --check'
-	cargo deny --manifest-path rust/Cargo.toml check
 
-# Miri target is a stub until step 9 adds #[cfg(miri)] isolation for asm!/MMIO.
 miri: volumes
 	$(MIRI_IN_CONTAINER) cargo miri test --manifest-path rust/Cargo.toml -p house-hal -p house-hal-aarch64 -p house-libc -p house-boot -p house-el0-tiny
 
@@ -362,24 +369,45 @@ el0tiny-check: volumes
 	$(RUN_IN_CONTAINER) sh scripts/el0tiny-check.sh
 
 # M2.0/M2.1 artifact compatibility: reproducible ET_DYN probes, bounded
-# Loader inspection, repacker parity, and pure link planning. No initramfs or
+# Loader inspection, repacker parity, and pure link verification. No initramfs or
 # QEMU dynamic-runtime leg.
 dynamic-elf-check: volumes
 	$(RUN_IN_CONTAINER) sh scripts/dynamic-elf-check.sh
 
+doctor:
+	@command -v qemu-system-aarch64 >/dev/null || { echo "doctor: missing qemu-system-aarch64" >&2; exit 1; }
+	@command -v ghc >/dev/null || { echo "doctor: missing ghc" >&2; exit 1; }
+	@command -v cabal >/dev/null || { echo "doctor: missing cabal" >&2; exit 1; }
+	@command -v fourmolu >/dev/null || { echo "doctor: missing fourmolu" >&2; exit 1; }
+	@command -v hlint >/dev/null || { echo "doctor: missing hlint" >&2; exit 1; }
+	@command -v expect >/dev/null || { echo "doctor: missing expect" >&2; exit 1; }
+	@command -v socat >/dev/null || { echo "doctor: missing socat" >&2; exit 1; }
+	@command -v qemu-img >/dev/null || { echo "doctor: missing qemu-img" >&2; exit 1; }
+	@command -v jq >/dev/null || { echo "doctor: missing jq" >&2; exit 1; }
+	@command -v container >/dev/null || { echo "doctor: missing container" >&2; exit 1; }
+	@ghc --version && cabal --version && fourmolu --version && hlint --version
+	@qemu-system-aarch64 --version | head -1 && expect -v 2>&1 | head -1; socat -V 2>&1 | head -1; qemu-img --version | head -1; jq --version; container --version
+	@container system status 2>&1 | grep -qi "running" || { echo "doctor: container system not running (run: container system start)" >&2; exit 1; }
+	@printf 'module T where\nf :: forall a. proxy a -> Int\nf = \\p -> p @Int\n' | hlint - 2>&1 | grep -qi "parse error" && { echo "doctor: host hlint too old for GHC2024 (needs TypeAbstractions)" >&2; exit 1; } || true
+	@echo "doctor: ok"
+
 check:
+	$(MAKE) doctor
 	$(MAKE) spike-check
 	$(MAKE) irq-check
 	$(MAKE) house-check
 	$(MAKE) house-shell-check
 	$(MAKE) house-posix-check
+	$(MAKE) house-initrd-check
+	$(MAKE) house-pid1-check
 	$(MAKE) house-dynamic-userspace-check
 	$(MAKE) house-dynamic-root-check
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
+	$(MAKE) el0tiny-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check: all aarch64 gates passed (spike, irq+vm, house banner, shell, posix, dynamic userspace, mounted-root dynamic, rust, dynamic ELF/link plan) =="
+	@echo "== make check: all aarch64 gates passed (doctor, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, mounted-root dynamic, rust, haskell, el0tiny, dynamic ELF) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-clean haskell-check el0tiny-check dynamic-elf-check run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check

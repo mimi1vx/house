@@ -42,10 +42,10 @@ resolve a newer nightly.
 - `make lint`: container `cargo clippy --target aarch64-unknown-none
   -- -D warnings` (blanket pedantic rejected — intentional syscall-ABI
   casts trip it; `--all-targets` excluded, no `test` crate on bare metal)
-  + `cargo fmt --check` + `cargo deny check`, plus host
+  + `cargo fmt --check`, plus host
   `fourmolu -m check` + `hlint` over the full tree.
-- `make miri` runs 16 pure-logic tests with `cargo miri test -p house-hal
-  -p house-hal-aarch64 -p house-libc -p house-boot` inside a
+- `make miri` runs 20 pure-logic tests with `cargo miri test -p house-hal
+  -p house-hal-aarch64 -p house-libc -p house-boot -p house-el0-tiny` inside a
   `container run -c 4 -m 4G` invocation. `asm!`/MMIO stay
   QEMU-gated behind `#[cfg]` isolation (`#[cfg(miri)]` no-op spinlock
   stubs; `no_mangle` dropped and syscall modules gated out under
@@ -54,7 +54,9 @@ resolve a newer nightly.
   pays for the sysroot build.
 - `make haskell-check`: full-tree fourmolu+hlint + `cabal build all
   --enable-tests` + `cabal test all` (test-only package needs the flag).
-- `make check`: spike + irq + house + shell + posix + rust + haskell,
+- `make check`: doctor + spike + irq + house + shell + posix + initrd +
+  pid1 + dynamic userspace + mounted-root dynamic + rust (clippy + fmt +
+  deny + abi) + haskell + el0tiny + dynamic ELF,
   hvf+tcg where applicable.
 
 ## Linker
