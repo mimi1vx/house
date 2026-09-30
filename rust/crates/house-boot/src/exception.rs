@@ -4,7 +4,7 @@
 //! `house_enter_el0`, and `svc_exit_trampoline` with identical frame layout
 //  (`896 B`: `x0-x30` + `SP` + `q0-q31`) and `TLBI` ordering to C.
 
-// SAFETY: Exception handling is the most delicate boot path per `plans/rust-port.md`.
+// SAFETY: Exception handling is the most delicate boot path.
 // Each `global_asm!` block discharged:
 // - `vectors` is `.align 11` (2048 B), 16×128 B slots with `.rept 4` + `.space 124`
 //   padding; `VBAR_EL1` requires 2 KiB alignment — `msr vbar_el1` in `entry.rs`

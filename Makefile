@@ -2,7 +2,7 @@
 
 IMAGE := house-port:latest
 
-# Named-volume container runner (house-ng pattern, plans/house-ng-adoption.md step 5).
+# Named-volume container runner (house-ng pattern, step 5).
 # Sources cross on the bind mount; write-heavy caches live on volumes so only
 # *.elf/*.bin cross back. house-ng mounts target at /work/target because its
 # Cargo workspace is the repo root; ours is rust/, so house-target mounts at
