@@ -2,6 +2,16 @@
 
 IMAGE := house-port:latest
 
+# Container runner: Apple `container` on macOS, Docker on Linux (CI).
+# Both pin `--platform linux/arm64` explicitly; firmware builds are
+# identical either way (aarch64 native, no emulation).
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  RUNNER ?= container
+else
+  RUNNER ?= docker
+endif
+
 # Named-volume container runner (house-ng pattern, step 5).
 # Sources cross on the bind mount; write-heavy caches live on volumes so only
 # *.elf/*.bin cross back. house-ng mounts target at /work/target because its
@@ -9,7 +19,7 @@ IMAGE := house-port:latest
 # /work/rust/target (RUST_*_A paths in platform/aarch64/Makefile).
 # Never mount over /root/.cargo: it would shadow image cargo binaries —
 # cargo home lives at /cargo-home via CARGO_HOME instead.
-RUN_IN_CONTAINER := container run --platform linux/arm64 --rm \
+RUN_IN_CONTAINER := $(RUNNER) run --platform linux/arm64 --rm \
   -v "$(CURDIR)":/work \
   -v house-target:/work/rust/target \
   -v house-cabal:/root/.cabal \
@@ -19,7 +29,7 @@ RUN_IN_CONTAINER := container run --platform linux/arm64 --rm \
 
 # Miri gets its own sizing: the sysroot build thrashes under the default
 # container memory. Cache lands on the cargo volume so only the first run pays.
-MIRI_IN_CONTAINER := container run --platform linux/arm64 --rm -c 4 -m 4G \
+MIRI_IN_CONTAINER := $(RUNNER) run --platform linux/arm64 --rm -c 4 -m 4G \
   -v "$(CURDIR)":/work \
   -v house-target:/work/rust/target \
   -v house-cabal:/root/.cabal \
@@ -29,22 +39,29 @@ MIRI_IN_CONTAINER := container run --platform linux/arm64 --rm -c 4 -m 4G \
   -w /work $(IMAGE)
 
 volumes:
-	-container volume create house-target >/dev/null 2>&1 || true
-	-container volume create house-cabal >/dev/null 2>&1 || true
-	-container volume create house-cargo >/dev/null 2>&1 || true
+	-$(RUNNER) volume create house-target >/dev/null 2>&1 || true
+	-$(RUNNER) volume create house-cabal >/dev/null 2>&1 || true
+	-$(RUNNER) volume create house-cargo >/dev/null 2>&1 || true
 
 container-image:
+ifeq ($(RUNNER),container)
 	container builder start -c 4 -m 4G || true
 	# Single sanctioned CONTAINER_DEFAULT_PLATFORM: `container build` line only.
-	# Every `container run` below pins `--platform linux/arm64` explicitly.
+	# Every run below pins `--platform linux/arm64` explicitly.
 	CONTAINER_DEFAULT_PLATFORM=linux/arm64 container build \
 	  --platform linux/arm64 -f Containerfile -t $(IMAGE) .
 	@archs=$$(container image inspect $(IMAGE) | \
 	  jq -r '.[0].variants[].config.architecture' | sort -u); \
 	[ "$$archs" = "arm64" ] || { echo "FAIL: variants: $$archs" >&2; exit 1; }
+else
+	docker build --platform linux/arm64 -f Containerfile -t $(IMAGE) .
+	@archs=$$(docker image inspect $(IMAGE) | \
+	  jq -r '.[0].Architecture' | sort -u); \
+	[ "$$archs" = "arm64" ] || { echo "FAIL: arch: $$archs" >&2; exit 1; }
+endif
 
 container-shell: volumes
-	container run --platform linux/arm64 --rm -it \
+	$(RUNNER) run --platform linux/arm64 --rm -it \
 	  -v "$(CURDIR)":/work -v house-target:/work/rust/target \
 	  -v house-cabal:/root/.cabal -v house-cargo:/cargo-home \
 	  -e CARGO_HOME=/cargo-home -w /work $(IMAGE) bash
@@ -71,8 +88,10 @@ spike-check:
 	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) spike-build
-	expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.bin \
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.bin \
 	  'ticks-ok' 90 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-smoke.exp $(SPIKE_DIR)/build/spike.bin \
+	  'ticks-ok' 120 tcg $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 irq-check kernel ---
 # Only entry point differs (IrqCheck vs Spike); RAM/SMP auto-detected.
@@ -89,9 +108,9 @@ irq-check:
 	$(RUN_IN_CONTAINER) \
 	  make -C $(SPIKE_DIR) clean
 	$(MAKE) irq-build
-	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
 	  'vm-ok' 120 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
 	  'vm-ok' 120 tcg $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 house kernel ---
@@ -151,21 +170,21 @@ house-check:
 	$(RUN_IN_CONTAINER) \
 	  make -C kernel clean
 	$(MAKE) house-build
-	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
 	  'Welcome to the House shell' 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
 	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Interactive shell (phase 5): prompt → help/lambda/wastemem via PL011 RX
 house-shell-check: initrd
 	$(MAKE) house-build
-	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-shell.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # POSIX-ish shell + PSCI (phase 7): help descriptions, echo/clear/uname/uptime, shutdown -r/-h
 house-posix-check: initrd
 	$(MAKE) house-build
-	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-posix.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # SMP check (phase 9): N cores online + Haskell parallel (parametrised by SMP_N, default 2)
@@ -176,44 +195,44 @@ smp-check:
 	$(RUN_IN_CONTAINER) \
 	  make -C kernel clean
 	$(MAKE) house-build
-	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-smp.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # RamFS + VFS (Track 1): volatile 2 MiB pool over H.Pages, H.FileSystem via ls/cat/write/rm/mkdir/stat + echo > /path
 house-fs-check: house-build initrd
-	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-house-fs.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # IPC microkernel (Track 1b): L4 sync rendezvous, copy+grant, ns+cap, hybrid Haskell/EL0
 house-ipc-check: house-build initrd
-	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Driver framework (Track 2): registry on IPC + dmesg ring + SPI + virtio-MMIO probe 0x0a000000+i*0x200
 house-driver-check: house-build initrd
-	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Virtio-MMIO transport (Track 3): device-agnostic split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint
 house-virtio-transport-check: house-build initrd
-	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-virtio-transport.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Virtio-blk (Track 4): block device on transport, virtio_blk_req, Grant pages, 4K blocks (512B sectors on wire), capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B
 house-virtio-blk-check: house-build initrd
 	qemu-img create -f raw /tmp/house.img 64M
-	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 tcg $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 
 # Virtio-net (Track 5): virtio-net server, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user netdev 10.0.2.0/24
 house-virtio-net-check: house-build initrd
-	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 
 # Virtio-console (ID 3): console server, rx0+tx1, Grant 4K, full-duplex + mirror, socket chardev
 house-virtio-con-check: house-build initrd
 	rm -f /tmp/house-con.sock
-	expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 	expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 
 # EL0 userspace + initramfs (pid1 slice): assemble userspace/*.s +
@@ -233,30 +252,30 @@ build/initramfs.cpio: $(USERSPACE_SRCS) $(DYNAMIC_INITRD_SRCS) build-probe/repac
 
 # Initramfs/initrd (cpio newc via QEMU -initrd, unpack + run /sbin/init)
 house-initrd-check: house-build initrd
-	expect scripts/qemu-initramfs.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N) -- -initrd build/initramfs.cpio
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-initramfs.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N) -- -initrd build/initramfs.cpio
 	expect scripts/qemu-initramfs.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N) -- -initrd build/initramfs.cpio
 
 # pid1 (boot -> pid1 -> shell + EL0 coreutils over run/spawn/jobs/wait)
 house-pid1-check: house-build initrd
-	expect scripts/qemu-pid1.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-pid1.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-pid1.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 process checks: per-pid exits + spawn/jobs/wait, 2 concurrent hellos
 house-proc-check: house-build initrd
-	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 fork/wait/exec via park ring (multiprocess step 9): fork probe
 # parent/child distinct + wait reaps; exec probe replaces image w/ hello
 house-fork-check: house-build initrd
-	expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 preemption via timer IRQ + baton run queue (multiprocess step 11):
 # 2 CPU-bound spinners interleave on -smp 1 (smp forced to 1: the switch is
 # proven by alternation, not core count), shell responsive throughout.
 house-preempt-check: house-build initrd
-	expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 120 hvf $(SPIKE_MEM) 1
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 120 hvf $(SPIKE_MEM) 1
 	expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 300 tcg $(SPIKE_MEM) 1
 
 # Spinner + SMP hotplug (multiprocess step 12): one CPU-bound EL0 spinner
@@ -264,32 +283,32 @@ house-preempt-check: house-build initrd
 # full down/up cycle on tcg (resume migrates cores via the global run queue);
 # shell responsive throughout, spinner reaped exit 0.
 house-spin-hotplug-check: house-build initrd
-	expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 300 hvf $(SPIKE_MEM) 2
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 300 hvf $(SPIKE_MEM) 2
 	expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 420 tcg $(SPIKE_MEM) 2
 
 # EL0 fd/brk via park ring (multiprocess step 7): per-pid OPEN/READ/CLOSE cat + brk grow-touch
 house-fd-el0-check: house-build initrd
-	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 IPC ping-pong (multiprocess step 6): server RECV+REPLY + client CALL via the park ring
 house-ipc-el0-check: house-build initrd
-	expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Userspace EL0 (Track 6): ELF loader 0x01000000 window, svc write/exit/brk + IPC 0x10..0x14 via Endpoint, TTBR0/ASID/pager
 # SMP demand-pager race: two EL0 processes faulting fresh pages at once, so two
 # cores enter house_handle_user_fault together. Only meaningful at -smp >= 2.
 house-smp-fault-race-check: house-build initrd
-	expect scripts/qemu-smp-fault-race.exp $(SPIKE_DIR)/build/house.bin 180 hvf $(SPIKE_MEM) 2
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-smp-fault-race.exp $(SPIKE_DIR)/build/house.bin 180 hvf $(SPIKE_MEM) 2
 	expect scripts/qemu-smp-fault-race.exp $(SPIKE_DIR)/build/house.bin 240 tcg $(SPIKE_MEM) 2
 
 house-userspace-check: house-build initrd
-	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-userspace.exp $(SPIKE_DIR)/build/house.bin "Hello from EL0" 60 tcg $(SPIKE_MEM) $(SMP_N)
 
 house-dynamic-userspace-check: house-build initrd
-	expect scripts/qemu-dynamic-userspace.exp $(SPIKE_DIR)/build/house.bin 120 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-dynamic-userspace.exp $(SPIKE_DIR)/build/house.bin 120 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-dynamic-userspace.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Mounted-root /lib fallback: offline ENOENT, root fallback, upper-first lookup.
@@ -300,7 +319,7 @@ dynamic-root-image: initrd scripts/mk-dynamic-probe.sh scripts/mk-dynamic-root.p
 	sha256sum -c scripts/dynamic-root.sha256
 
 house-dynamic-root-check: house-build dynamic-root-image
-	expect scripts/qemu-dynamic-root.exp $(SPIKE_DIR)/build/house.bin build/dynamic-root.img 120 hvf $(SPIKE_MEM) $(SMP_N)
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-dynamic-root.exp $(SPIKE_DIR)/build/house.bin build/dynamic-root.img 120 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-dynamic-root.exp $(SPIKE_DIR)/build/house.bin build/dynamic-root.img 180 tcg $(SPIKE_MEM) $(SMP_N)
 
 # SMP hotplug cycle (Tracks S+H): down/up at N=2, caps mirror, parfib each step.
@@ -308,7 +327,7 @@ house-dynamic-root-check: house-build dynamic-root-image
 # returns 0, core never re-enters), so up-after-down is tcg-only; hvf runs the
 # down-leg (OFF + mask + caps + migrate + parfib) while tcg runs the full cycle.
 smp-hotplug-check: house-build
-	expect scripts/qemu-smp-hotplug-down.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) 2
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-smp-hotplug-down.exp $(SPIKE_DIR)/build/house.bin 60 hvf $(SPIKE_MEM) 2
 	expect scripts/qemu-smp-hotplug.exp $(SPIKE_DIR)/build/house.bin 60 tcg $(SPIKE_MEM) 2
 
 # SMP-8 scaling gate (Track D): 8 cores online at 4G, ceiling 32.
@@ -329,14 +348,14 @@ smp-check-8:
 # every geometry. The qemu-vm.exp harness asserts `vm-ok` plus `mem` buddy
 # free/total, so pressure is recorded without a new allocator.
 vm-check: house-build
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 512M 2
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 512M 2
 	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 tcg 512M 2
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 4G 4
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 hvf 4G 4
 	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 90 tcg 4G 4
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 6G 4
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 6G 4
 	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 180 tcg 6G 4
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 8G 4
-	expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 16G 4
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 8G 4
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-vm.exp $(SPIKE_DIR)/build/house.bin 'vm-ok' 120 hvf 16G 4
 
 house-vm-check: vm-check
 
@@ -386,12 +405,22 @@ doctor:
 	@command -v socat >/dev/null || { echo "doctor: missing socat" >&2; exit 1; }
 	@command -v qemu-img >/dev/null || { echo "doctor: missing qemu-img" >&2; exit 1; }
 	@command -v jq >/dev/null || { echo "doctor: missing jq" >&2; exit 1; }
-	@command -v container >/dev/null || { echo "doctor: missing container" >&2; exit 1; }
+	@command -v $(RUNNER) >/dev/null || { echo "doctor: missing $(RUNNER)" >&2; exit 1; }
 	@ghc --version && cabal --version && fourmolu --version && hlint --version
-	@qemu-system-aarch64 --version | head -1 && expect -v 2>&1 | head -1; socat -V 2>&1 | head -1; qemu-img --version | head -1; jq --version; container --version
+	@qemu-system-aarch64 --version | head -1 && expect -v 2>&1 | head -1; socat -V 2>&1 | head -1; qemu-img --version | head -1; jq --version; $(RUNNER) --version
+ifeq ($(RUNNER),container)
 	@container system status 2>&1 | grep -qi "running" || { echo "doctor: container system not running (run: container system start)" >&2; exit 1; }
+else
+	@docker info >/dev/null 2>&1 || { echo "doctor: docker daemon not reachable" >&2; exit 1; }
+endif
 	@printf 'module T where\nf :: forall a. proxy a -> Int\nf = \\p -> p @Int\n' | hlint - 2>&1 | grep -qi "parse error" && { echo "doctor: host hlint too old for GHC2024 (needs TypeAbstractions)" >&2; exit 1; } || true
 	@echo "doctor: ok"
+
+# TCG-only gate (Linux CI has no nested virt): the hvf half of every QEMU
+# leg is skipped via TCG_ONLY=1, which propagates to sub-makes as a
+# command-line variable. TCG legs always run, on any host.
+check-tcg:
+	$(MAKE) check TCG_ONLY=1
 
 check:
 	$(MAKE) doctor
@@ -412,4 +441,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg

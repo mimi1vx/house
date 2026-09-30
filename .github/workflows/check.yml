@@ -11,17 +11,26 @@ concurrency:
 
 jobs:
   gate:
-    runs-on: macos-26
-    timeout-minutes: 90
+    # Linux arm64: firmware builds natively under Docker, QEMU runs TCG-only
+    # (hosted macOS runners cannot boot VMs: no nested virtualization).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-      - name: Install QEMU gaps
-        run: brew install qemu socat
-      - name: Install container CLI
-        run: brew install container
-      - name: Start container system
-        run: container system start --enable-kernel-install
+      - name: Install host deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils socat expect jq cpio file
+      - name: Install Haskell toolchain
+        run: |
+          curl -sSf https://get-ghcup.haskell.org | BOOTSTRAP_HASKELL_NONINTERACTIVE=1 BOOTSTRAP_HASKELL_MINIMAL=1 BOOTSTRAP_HASKELL_ADJUST_BASHRC=no sh
+          export PATH="$HOME/.ghcup/bin:$HOME/.cabal/bin:$PATH"
+          ghcup install ghc 9.14.1 --set
+          ghcup install cabal --set
+          ghcup install fourmolu 0.20.1.0 --set
+          ghcup install hlint 3.10 --set
+          cabal update
+          echo "$HOME/.ghcup/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cabal/bin" >> "$GITHUB_PATH"
       - name: Build toolchain image
         run: make container-image
-      - name: Run gate
-        run: make check
+      - name: Run TCG gate
+        run: make check-tcg

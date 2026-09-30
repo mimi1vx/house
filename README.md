@@ -12,8 +12,8 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 
 ### Toolchain
 
-* Build container `house-port:latest` (Debian 13, nightly Rust with `aarch64-unknown-none` and Miri, plus GHC 9.14.1 aarch64 via GHCup). Firmware compilation runs through `container run --platform linux/arm64 ...` (see `Containerfile`); host-side Haskell formatting, linting, and pure tests are the exception. The sole `CONTAINER_DEFAULT_PLATFORM=linux/arm64` assignment is local to the `container build` command in `Makefile`; never export it globally. Each `run` pins `--platform linux/arm64`, and `container image inspect` asserts an arm64-only image. The HAL, boot, and libc compatibility layer are Rust (`rust/crates/house-boot`, `rust/crates/house-hal-aarch64`, and `rust/crates/house-libc`); see `rust/ARCHITECTURE.md`.
-* QEMU runs on the macOS host (`brew install qemu expect`, HVF acceleration). The container is build-only. `make check` also requires host GHC/Cabal, Fourmolu 0.20.1.0, and a GHC2024-capable HLint (3.10 is known to work). See `docs/TOOLCHAIN.md` and `docs/HOST-QEMU.md`.
+* Build container `house-port:latest` (Debian 13, nightly Rust with `aarch64-unknown-none` and Miri, plus GHC 9.14.1 aarch64 via GHCup). Firmware compilation runs through `$(RUNNER) run --platform linux/arm64 ...` (Apple `container` on macOS, Docker on Linux; see `Containerfile`); host-side Haskell formatting, linting, and pure tests are the exception. The sole `CONTAINER_DEFAULT_PLATFORM=linux/arm64` assignment is local to the Apple `container build` command in `Makefile`; never export it globally. Each `run` pins `--platform linux/arm64`, and image inspect asserts an arm64-only image. The HAL, boot, and libc compatibility layer are Rust (`rust/crates/house-boot`, `rust/crates/house-hal-aarch64`, and `rust/crates/house-libc`); see `rust/ARCHITECTURE.md`.
+* QEMU runs on the macOS host (`brew install qemu expect`, HVF acceleration) and TCG-only on Linux CI. The container is build-only. `make check` also requires host GHC/Cabal, Fourmolu 0.20.1.0, and a GHC2024-capable HLint (3.10 is known to work). See `docs/TOOLCHAIN.md` and `docs/HOST-QEMU.md`.
 * Guest RAM is auto-detected (DTB `reg` from the `x0` QEMU passes on its Linux boot path → open-ended fault probe doubling from 128M → `512M` fallback; one binary boots at `512M`/`1G`/`2G`/`4G`/`6G`/`8G`/`16G` without rebuild, hvf+tcg). QEMU only takes that path for non-ELF images, so `-kernel` boots the `objcopy -O binary` flat image (`build/*.bin`; `.elf` stays for `readelf`/`gdb`) — ELF `-kernel` boots get `x0=0` and no DTB, and the fault probe false-positives on hvf (reads beyond RAM succeed, later stores abort QEMU with `hvf_handle_exception`). `SPIKE_MEM ?= 4G` only drives QEMU `-m`. `SMP_N ?= 2` only drives QEMU `-smp` and expect args; core count is detected at runtime (DTB → PSCI/GICR max) with per-core 64 KiB stacks (`house_boot_stack_top - core*64K`, `__early_stacks` 32-entry HW reservation, HW bound 32, tested to 8). `TCR EPD1=0` split `TTBR1=kernel` / `TTBR0=user` with 8-bit ASID, `TLBI VAE1IS` + SGI 1 `VMALLE1IS` shootdown (online-only broadcast).
 
 ### What boots
@@ -93,8 +93,9 @@ SPIKE_MEM=512M make spike-check                      # 512M/1G/2G/4G/6G/8G/16G v
 SMP_N=2 make smp-check                               # 2 cores online + Haskell parallel (hvf+tcg)
 SMP_N=4 make smp-check                               # 4 cores online + Haskell parallel (hvf+tcg, 4G working set)
 
-# all gates from clean (the CI gate)
+# all gates from clean (CI runs the TCG subset)
 make check              # spike + irq + house + shell + POSIX + Rust + Haskell gates
+make check-tcg          # same legs, TCG-only (Linux CI)
 make run                # alias for house-run (hvf, $SPIKE_MEM)
 ```
 

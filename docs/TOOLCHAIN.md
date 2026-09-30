@@ -58,6 +58,8 @@ resolve a newer nightly.
   pid1 + dynamic userspace + mounted-root dynamic + rust (clippy + fmt +
   deny + abi) + haskell + el0tiny + dynamic ELF,
   hvf+tcg where applicable.
+- `make check-tcg`: same legs with `TCG_ONLY=1` (Linux CI has no nested
+  virt, so the hvf halves are skipped).
 
 ## Linker
 
@@ -92,12 +94,16 @@ on named volumes.
 
 ```sh
 brew install qemu expect                        # QEMU 11.1.1, expect 5.45
-container builder start -c 4 -m 4G              # 4 CPU / 4 GB floor
+container builder start -c 4 -m 4G              # 4 CPU / 4 GB floor (Apple path)
 ```
 
-Install Apple's `container` CLI and `jq` before using the root Makefile.
+Linux CI instead uses Docker (`$(RUNNER)` selects it) with
+`sudo apt-get install -y qemu-system-arm qemu-utils socat expect jq cpio file`
+plus a GHCup Haskell toolchain, and runs `make check-tcg`.
+
+Install Apple's `container` CLI (macOS) and `jq` before using the root Makefile.
 Do not export `CONTAINER_DEFAULT_PLATFORM`; the root Makefile scopes it to
-`container build` and pins every run explicitly. Host-side Haskell gates also
+the Apple `container build` and pins every run explicitly. Host-side Haskell gates also
 require GHC/Cabal, Fourmolu 0.20.1.0, and a GHC2024-capable HLint (3.10 is
 known to work).
 

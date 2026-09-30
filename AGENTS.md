@@ -6,12 +6,14 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 ## Build Boundary
 
 - Compile firmware only inside the `house-port:latest` container. Host-side
-  Fourmolu, HLint, and Cabal tests are the deliberate exception. Run QEMU only
-  on the macOS host (`brew install qemu expect`).
-- Pin every container invocation to Linux arm64: `container run` uses
-  `--platform linux/arm64`; image building uses the sole sanctioned
-  `CONTAINER_DEFAULT_PLATFORM=linux/arm64` assignment in the root `Makefile`.
-  Never export that variable globally.
+  Fourmolu, HLint, and Cabal tests are the deliberate exception. Run QEMU on
+  the macOS host (`brew install qemu expect`); Linux CI runs TCG-only
+  (`make check-tcg`, no nested virt on hosted runners).
+- Pin every container invocation to Linux arm64: runs use
+  `--platform linux/arm64` via `$(RUNNER)` (Apple `container` on macOS,
+  Docker on Linux); image building uses the sole sanctioned
+  `CONTAINER_DEFAULT_PLATFORM=linux/arm64` assignment in the root `Makefile`
+  (Apple path only). Never export that variable globally.
 - Build the image once with `make container-image`; use `make container-shell`
   for an interactive toolchain shell.
 - Host build wrappers are `make spike-build`, `make irq-build`, and
@@ -22,7 +24,8 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 
 ## Verification
 
-- `make check` is the per-change CI gate: doctor, spike, IRQ, House boot,
+- `make check` is the per-change gate locally (hvf+tcg); CI runs
+  `make check-tcg` (same legs, TCG-only): doctor, spike, IRQ, House boot,
   shell, POSIX, initrd, pid1, dynamic userspace, mounted-root dynamic,
   Rust, Haskell, el0tiny and dynamic ELF checks under both expected
   accelerators where applicable. See `docs/TOOLCHAIN.md` for the gate list.
