@@ -4,3 +4,8 @@ dist-newstyle/
 platform/aarch64/build/
 rust/target/
 build/
+initramfs-staging/bin/
+initramfs-staging/lib/
+.ruff_cache/
+__pycache__/
+*.pyc

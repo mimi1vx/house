@@ -1,0 +1,39 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+jobs:
+  slow-gates:
+    # Same runner constraints as check: Docker builds, TCG-only QEMU.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils socat expect jq cpio file ipxe-qemu
+      - name: Build toolchain image
+        run: make container-image
+      - name: Scaling gate
+        run: make smp-check-8 TCG_ONLY=1
+      - name: Memory matrix
+        run: make vm-check TCG_ONLY=1
+      - name: Miri
+        run: make miri
+      - name: Slow SMP legs
+        run: |
+          make house-spin-hotplug-check TCG_ONLY=1
+          make house-preempt-check TCG_ONLY=1
+          make house-smp-fault-race-check TCG_ONLY=1
+
+  base-digest:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Show current Debian digest
+        run: |
+          docker image pull --platform linux/arm64 debian:13-slim
+          docker image inspect debian:13-slim --format '{{index .RepoDigests 0}}'
+          echo "Compare with the FROM pin in Containerfile; bump by hand when it moves."

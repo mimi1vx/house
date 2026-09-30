@@ -1,7 +1,8 @@
 # Host QEMU
 
 QEMU runs on the macOS host, never in the toolchain image.
-The image stays build-only.
+The image stays build-only. (Linux CI runs the same harnesses TCG-only
+via `make check-tcg`; hosted macOS runners cannot boot VMs.)
 
 ## Prerequisites
 
@@ -10,7 +11,8 @@ brew install qemu expect                        # QEMU 11.1.1, expect 5.45
 qemu-system-aarch64 -accel help                 # want: hvf + tcg
 ```
 
-The build also requires Apple's `container` CLI and `jq`; install and start
+The build also requires Apple's `container` CLI (macOS; Linux uses Docker
+via `$(RUNNER)`) and `jq`; on macOS install and start
 the container system before running `make container-image`.
 
 Do not export `CONTAINER_DEFAULT_PLATFORM`. `make container-image` sets it

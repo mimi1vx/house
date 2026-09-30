@@ -16,15 +16,15 @@ macOS host, never inside (see `docs/HOST-QEMU.md`).
 
 ## Toolchains
 
-The table records the resolved image contents. GHC and Rust nightly float at
-image-build time, so refresh the table whenever the image resolves newer
-versions.
+The table records the resolved image contents. GHC is pinned in the
+Containerfile and Rust to nightly-2026-09-23; refresh the table whenever
+a pin moves.
 
 | Tool | Provisioned by | Resolved version |
 |------|---------------|------------------|
-| GHC | `ghcup install ghc latest --set` | 9.14.1 |
+| GHC | `ghcup install ghc 9.14.1 --set` | 9.14.1 |
 | Cabal | `ghcup install cabal --set` | 3.16.1.0 |
-| rustc/cargo | `rustup` default nightly, minimal profile | 1.100.0-nightly (f248f4038 2026-09-05) |
+| rustc/cargo | `rustup` default nightly-2026-09-23, minimal profile | 1.100.0-nightly (6bb1652a0 2026-09-22) |
 | clippy/rustfmt | `rustup component add` | 0.1.100 / 1.10.0-nightly (ships with the toolchain) |
 | miri | `rustup component add miri` (nightly-only) | 0.1.0 (same nightly); `make miri` green: buddy lifecycle + 15 mem tests |
 | fourmolu | `ghcup install fourmolu 0.20.1.0 --set` | 0.20.1.0 (matches host) |
@@ -34,18 +34,17 @@ versions.
 | ld.lld | `lld` apt set | Debian LLD 19.1.7 |
 
 Nightly is deliberate: Miri only ships for nightly. Build, Clippy, formatting,
-and Miri use the same nightly resolved into an image; rebuilding the image may
-resolve a newer nightly.
+and Miri use the same pinned nightly baked into the image.
 
 ## Gates
 
 - `make lint`: container `cargo clippy --target aarch64-unknown-none
   -- -D warnings` (blanket pedantic rejected — intentional syscall-ABI
   casts trip it; `--all-targets` excluded, no `test` crate on bare metal)
-  + `cargo fmt --check` + `cargo deny check`, plus host
+  + `cargo fmt --check`, plus host
   `fourmolu -m check` + `hlint` over the full tree.
-- `make miri` runs 16 pure-logic tests with `cargo miri test -p house-hal
-  -p house-hal-aarch64 -p house-libc -p house-boot` inside a
+- `make miri` runs 20 pure-logic tests with `cargo miri test -p house-hal
+  -p house-hal-aarch64 -p house-libc -p house-boot -p house-el0-tiny` inside a
   `container run -c 4 -m 4G` invocation. `asm!`/MMIO stay
   QEMU-gated behind `#[cfg]` isolation (`#[cfg(miri)]` no-op spinlock
   stubs; `no_mangle` dropped and syscall modules gated out under
@@ -54,8 +53,13 @@ resolve a newer nightly.
   pays for the sysroot build.
 - `make haskell-check`: full-tree fourmolu+hlint + `cabal build all
   --enable-tests` + `cabal test all` (test-only package needs the flag).
-- `make check`: spike + irq + house + shell + posix + rust + haskell,
+- `make check`: doctor + spike + irq + house + shell + posix + initrd +
+  pid1 + dynamic userspace + mounted-root dynamic + rust (clippy + fmt +
+  deny + abi) + haskell + el0tiny + dynamic ELF,
   hvf+tcg where applicable.
+- `make check-tcg`: the check legs with `TCG_ONLY=1` (Linux CI has no nested
+  virt, so the hvf halves are skipped), minus house-dynamic-root-check,
+  which needs QEMU 11+ for virtio-mmio-transports.
 
 ## Linker
 
@@ -90,12 +94,18 @@ on named volumes.
 
 ```sh
 brew install qemu expect                        # QEMU 11.1.1, expect 5.45
-container builder start -c 4 -m 4G              # 4 CPU / 4 GB floor
+container builder start -c 4 -m 4G              # 4 CPU / 4 GB floor (Apple path)
 ```
 
-Install Apple's `container` CLI and `jq` before using the root Makefile.
+Linux CI instead uses Docker (`$(RUNNER)` selects it) with
+`sudo apt-get install -y qemu-system-arm qemu-utils socat expect jq cpio file`
+plus a GHCup Haskell toolchain (GHC + Cabal via ghcup, fourmolu from its
+official linux-arm64 release zip, hlint 3.10 built once with an older GHC
+since it has no aarch64 binary), and runs `make check-tcg`.
+
+Install Apple's `container` CLI (macOS) and `jq` before using the root Makefile.
 Do not export `CONTAINER_DEFAULT_PLATFORM`; the root Makefile scopes it to
-`container build` and pins every run explicitly. Host-side Haskell gates also
+the Apple `container build` and pins every run explicitly. Host-side Haskell gates also
 require GHC/Cabal, Fourmolu 0.20.1.0, and a GHC2024-capable HLint (3.10 is
 known to work).
 

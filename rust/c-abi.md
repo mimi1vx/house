@@ -156,6 +156,7 @@ rearm path feeding `house_rts_tick()` (SMP_N cores, PPI 27/30, SGI 0 IPI).
 | `house-hal-aarch64` | `house_timer_rearm_virt` | `void house_timer_rearm_virt(void)` | `timer.c` |
 | `house-hal-aarch64` | `house_timer_rearm_phys` | `void house_timer_rearm_phys(void)` | `timer.c` |
 | `house-hal-aarch64` | `house_uptime_secs` | `uint64_t house_uptime_secs(void)` | `timer.c` |
+| `house-hal-aarch64` | `house_timer_interval` | `uint32_t house_timer_interval` | `timer.c` |
 
 ### `irq.rs` — `irq.c` / `irq.h`
 
@@ -311,6 +312,9 @@ before use, same fail-closed pattern as the `memory`/`reg` walk.
 | `house-hal-aarch64` | `house_smp_detect_psci` | `int house_smp_detect_psci(void)` | `house_detect.c` |
 | `house-hal-aarch64` | `house_smp_detect_gicr` | `int house_smp_detect_gicr(void)` | `house_detect.c` |
 | `house-hal-aarch64` | `house_ram_probe` | `uint64_t house_ram_probe(void)` | `house_probe.c` |
+| `house-hal-aarch64` | `house_in_probe` | `int house_in_probe` | `house_probe.c` |
+| `house-hal-aarch64` | `house_probe_faulted` | `int house_probe_faulted` | `house_probe.c` |
+| `house-hal-aarch64` | `house_probe_recovery` | `uint64_t house_probe_recovery` | `house_probe.c` |
 | `house-hal-aarch64` | `house_ram_bytes` | `uint64_t house_ram_bytes` | `house_detect.c` |
 | `house-hal-aarch64` | `house_boot_stack_top` | `uint64_t house_boot_stack_top` | `house_detect.c` |
 | `house-hal-aarch64` | `house_smp` | `int house_smp` | `house_detect.c` |
@@ -472,7 +476,17 @@ called from the HAL rearm path; `house_uptime_ns` backs timerfd pacing.
 | `house-libc` | `sched_yield` / `sched_getaffinity` / `sched_setaffinity` | `int sched_yield(void)` etc. | `threads.c` |
 | `house-libc` | `pthread_sigmask` | `int pthread_sigmask(int how, const sigset_t *set, sigset_t *old)` | `threads.c` |
 | `house-libc` | `nanosleep` / `poll` / `select` / `pause` | `int nanosleep(...)` etc. | `threads.c` |
-| `house-libc` | `house_spin_*` | `house_spin_init/lock/trylock/unlock` (inline in `spinlock.h`) | `spinlock.h` |
+| `house-libc` | `house_spin_init` | `void house_spin_init(uint32_t *l)` | `spinlock.h` |
+| `house-libc` | `house_spin_lock` | `void house_spin_lock(uint32_t *l)` | `spinlock.h` |
+| `house-libc` | `house_spin_trylock` | `int house_spin_trylock(uint32_t *l)` | `spinlock.h` |
+| `house-libc` | `house_spin_unlock` | `void house_spin_unlock(uint32_t *l)` | `spinlock.h` |
+| `house-libc` | `house_thread_trampoline` | `void house_thread_trampoline(void)` | `threads.c` |
+| `house-libc` | `house_threads_on_core_down` | `void house_threads_on_core_down(uint32_t core)` | `threads.c` |
+| `house-libc` | `house_current_thr` | `void *house_current_thr[32]` | `threads.c` |
+| `house-libc` | `house_thr_mode` | `int house_thr_mode` | `threads.c` |
+| `house-libc` | `house_ipi_pending` | `int house_ipi_pending[32]` | `threads.c` |
+| `house-libc` | `house_sched_deferred` | `int house_sched_deferred[32]` | `threads.c` |
+| `house-libc` | `sched_lock` | `uint32_t sched_lock` | `threads.c` |
 
 ### `alloc` — `tinylibc/alloc.c` + `mm/vm.c` (POSIX `mmap` family)
 
@@ -547,10 +561,36 @@ stubs. Representative (see `compat.rs` for the full list):
 
 ### `mathmin` — `tinylibc/mathmin.c` → `mathmin.rs` (ported)
 
-Freestanding `libm` subset (`ldexp`, `log`/`log2`, `exp`, `pow`, `sin`,
-`cos`, `tan`, `sqrt`, `fabs`, `floor`, `ceil`, `trunc`, `round`, `strtod`,
-`asinh`/`asinhf`, `acosh`/`acoshf`, `atanh`/`atanhf`, `cbrt`, `hypot`,
-`fmax`, `fmin`, `fmod`).
+Freestanding `libm` subset.
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-libc` | `ldexp` | `double ldexp(double x, int exp)` | `tinylibc/mathmin.c` |
+| `house-libc` | `log` | `double log(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `log2` | `double log2(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `exp` | `double exp(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `pow` | `double pow(double a, double b)` | `tinylibc/mathmin.c` |
+| `house-libc` | `sin` | `double sin(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `cos` | `double cos(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `tan` | `double tan(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `sqrt` | `double sqrt(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `fabs` | `double fabs(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `floor` | `double floor(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `ceil` | `double ceil(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `trunc` | `double trunc(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `round` | `double round(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `strtod` | `double strtod(const char *n, char **end)` | `tinylibc/mathmin.c` |
+| `house-libc` | `atanh` | `double atanh(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `atanhf` | `float atanhf(float x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `asinh` | `double asinh(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `asinhf` | `float asinhf(float x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `acosh` | `double acosh(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `acoshf` | `float acoshf(float x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `cbrt` | `double cbrt(double x)` | `tinylibc/mathmin.c` |
+| `house-libc` | `hypot` | `double hypot(double a, double b)` | `tinylibc/mathmin.c` |
+| `house-libc` | `fmax` | `double fmax(double a, double b)` | `tinylibc/mathmin.c` |
+| `house-libc` | `fmin` | `double fmin(double a, double b)` | `tinylibc/mathmin.c` |
+| `house-libc` | `fmod` | `double fmod(double a, double b)` | `tinylibc/mathmin.c` |
 
 ### `c_print` — `tinylibc/c_print.c` → `c_print.rs` (ported)
 
@@ -571,17 +611,18 @@ shows them as `U` until `ld -T build/aarch64.ld` links.
 ## Audit notes
 
 ```sh
-# Documented symbols check (Symbol column):
-grep -E '^\| (house-|uart_|buddy_|psci_|virtio_|fdt_|c_start|vectors|_start|secondary_entry|house_enter_el0|svc_exit_trampoline|__boot_dtb|malloc|free|calloc|realloc|mmap|munmap|mprotect|memcpy|printf|getopt|c_print|optind|stdin|pthread_|sched_|clock_|timer|epoll_|eventfd|pipe|nanosleep|poll|select|read|write|open|close|stat|sysconf|exit|abort|strtol|socket)' rust/c-abi.md | awk -F'|' '{print $3}' | tr -d ' ' | sort -u | head -60
+# Frozen baseline check (Symbol column, split /-cells):
+sh scripts/abi-symbols.sh check
 # Rust export audit (post-port: HAL + boot + libc):
-grep -rn "#\[no_mangle\]" rust/crates --include="*.rs" | wc -l   # ~400 (full libc port)
+grep -rn "unsafe(no_mangle)" rust/crates --include="*.rs" | wc -l   # ~410 (full libc port)
+grep -rn "^[[:space:]]*#[.*no_mangle" rust/crates --include="*.rs" | wc -l   # includes cfg_attr forms
 grep -rn "pub unsafe extern \"C\" fn" rust/crates/house-hal-aarch64/src rust/crates/house-boot/src --include="*.rs" | wc -l
 # global_asm! labels (not no_mangle):
-grep -n "\.global" rust/crates/house-boot/src/entry.rs rust/crates/house-boot/src/exception.rs
+grep -n "\.global" rust/crates/house-boot/src/entry.rs rust/crates/house-boot/src/exception.rs rust/crates/house-libc/src/threads/switch.rs
 # After link, no unexpected U should remain (RTS/glibc names excluded):
 # nm platform/aarch64/build/house.elf | grep " U " | grep -v "HsFFI\|libHS" || echo ok
-# Single-owner gates (ci-tinylibc-parity.sh):
-grep -rn "panic_handler" rust/crates --include="*.rs"   # exactly 1 (house-libc panic.rs)
+# Single-owner gates (rust-abi-check, attribute lines only so prose stays out):
+grep -rn "^[[:space:]]*#\[panic_handler" rust/crates --include="*.rs"   # exactly 2: house-libc EL1 + house-el0-tiny EL0
 ```
 
 `HsFFI.h` / `ghc --print-libdir` RTS archives are unchanged and linked via

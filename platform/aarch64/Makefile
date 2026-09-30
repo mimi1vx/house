@@ -97,9 +97,11 @@ house: build/house.elf build/house.bin
 house-hs:
 	$(MAKE) -C ../../kernel
 
-build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld
+KERNEL_HS := $(shell cd ../../kernel && find . -name '*.hs' -not -path './build/*' | sed 's|^\./|../../kernel/|')
+
+build/house.elf: house-hs $(OBJS_HOUSE_DEPS) build/aarch64.ld $(KERNEL_HS)
 	$(LD) --allow-multiple-definition --build-id=none --gc-sections -T build/aarch64.ld -o $@ \
-	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS_HOUSE_DEPS)) $$(find ../../kernel/build -name '*.o') \
+	  $(filter-out $(RUST_HAL_A) $(RUST_BOOT_A),$(OBJS_HOUSE_DEPS)) $$(find ../../kernel/build -name '*.o' | LC_ALL=C sort) \
 	  --start-group $(RUST_HAL_A) $(RUST_BOOT_A) $(RUST_LIBC_A) $(RUST_CORE_A) $(RUST_COMPILER_BUILTINS_A) \
 	    $(PRIM_A) $(BNUM_A) $(GINT_A) $(CONT_A) $(PRETTY_A) $(MTL_A) $(BYTES_A) $(ARRAY_A) $(TRANS_A) $(DEEP_A) $(BASE_A) $(RTS_A) $(FFI_A) \
 	    /usr/lib/aarch64-linux-gnu/libgmp.a --end-group \
@@ -174,4 +176,4 @@ cargo-fmt:
 cargo-clean:
 	cargo clean --manifest-path $(RUST_MANIFEST)
 
-.PHONY: all clean cargo-build cargo-clippy cargo-fmt cargo-clean FORCE
+.PHONY: all spike irq house house-hs clean cargo-build cargo-clippy cargo-fmt cargo-clean FORCE
