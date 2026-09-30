@@ -25,7 +25,8 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
 ## Verification
 
 - `make check` is the per-change gate locally (hvf+tcg); CI runs
-  `make check-tcg` (same legs, TCG-only): doctor, spike, IRQ, House boot,
+  `make check-tcg` (TCG-only; dynamic-root needs QEMU 11+, so it stays
+  local-only): doctor, spike, IRQ, House boot,
   shell, POSIX, initrd, pid1, dynamic userspace, mounted-root dynamic,
   Rust, Haskell, el0tiny and dynamic ELF checks under both expected
   accelerators where applicable. See `docs/TOOLCHAIN.md` for the gate list.

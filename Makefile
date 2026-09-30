@@ -427,11 +427,27 @@ endif
 	@printf 'module T where\nf :: forall a. proxy a -> Int\nf = \\p -> p @Int\n' | hlint - 2>&1 | grep -qi "parse error" && { echo "doctor: host hlint too old for GHC2024 (needs TypeAbstractions)" >&2; exit 1; } || true
 	@echo "doctor: ok"
 
-# TCG-only gate (Linux CI has no nested virt): the hvf half of every QEMU
-# leg is skipped via TCG_ONLY=1, which propagates to sub-makes as a
-# command-line variable. TCG legs always run, on any host.
+# TCG-only gate for Linux CI: the check legs under TCG, except the hvf
+# halves (TCG_ONLY=1 skips them; hosted runners have no nested virt) and
+# except house-dynamic-root-check, which needs QEMU 11+ for
+# virtio-mmio-transports to place its block device in the guest's slots
+# 0..7 (Ubuntu noble ships QEMU 8.2, whose 32 fixed transports land it at
+# slot 31, outside the guest map). It still runs locally via make check.
 check-tcg:
-	$(MAKE) check TCG_ONLY=1
+	$(MAKE) doctor
+	$(MAKE) spike-check TCG_ONLY=1
+	$(MAKE) irq-check TCG_ONLY=1
+	$(MAKE) house-check TCG_ONLY=1
+	$(MAKE) house-shell-check TCG_ONLY=1
+	$(MAKE) house-posix-check TCG_ONLY=1
+	$(MAKE) house-initrd-check TCG_ONLY=1
+	$(MAKE) house-pid1-check TCG_ONLY=1
+	$(MAKE) house-dynamic-userspace-check TCG_ONLY=1
+	$(MAKE) rust-check
+	$(MAKE) haskell-check
+	$(MAKE) el0tiny-check
+	$(MAKE) dynamic-elf-check
+	@echo "== make check-tcg: all aarch64 TCG gates passed (doctor, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, rust, haskell, el0tiny, dynamic ELF) =="
 
 check:
 	$(MAKE) doctor

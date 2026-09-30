@@ -57,8 +57,9 @@ and Miri use the same pinned nightly baked into the image.
   pid1 + dynamic userspace + mounted-root dynamic + rust (clippy + fmt +
   deny + abi) + haskell + el0tiny + dynamic ELF,
   hvf+tcg where applicable.
-- `make check-tcg`: same legs with `TCG_ONLY=1` (Linux CI has no nested
-  virt, so the hvf halves are skipped).
+- `make check-tcg`: the check legs with `TCG_ONLY=1` (Linux CI has no nested
+  virt, so the hvf halves are skipped), minus house-dynamic-root-check,
+  which needs QEMU 11+ for virtio-mmio-transports.
 
 ## Linker
 

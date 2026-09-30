@@ -95,7 +95,7 @@ SMP_N=4 make smp-check                               # 4 cores online + Haskell 
 
 # all gates from clean (CI runs the TCG subset)
 make check              # spike + irq + house + shell + POSIX + Rust + Haskell gates
-make check-tcg          # same legs, TCG-only (Linux CI)
+make check-tcg          # TCG-only subset for Linux CI (no dynamic-root: needs QEMU 11+)
 make run                # alias for house-run (hvf, $SPIKE_MEM)
 ```
 
