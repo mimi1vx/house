@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install host deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils socat expect jq cpio file unzip libgmp-dev libffi-dev libncurses-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils socat expect jq cpio file unzip libgmp-dev libffi-dev libncurses-dev zlib1g-dev ipxe-qemu
       - name: Install Haskell toolchain
         run: |
           curl -sSf https://get-ghcup.haskell.org | BOOTSTRAP_HASKELL_NONINTERACTIVE=1 BOOTSTRAP_HASKELL_MINIMAL=1 BOOTSTRAP_HASKELL_ADJUST_BASHRC=no sh
