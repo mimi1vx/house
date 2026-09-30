@@ -11,14 +11,14 @@ concurrency:
 
 jobs:
   gate:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU gaps
         run: brew install qemu socat
       - name: Install container CLI
-        run: brew install --cask apple/container
+        run: brew install container
       - name: Start container system
         run: container system start
       - name: Build toolchain image
