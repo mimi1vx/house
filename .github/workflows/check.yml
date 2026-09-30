@@ -20,7 +20,7 @@ jobs:
       - name: Install container CLI
         run: brew install container
       - name: Start container system
-        run: container system start
+        run: container system start --enable-kernel-install
       - name: Build toolchain image
         run: make container-image
       - name: Run gate

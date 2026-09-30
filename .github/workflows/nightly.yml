@@ -16,7 +16,7 @@ jobs:
       - name: Install container CLI
         run: brew install container
       - name: Start container system
-        run: container system start
+        run: container system start --enable-kernel-install
       - name: Build toolchain image
         run: make container-image
       - name: Scaling gate
@@ -38,7 +38,7 @@ jobs:
       - name: Install container CLI
         run: brew install container
       - name: Start container system
-        run: container system start
+        run: container system start --enable-kernel-install
       - name: Show current Debian digest
         run: |
           container image pull --platform linux/arm64 debian:13-slim
