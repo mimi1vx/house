@@ -1,0 +1,37 @@
+name: toolchain-check
+
+# Dependabot has no Haskell/cabal ecosystem, so this weekly read-only check
+# reports stale Haskell-side pins. It never opens PRs; bump by hand and keep
+# docs/TOOLCHAIN.md in sync (see .github/dependabot.yml).
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+jobs:
+  haskell-pins:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report Haskell pin status
+        run: |
+          echo "== pinned GHC (Containerfile + check.yml) =="
+          grep -h 'ghcup install ghc' Containerfile .github/workflows/check.yml || true
+          echo "== pinned cabal index-state (cabal.project) =="
+          grep -h 'index-state' cabal.project || true
+          echo "== pinned fourmolu (Containerfile + check.yml) =="
+          grep -h -i 'fourmolu' Containerfile .github/workflows/check.yml | head -5 || true
+          echo "== pinned hlint (Containerfile + check.yml) =="
+          grep -h 'hlint' Containerfile .github/workflows/check.yml | head -5 || true
+          echo "== pinned cargo-deny (Containerfile ARG) =="
+          grep -h 'CARGO_DENY_VERSION' Containerfile || true
+          echo "== latest GHC release =="
+          curl -sSf https://downloads.haskell.org/ghc/latest/ 2>/dev/null | head -5 || echo "(could not fetch ghc latest)"
+          echo "== latest fourmolu release =="
+          curl -sSf https://api.github.com/repos/fourmolu/fourmolu/releases/latest 2>/dev/null | grep '"tag_name"' || echo "(could not fetch fourmolu latest)"
+          echo "== latest hlint release =="
+          curl -sSf https://api.github.com/repos/ndmitchell/hlint/releases/latest 2>/dev/null | grep '"tag_name"' || echo "(could not fetch hlint latest)"
+          echo "== latest cargo-deny release =="
+          curl -sSf https://api.github.com/repos/EmbarkStudios/cargo-deny/releases/latest 2>/dev/null | grep '"tag_name"' || echo "(could not fetch cargo-deny latest)"
+          echo "Compare each latest against the pin above; bump by hand when it moves."

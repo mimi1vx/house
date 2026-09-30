@@ -1,0 +1,58 @@
+version: 2
+updates:
+  # Rust crates (rust/Cargo.toml workspace + rust/Cargo.lock).
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "rust"
+
+  # Pinned nightly in rust-toolchain.toml (Miri needs nightly).
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "rust"
+
+  # Base image pin in Containerfile (debian:13-slim@sha256:...).
+  # Backstop is the base-digest job in nightly.yml, which prints the
+  # current digest for a manual bump when Dependabot cannot parse it.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "container"
+
+  # actions/checkout, actions/cache, docker/* in .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "ci"
+
+# Haskell/Hackage has no Dependabot ecosystem (no cabal support).
+# Haskell pins are tracked by hand and checked weekly by
+# .github/workflows/toolchain-check.yml:
+#   GHC 9.14.1 + 9.8.4 (Containerfile, check.yml), cabal index-state
+#   (cabal.project), fourmolu 0.20.1.0, hlint 3.10, cargo-deny version
+#   (Containerfile ARG). Bump the pin + docs/TOOLCHAIN.md table together.

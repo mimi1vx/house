@@ -103,6 +103,24 @@ plus a GHCup Haskell toolchain (GHC + Cabal via ghcup, fourmolu from its
 official linux-arm64 release zip, hlint 3.10 built once with an older GHC
 since it has no aarch64 binary), and runs `make check-tcg`.
 
+## Dependency updates (Dependabot) and CI caching
+
+- `.github/dependabot.yml` tracks `cargo` (`/rust`), `rust-toolchain`
+  (`rust-toolchain.toml`), `docker` (`Containerfile` base-image digest),
+  and `github-actions` weekly. Haskell/Hackage has no Dependabot
+  ecosystem, so GHC/cabal `index-state`/fourmolu/hlint/cargo-deny pins
+  stay manual: `.github/workflows/toolchain-check.yml` reports the latest
+  upstream releases weekly, and every bump updates the table above.
+- `check.yml`/`nightly.yml` cache three legs: the toolchain image via the
+  Docker Buildx GHA cache backend (`load: true` exposes
+  `house-port:latest` to the `make *-build` steps), the host Haskell
+  toolchain (`~/.ghcup`, `~/.cabal/packages`, fourmolu/hlint binaries) plus
+  the incremental Cabal store (`~/.cabal/store`, `dist-newstyle` keyed on
+  `cabal.project` + `**/*.cabal`), and the container named volumes
+  (`house-cargo`/`house-target`/`house-cabal`, seeded from
+  `actions/cache` on `rust/Cargo.lock` + `rust-toolchain.toml`). Bump the
+  `v1-`/`house-vol-v1-` cache prefixes when the corresponding pins move.
+
 Install Apple's `container` CLI (macOS) and `jq` before using the root Makefile.
 Do not export `CONTAINER_DEFAULT_PLATFORM`; the root Makefile scopes it to
 the Apple `container build` and pins every run explicitly. Host-side Haskell gates also

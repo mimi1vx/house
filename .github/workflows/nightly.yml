@@ -14,8 +14,34 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install host deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils socat expect jq cpio file ipxe-qemu
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Build toolchain image
-        run: make container-image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/arm64
+          tags: house-port:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Restore container volume caches
+        uses: actions/cache@v4
+        with:
+          path: /tmp/house-volcache
+          key: house-vol-v1-${{ hashFiles('rust/Cargo.lock', 'rust-toolchain.toml', 'rust/deny.toml') }}
+          restore-keys: |
+            house-vol-v1-
+      - name: Seed container volumes
+        run: |
+          mkdir -p /tmp/house-volcache/cargo-registry /tmp/house-volcache/cargo-target /tmp/house-volcache/cabal
+          docker volume create house-target >/dev/null 2>&1 || true
+          docker volume create house-cargo >/dev/null 2>&1 || true
+          docker volume create house-cabal >/dev/null 2>&1 || true
+          docker run --rm -v house-cargo:/dest -v /tmp/house-volcache/cargo-registry:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-target:/dest -v /tmp/house-volcache/cargo-target:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-cabal:/dest -v /tmp/house-volcache/cabal:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
       - name: Scaling gate
         run: make smp-check-8 TCG_ONLY=1
       - name: Memory matrix
@@ -27,6 +53,12 @@ jobs:
           make house-spin-hotplug-check TCG_ONLY=1
           make house-preempt-check TCG_ONLY=1
           make house-smp-fault-race-check TCG_ONLY=1
+      - name: Save container volumes to cache
+        if: always()
+        run: |
+          docker run --rm -v house-cargo:/src -v /tmp/house-volcache/cargo-registry:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-target:/src -v /tmp/house-volcache/cargo-target:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-cabal:/src -v /tmp/house-volcache/cabal:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
 
   base-digest:
     runs-on: ubuntu-24.04-arm

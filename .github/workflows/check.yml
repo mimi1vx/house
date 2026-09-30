@@ -17,30 +17,113 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+
       - name: Install host deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils socat expect jq cpio file unzip libgmp-dev libffi-dev libncurses-dev zlib1g-dev ipxe-qemu
+
+      # GHC installs dominate cold runs (~2 toolchains + hlint build from
+      # source), so the toolchain prefix is cached across runs. Bump the
+      # `v1-` prefix when the GHC/fourmolu/hlint pins move.
+      - name: Cache Haskell toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ghcup
+            ~/.cabal/packages
+            ~/.local/bin/fourmolu
+            ~/.local/bin/hlint
+          key: haskell-toolchain-v1-ghc9.14.1-ghc9.8.4-fourmolu0.20.1.0-hlint3.10
+          restore-keys: |
+            haskell-toolchain-v1-
+
+      # Incremental Cabal builds: store + dist-newstyle keyed on the solver
+      # inputs (cabal.project index-state + every .cabal file).
+      - name: Cache Cabal store
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cabal/store
+            dist-newstyle
+          key: cabal-build-v1-${{ hashFiles('cabal.project', '**/*.cabal') }}
+          restore-keys: |
+            cabal-build-v1-
+
       - name: Install Haskell toolchain
         run: |
-          curl -sSf https://get-ghcup.haskell.org | BOOTSTRAP_HASKELL_NONINTERACTIVE=1 BOOTSTRAP_HASKELL_MINIMAL=1 BOOTSTRAP_HASKELL_ADJUST_BASHRC=no sh
           export PATH="$HOME/.ghcup/bin:$HOME/.cabal/bin:$HOME/.local/bin:$PATH"
-          ghcup install ghc 9.14.1 --set
-          ghcup install ghc 9.8.4
-          ghcup install cabal --set
+          if ! command -v ghc-9.14.1 >/dev/null || ! command -v ghc-9.8.4 >/dev/null; then
+            curl -sSf https://get-ghcup.haskell.org | BOOTSTRAP_HASKELL_NONINTERACTIVE=1 BOOTSTRAP_HASKELL_MINIMAL=1 BOOTSTRAP_HASKELL_ADJUST_BASHRC=no sh
+            export PATH="$HOME/.ghcup/bin:$HOME/.cabal/bin:$HOME/.local/bin:$PATH"
+            ghcup install ghc 9.14.1 --set
+            ghcup install ghc 9.8.4
+            ghcup set ghc 9.14.1
+          fi
+          ghcup install cabal --set || true
           cabal update
           # fourmolu ships an official linux-arm64 binary (ghcup has none)
-          curl -sSfL -o /tmp/fourmolu.zip https://github.com/fourmolu/fourmolu/releases/download/v0.20.1.0/fourmolu-0.20.1.0-linux-arm64.zip
-          echo "56ad7ae69b4bff12d4144ae86fdfec2cab16a19e29f76fd316c491a986c0c335  /tmp/fourmolu.zip" | sha256sum -c -
-          unzip -o -d /tmp/fourmolu /tmp/fourmolu.zip
-          mkdir -p "$HOME/.local/bin"
-          install -m 755 /tmp/fourmolu/fourmolu-0.20.1.0-linux-arm64/fourmolu "$HOME/.local/bin/fourmolu"
+          if ! command -v fourmolu >/dev/null; then
+            curl -sSfL -o /tmp/fourmolu.zip https://github.com/fourmolu/fourmolu/releases/download/v0.20.1.0/fourmolu-0.20.1.0-linux-arm64.zip
+            echo "56ad7ae69b4bff12d4144ae86fdfec2cab16a19e29f76fd316c491a986c0c335  /tmp/fourmolu.zip" | sha256sum -c -
+            unzip -o -d /tmp/fourmolu /tmp/fourmolu.zip
+            mkdir -p "$HOME/.local/bin"
+            install -m 755 /tmp/fourmolu/fourmolu-0.20.1.0-linux-arm64/fourmolu "$HOME/.local/bin/fourmolu"
+          fi
           # hlint 3.10 has no aarch64 binary and cannot build under GHC 9.14
           # (its ghc-lib-parser needs base 4.19-4.21), so build it once with GHC 9.8
-          cabal install hlint-3.10 --with-compiler=ghc-9.8.4 --installdir="$HOME/.local/bin" --overwrite-policy=always
+          if ! command -v hlint >/dev/null; then
+            cabal install hlint-3.10 --with-compiler=ghc-9.8.4 --installdir="$HOME/.local/bin" --overwrite-policy=always
+          fi
           ghcup set ghc 9.14.1
           echo "$HOME/.ghcup/bin" >> "$GITHUB_PATH"
           echo "$HOME/.cabal/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Container rebuilds (ghcup + rustup + apt layers) are the other slow
+      # leg; the GHA cache backend makes them incremental. `load: true`
+      # exposes house-port:latest to the `make *-build` docker-run steps.
       - name: Build toolchain image
-        run: make container-image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/arm64
+          tags: house-port:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Cargo builds run inside the container on named volumes
+      # (house-target/house-cargo/house-cabal), which are ephemeral in CI.
+      # The registry + target caches below seed those volumes so
+      # `make check-tcg` stays incremental once third-party deps land
+      # (today the workspace is path-only, so the win is the target dir).
+      - name: Restore container volume caches
+        uses: actions/cache@v4
+        with:
+          path: /tmp/house-volcache
+          key: house-vol-v1-${{ hashFiles('rust/Cargo.lock', 'rust-toolchain.toml', 'rust/deny.toml') }}
+          restore-keys: |
+            house-vol-v1-
+
+      - name: Seed container volumes
+        run: |
+          mkdir -p /tmp/house-volcache/cargo-registry /tmp/house-volcache/cargo-target /tmp/house-volcache/cabal
+          docker volume create house-target >/dev/null 2>&1 || true
+          docker volume create house-cargo >/dev/null 2>&1 || true
+          docker volume create house-cabal >/dev/null 2>&1 || true
+          docker run --rm -v house-cargo:/dest -v /tmp/house-volcache/cargo-registry:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-target:/dest -v /tmp/house-volcache/cargo-target:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-cabal:/dest -v /tmp/house-volcache/cabal:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+
       - name: Run TCG gate
         run: make check-tcg
+
+      - name: Save container volumes to cache
+        if: always()
+        run: |
+          docker run --rm -v house-cargo:/src -v /tmp/house-volcache/cargo-registry:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-target:/src -v /tmp/house-volcache/cargo-target:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-cabal:/src -v /tmp/house-volcache/cabal:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
