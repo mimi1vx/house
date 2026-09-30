@@ -1,0 +1,27 @@
+name: check
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU gaps
+        run: brew install qemu socat
+      - name: Install container CLI
+        run: brew install --cask apple/container
+      - name: Start container system
+        run: container system start
+      - name: Build toolchain image
+        run: make container-image
+      - name: Run gate
+        run: make check

@@ -1,4 +1,4 @@
-FROM debian:13-slim
+FROM debian:13-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
 # Loud failure if the base resolved to x86_64 (apple-container skill guard)
 RUN case "$(uname -m)" in aarch64) ;; *) \
@@ -15,18 +15,18 @@ ENV BOOTSTRAP_HASKELL_NONINTERACTIVE=1 \
     BOOTSTRAP_HASKELL_ADJUST_BASHRC=no \
     PATH=/root/.ghcup/bin:/root/.cabal/bin:/root/.cargo/bin:/usr/local/bin:$PATH
 
-# GHC floats to newest stable at build time via GHCup (house-ng pattern).
+# GHC pinned via GHCup (resolved 9.14.1).
 # Resolved version must be pinned into docs/TOOLCHAIN.md on every bump.
 RUN curl -sSf https://get-ghcup.haskell.org | sh \
-    && ghcup install ghc latest --set \
+    && ghcup install ghc 9.14.1 --set \
     && ghcup install cabal --set \
     && ghc --version \
     && cabal --version
 
-# Rust toolchain: nightly minimal + bare-metal target + Miri.
+# Rust toolchain: pinned nightly + bare-metal target + Miri.
 # Nightly is the default: Miri only ships for nightly.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly \
-    && /root/.cargo/bin/rustup default nightly \
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly-2026-09-05 \
+    && /root/.cargo/bin/rustup default nightly-2026-09-05 \
     && /root/.cargo/bin/rustup target add aarch64-unknown-none \
     && /root/.cargo/bin/rustup component add clippy rustfmt miri \
     && rustc --version \

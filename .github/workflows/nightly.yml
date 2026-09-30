@@ -1,0 +1,46 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+jobs:
+  slow-gates:
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU gaps
+        run: brew install qemu socat
+      - name: Install container CLI
+        run: brew install --cask apple/container
+      - name: Start container system
+        run: container system start
+      - name: Build toolchain image
+        run: make container-image
+      - name: Scaling gate
+        run: make smp-check-8
+      - name: Memory matrix
+        run: make vm-check
+      - name: Miri
+        run: make miri
+      - name: Slow SMP legs
+        run: |
+          make house-spin-hotplug-check
+          make house-preempt-check
+          make house-smp-fault-race-check
+
+  base-digest:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Install container CLI
+        run: brew install --cask apple/container
+      - name: Start container system
+        run: container system start
+      - name: Show current Debian digest
+        run: |
+          container image pull --platform linux/arm64 debian:13-slim
+          container image inspect debian:13-slim | jq -r '.[0].configuration.descriptor.digest'
+          echo "Compare with the FROM pin in Containerfile; bump by hand when it moves."

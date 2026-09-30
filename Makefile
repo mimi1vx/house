@@ -342,8 +342,10 @@ house-vm-check: vm-check
 
 # `make run` boots the whole system (shell + pid1 + initrd, hvf, 4G default).
 # `make check` reproduces the full verification from a clean checkout:
-# spike ticks, GIC dispatch + VM, house banner, interactive shell, and
-# rust (clippy + fmt), each under hvf and tcg where applicable. It is the
+# doctor, spike ticks, GIC dispatch + VM, house banner, interactive shell,
+# POSIX, initrd, pid1, dynamic userspace, mounted-root dynamic, rust
+# (clippy + fmt + deny + abi), haskell, el0tiny, dynamic ELF, each under
+# hvf and tcg where applicable. It is the
 # gate used by CI and by "from clean clone inside container" verification.
 # Scaling legs (vm-check 512M/2+4G/4+6G/4+8G/4+16G/4 single-build, smp-check-8) stay out of default `check`.
 run: house-run
