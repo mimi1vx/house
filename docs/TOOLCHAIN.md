@@ -16,15 +16,15 @@ macOS host, never inside (see `docs/HOST-QEMU.md`).
 
 ## Toolchains
 
-The table records the resolved image contents. GHC and Rust nightly float at
-image-build time, so refresh the table whenever the image resolves newer
-versions.
+The table records the resolved image contents. GHC is pinned in the
+Containerfile and Rust to nightly-2026-09-23; refresh the table whenever
+a pin moves.
 
 | Tool | Provisioned by | Resolved version |
 |------|---------------|------------------|
-| GHC | `ghcup install ghc latest --set` | 9.14.1 |
+| GHC | `ghcup install ghc 9.14.1 --set` | 9.14.1 |
 | Cabal | `ghcup install cabal --set` | 3.16.1.0 |
-| rustc/cargo | `rustup` default nightly, minimal profile | 1.100.0-nightly (f248f4038 2026-09-05) |
+| rustc/cargo | `rustup` default nightly-2026-09-23, minimal profile | 1.100.0-nightly (6bb1652a0 2026-09-22) |
 | clippy/rustfmt | `rustup component add` | 0.1.100 / 1.10.0-nightly (ships with the toolchain) |
 | miri | `rustup component add miri` (nightly-only) | 0.1.0 (same nightly); `make miri` green: buddy lifecycle + 15 mem tests |
 | fourmolu | `ghcup install fourmolu 0.20.1.0 --set` | 0.20.1.0 (matches host) |
@@ -34,8 +34,7 @@ versions.
 | ld.lld | `lld` apt set | Debian LLD 19.1.7 |
 
 Nightly is deliberate: Miri only ships for nightly. Build, Clippy, formatting,
-and Miri use the same nightly resolved into an image; rebuilding the image may
-resolve a newer nightly.
+and Miri use the same pinned nightly baked into the image.
 
 ## Gates
 

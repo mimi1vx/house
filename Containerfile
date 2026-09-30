@@ -25,8 +25,8 @@ RUN curl -sSf https://get-ghcup.haskell.org | sh \
 
 # Rust toolchain: pinned nightly + bare-metal target + Miri.
 # Nightly is the default: Miri only ships for nightly.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly-2026-09-05 \
-    && /root/.cargo/bin/rustup default nightly-2026-09-05 \
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly-2026-09-23 \
+    && /root/.cargo/bin/rustup default nightly-2026-09-23 \
     && /root/.cargo/bin/rustup target add aarch64-unknown-none \
     && /root/.cargo/bin/rustup component add clippy rustfmt miri \
     && rustc --version \
