@@ -621,8 +621,8 @@ grep -rn "pub unsafe extern \"C\" fn" rust/crates/house-hal-aarch64/src rust/cra
 grep -n "\.global" rust/crates/house-boot/src/entry.rs rust/crates/house-boot/src/exception.rs rust/crates/house-libc/src/threads/switch.rs
 # After link, no unexpected U should remain (RTS/glibc names excluded):
 # nm platform/aarch64/build/house.elf | grep " U " | grep -v "HsFFI\|libHS" || echo ok
-# Single-owner gates (rust-abi-check):
-grep -rn "panic_handler" rust/crates --include="*.rs"   # exactly 2: house-libc EL1 + house-el0-tiny EL0
+# Single-owner gates (rust-abi-check, attribute lines only so prose stays out):
+grep -rn "^[[:space:]]*#\[panic_handler" rust/crates --include="*.rs"   # exactly 2: house-libc EL1 + house-el0-tiny EL0
 ```
 
 `HsFFI.h` / `ghc --print-libdir` RTS archives are unchanged and linked via
