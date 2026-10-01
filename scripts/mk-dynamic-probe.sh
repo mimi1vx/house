@@ -15,9 +15,33 @@ case "$NAME" in
 esac
 
 OUT="build/dynamic-probe/$NAME"
-EXPECTED_RUSTC_COMMIT=6bb1652a020e80cef79332741d89e996d71933c9
+TOOLCHAIN_TOML="rust-toolchain.toml"
+TOOLCHAIN_LOCK="rust/toolchain.lock"
+CHANNEL=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$TOOLCHAIN_TOML")
+[ -n "$CHANNEL" ] || {
+	echo "mk-dynamic-probe: missing channel in $TOOLCHAIN_TOML" >&2
+	exit 1
+}
+LOCK_CHANNEL=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$TOOLCHAIN_LOCK")
+[ -n "$LOCK_CHANNEL" ] || {
+	echo "mk-dynamic-probe: missing channel in $TOOLCHAIN_LOCK" >&2
+	exit 1
+}
+[ "$CHANNEL" = "$LOCK_CHANNEL" ] || {
+	echo "mk-dynamic-probe: channel $CHANNEL != lock $LOCK_CHANNEL (update $TOOLCHAIN_LOCK with the bump)" >&2
+	exit 1
+}
+EXPECTED_RUSTC_COMMIT=$(sed -n 's/^rustc_commit *= *"\([^"]*\)".*/\1/p' "$TOOLCHAIN_LOCK")
+EXPECTED_CARGO=$(sed -n 's/^cargo_version *= *"\([^"]*\)".*/\1/p' "$TOOLCHAIN_LOCK")
+[ -n "$EXPECTED_RUSTC_COMMIT" ] || {
+	echo "mk-dynamic-probe: missing rustc_commit in $TOOLCHAIN_LOCK" >&2
+	exit 1
+}
+[ -n "$EXPECTED_CARGO" ] || {
+	echo "mk-dynamic-probe: missing cargo_version in $TOOLCHAIN_LOCK" >&2
+	exit 1
+}
 EXPECTED_LLD='Debian LLD 19.1.7 (compatible with GNU linkers)'
-EXPECTED_CARGO='cargo 1.100.0-nightly (495c385d0 2026-09-16)'
 EXPECTED_GCC='gcc (Debian 14.2.0-19) 14.2.0'
 EXPECTED_AR='GNU ar (GNU Binutils for Debian) 2.44'
 EXPECTED_NM='GNU nm (GNU Binutils for Debian) 2.44'

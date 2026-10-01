@@ -15,9 +15,12 @@ module Kernel.Userspace.Process (
   procBrkGrow,
   stackTop,
   breakCow,
+  CowBreak (..),
   cowLiveCount,
   libVersionPin,
   libVersionSkewLine,
+  grantEndpoint,
+  hasGrant,
   ParkRequest (..),
 )
 where
@@ -49,7 +52,7 @@ import H.VirtualMemory qualified as VM
 import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
-import Kernel.IPC.Types (IpcError (..), Message (..), mkMessage)
+import Kernel.IPC.Types (EndpointId (..), IpcError (..), Message (..), mkMessage)
 import Kernel.Userspace.Fd qualified as Fd
 import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateStaticRunElf)
@@ -108,6 +111,10 @@ foreign import ccall unsafe "house_user_strlen" c_user_strlen :: Ptr Word64 -> W
 
 foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -> IO ()
 
+foreign import ccall unsafe "house_page_budget_reset" c_budget_reset :: Ptr Word64 -> IO ()
+
+foreign import ccall unsafe "house_page_budget_try_acquire" c_budget_acquire :: Ptr Word64 -> Word32 -> IO CInt
+
 stackTop :: Word64
 stackTop = stackPageStart + 4096
 
@@ -141,6 +148,8 @@ x0..x2 (see 'classify' below); WAIT carries the child pid in x0, EXEC the
 path VA in x0, FORK takes no args; MKDIR/UNLINK carry the path VA in x0,
 STAT/GETDENTS carry (path VA, buf VA, len). ReqFault carries the trapped x0 plus the
 fault VA (an RO write to a COW page parks 0x1F via the RO perm guard).
+ReqFaultKill carries the trapped x0 plus the fault VA (any other EL0 abort
+parks 0x1D so the process is reaped instead of halting the core).
 ReqPreempt carries the trapped x0 (an over-quantum EL0 frame parks 0x1E via
 the timer IRQ; resume retries the interrupted insn).
 -}
@@ -164,6 +173,7 @@ data ParkRequest
   | ReqIpcCall Word64 Word64 Word64 Word64
   | ReqIpcReply Word64 Word64 Word64 Word64
   | ReqFault Word64 Word64
+  | ReqFaultKill Word64 Word64
   | ReqPreempt Word64
   | ReqUnknown Word32
   deriving (Eq, Show)
@@ -175,6 +185,33 @@ NoSuchEndpoint when the pid dies underneath (unblocks a wedged sender).
 {-# NOINLINE pendingReply #-}
 pendingReply :: Ref (Map.Map Pid (MVar (Either IpcError Message)))
 pendingReply = unsafePerformH (newRef Map.empty)
+
+{- | Per-process endpoint grants: which global endpoint ids an EL0 pid may
+use. Populated explicitly at spawn (the shell grants the server/client pids
+it just launched); any SEND/CALL/RECV on an id outside the pid's list is
+EPERM without touching the rendezvous, so a guess cannot disturb the owner.
+Fork inherits a copy; exec retains; reap deletes.
+-}
+{-# NOINLINE procGrants #-}
+procGrants :: Ref (Map.Map Pid [EndpointId])
+procGrants = unsafePerformH (newRef Map.empty)
+
+-- | Grant one endpoint id to a pid (idempotent, assumes no lock).
+grantLocked :: Pid -> EndpointId -> H ()
+grantLocked pid eid = do
+  m <- readRef procGrants
+  let cur = Map.findWithDefault [] pid m
+  writeRef procGrants (Map.insert pid (eid : filter (/= eid) cur) m)
+
+-- | Grant one endpoint id to a pid.
+grantEndpoint :: Pid -> EndpointId -> H ()
+grantEndpoint pid eid = withQSem userSem (grantLocked pid eid)
+
+-- | Test whether a pid holds a grant (acquires the supervisor lock).
+hasGrant :: Pid -> EndpointId -> H Bool
+hasGrant pid eid = withQSem userSem $ do
+  m <- readRef procGrants
+  return (eid `elem` Map.findWithDefault [] pid m)
 
 {- | COW sharer counts keyed by host phys address ('ptrToWord64' of the
 backing page). A page is listed while two or more pdirs map it, or while a
@@ -603,6 +640,7 @@ runPreparedBound pidInt image argv envp = do
                           freePDir pdir
                           abort NoSpace
                         else do
+                          liftIO (c_budget_reset pdirPtr)
                           -- The constructor phase is prepared before the process
                           -- is published: a refusal here is a failed load, and
                           -- the caller sees the reason instead of a live
@@ -624,6 +662,7 @@ runPreparedBound pidInt image argv envp = do
                               modifyRef procExitMap (Map.insert pid exitVar)
                               modifyRef procStopMap (Map.insert pid stopVar)
                               modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage)))
+                              modifyRef procGrants (Map.insert pid [])
                               Sched.schedRegister pid
                               let finiSteps = mappedFiniSteps mappedImage
                               _ <- forkH $ do
@@ -663,6 +702,8 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
               writeRef pidNext (pidInt + 1)
               let child = Pid pidInt
               modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
+              grants <- readRef procGrants
+              writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants) grants)
               Vfs.vfsForkPid parentInt pidInt
               Fd.fdFork parentPid child
               return (Right child)
@@ -733,24 +774,27 @@ shareAddrSpace src dst hi = do
 
 {- | Break a COW page for a live pid (the FAULT-park handler and forktest
 share this): a sole-mapped page remaps RW in place, a shared page copies
-to a fresh host page (other sharers keep the RO+cow mapping). True when
-the page is writable afterwards (resume retries the faulting store).
-Runs under 'userSem' as one region so a reaper's map delete cannot slip
-between the lookup and the remap.
+to a fresh host page (other sharers keep the RO+cow mapping). Distinguishes
+"not a COW page" (guest bug) from "no page to give" (memory pressure) so the
+caller can reap with a distinct errno. Runs under 'userSem' as one region
+so a reaper's map delete cannot slip between the lookup and the remap.
 -}
-breakCow :: Pid -> Word64 -> H Bool
+data CowBreak = CowOk | CowNotCow | CowNoMem
+  deriving (Eq, Show)
+
+breakCow :: Pid -> Word64 -> H CowBreak
 breakCow pid pdirVa = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup pid mp of
-    Nothing -> return False
+    Nothing -> return CowNotCow
     Just pr -> do
       let pdir = procPdir pr
           va = pdirVa .&. complement 4095
       mInfo <- VM.getPage pdir va
       case mInfo of
-        Nothing -> return False
+        Nothing -> return CowNotCow
         Just info
-          | not (VM.cow info) -> return False
+          | not (VM.cow info) -> return CowNotCow
           | otherwise -> do
               let key = ptrToWord64 (fromPhysPage (VM.physPage info))
               n <- Map.findWithDefault 0 key <$> readRef cowRefs
@@ -758,20 +802,24 @@ breakCow pid pdirVa = withQSem userSem $ do
                 then do
                   ok <- VM.setPage pdir va (Just (info {VM.writable = True, VM.cow = False}))
                   when ok (liftIO (atomicModifyIORef' cowRefs (\m -> (Map.delete key m, ()))))
-                  return ok
+                  return (if ok then CowOk else CowNoMem)
                 else do
-                  mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
-                  case mp2 of
-                    Nothing -> return False
-                    Just raw -> do
-                      copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
-                      let mine = info {VM.physPage = toPhysPage (castPtr raw), VM.writable = True, VM.cow = False}
-                      ok <- VM.setPage pdir va (Just mine)
-                      if not ok
-                        then do HPages.freePage raw; return False
-                        else do
-                          liftIO (atomicModifyIORef' cowRefs (\m -> (Map.insert key (n - 1) m, ())))
-                          return True
+                  allowed <- liftIO (c_budget_acquire (VM.fromPageMap pdir) 1)
+                  if allowed /= 1
+                    then return CowNoMem
+                    else do
+                      mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                      case mp2 of
+                        Nothing -> return CowNoMem
+                        Just raw -> do
+                          copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
+                          let mine = info {VM.physPage = toPhysPage (castPtr raw), VM.writable = True, VM.cow = False}
+                          ok <- VM.setPage pdir va (Just mine)
+                          if not ok
+                            then do HPages.freePage raw; return CowNoMem
+                            else do
+                              liftIO (atomicModifyIORef' cowRefs (\m -> (Map.insert key (n - 1) m, ())))
+                              return CowOk
 
 copyPageBytes :: Ptr Word8 -> Ptr Word8 -> H ()
 copyPageBytes src dst = liftIO (IO.moveBytes dst src 4096)
@@ -808,11 +856,14 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
               if reg /= 0
                 then do freePDir childPdir; return (Left NoSpace)
                 else do
+                  liftIO (c_budget_reset childPtr)
                   exitVar <- newEmptyMVar
                   stopVar <- newEmptyMVar
                   modifyRef procExitMap (Map.insert child exitVar)
                   modifyRef procStopMap (Map.insert child stopVar)
                   modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
+                  grants0 <- readRef procGrants
+                  writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants0) grants0)
                   Sched.schedRegister child
                   Vfs.vfsForkPid parentInt pidInt
                   Fd.fdFork parentPid child
@@ -823,6 +874,8 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                       modifyRef procMap (Map.delete child)
                       modifyRef procExitMap (Map.delete child)
                       modifyRef procStopMap (Map.delete child)
+                      grants1 <- readRef procGrants
+                      writeRef procGrants (Map.delete child grants1)
                       Vfs.vfsReleasePid pidInt
                       Fd.fdRelease child
                       liftIO (c_el0_unregister childPtr)
@@ -910,6 +963,7 @@ execReplaceValidated pid pdir path image = withQSem userSem $ do
     Just pr -> do
       let oldHi = max (procBrk pr) stackTop
       freeUserPages (procPdir pr) oldHi
+      liftIO (c_budget_reset (VM.fromPageMap (procPdir pr)))
       mapped <- mapPreparedImage (procPdir pr) image
       case mapped of
         Left err -> return (Left err)
@@ -1033,6 +1087,8 @@ waitPid pid@(Pid pidInt) = do
         modifyRef procStopMap (Map.delete pid)
         m <- readRef pendingReply
         writeRef pendingReply (Map.delete pid m)
+        g <- readRef procGrants
+        writeRef procGrants (Map.delete pid g)
         return (Just pr, Map.lookup pid m)
   case mStash of
     Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
@@ -1080,6 +1136,8 @@ killPid pid@(Pid pidInt) = do
         modifyRef procExitMap (Map.delete pid)
         m <- readRef pendingReply
         writeRef pendingReply (Map.delete pid m)
+        g <- readRef procGrants
+        writeRef procGrants (Map.delete pid g)
         a <- readRef procStopMap
         writeRef procStopMap (Map.delete pid a)
         return (Just (pr, Map.lookup pid m, Map.lookup pid a))
@@ -1123,6 +1181,8 @@ baton passes to the next runnable pid ('Sched.schedElectNext', resume x0);
 IPC 0x10..0x13
 pair through the EL1 Endpoint rendezvous (same blocking semantics as the
 shell path, bounded by a 5s timeout so a reaped pid never wedges a peer);
+SEND/CALL/RECV first require a per-pid grant for the endpoint id, otherwise
+EPERM without touching the queue, so a guess cannot disturb the owner;
 unknown requests resume with ENOSYS so a hostile guest can never wedge the
 loop. Exits silently when the pid is reaped underneath (killPid) without
 touching freed tables: user copies run under 'userSem' (which 'freePDir'
@@ -1134,7 +1194,7 @@ number; READ/WRITE resume the byte count; CLOSE resumes 0; SEEK resumes
 the new offset; FORK resumes the child pid (0 in the child); WAIT resumes
 the reaped exit code; EXEC resumes 0; MKDIR/UNLINK resume 0; STAT/GETDENTS
 resume the rendered byte count. Errors resume negative errnos:
--2 ENOENT, -9 EBADF, -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
+-1 EPERM (ungranted endpoint), -2 ENOENT, -9 EBADF, -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
 -14 EFAULT, -17 EEXIST, -20 ENOTDIR, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
 -}
 parkLoop :: VM.PageMap -> LoadBounds -> Pid -> Ptr Word64 -> Word64 -> MVar Int -> StopAck -> Word64 -> [Linker.LinkStep] -> H ()
@@ -1175,7 +1235,8 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                 Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
                 Just (ReqIpcReply ep va nw tag) -> do handleReply ep va nw tag; loop
-                Just (ReqFault x0 va) -> do handleCowFault x0 va; loop
+                Just (ReqFault x0 va) -> do cont <- handleCowFault x0 va; when cont loop
+                Just (ReqFaultKill _x0 va) -> do handleFaultKill va
                 Just (ReqPreempt x0) -> do handlePreempt x0; loop
                 Just (ReqUnknown _) -> do resumeWith negENOSYS; loop
     -- Constructors run before the process is reaped, while its pages and its
@@ -1193,9 +1254,11 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
     negAGAIN = fromIntegral (-11 :: Int) :: Word64
     negINVAL = fromIntegral (-22 :: Int) :: Word64
     negNOMEM = fromIntegral (-12 :: Int) :: Word64
+    negEPERM = fromIntegral (-1 :: Int) :: Word64
     sendErrno QueueFull = negAGAIN
     sendErrno WouldBlock = negAGAIN
     sendErrno NoSuchEndpoint = negENOENT
+    sendErrno NotOwner = negEPERM
     sendErrno _ = negINVAL
     brkErrno NoSpace = negNOMEM
     brkErrno _ = negINVAL
@@ -1362,9 +1425,45 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                     Just rc -> resumeWith (fromIntegral rc)
     handleCowFault x0 va = do
       alive <- withQSem userSem (Map.member pid <$> readRef procMap)
+      if not alive
+        then return True
+        else do
+          r <- breakCow pid va
+          alive2 <- withQSem userSem (Map.member pid <$> readRef procMap)
+          if not alive2
+            then return True
+            else case r of
+              CowOk -> do resumeWith x0; return True
+              CowNotCow -> do
+                mWritable <- withQSem userSem $ do
+                  mp <- readRef procMap
+                  case Map.lookup pid mp of
+                    Nothing -> return Nothing
+                    Just pr -> do
+                      mi <- VM.getPage (procPdir pr) (va .&. complement 4095)
+                      return (Just (maybe False VM.writable mi))
+                case mWritable of
+                  Just True -> do resumeWith x0; return True
+                  _ -> do
+                    Dmesg.dmesgLog ("cow reap pid=" ++ show pid ++ " va=0x" ++ showHex va "" ++ " not-cow")
+                    Sched.schedUnregister pid
+                    Sched.schedWakeAll
+                    void (liftIO (tryPutMVar exitVar 1))
+                    return False
+              CowNoMem -> do
+                Dmesg.dmesgLog ("cow reap pid=" ++ show pid ++ " va=0x" ++ showHex va "" ++ " nomem")
+                Sched.schedUnregister pid
+                Sched.schedWakeAll
+                void (liftIO (tryPutMVar exitVar 1))
+                return False
+    handleFaultKill va = do
+      alive <- withQSem userSem (Map.member pid <$> readRef procMap)
       when alive $ do
-        _ <- breakCow pid va
-        resumeWith x0
+        Dmesg.dmesgLog ("fault kill pid=" ++ show pid ++ " va=0x" ++ showHex va "")
+        Sched.schedUnregister pid
+        Sched.schedWakeAll
+        void (liftIO (tryPutMVar exitVar 1))
+      return ()
     handlePreempt x0 = do
       qs <- Sched.schedRunQueue
       let (pre, post) = break (== pid) qs
@@ -1384,56 +1483,68 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
               when alive (resumeWith x0)
             else tryNext rest
     handleSend ep va nw tag = do
-      mIn <- readUser pid pdir va nw
-      case mIn of
-        Nothing -> return ()
-        Just (Left rc) -> resumeWith (fromIntegral rc)
-        Just (Right ws) -> do
+      allowed <- hasGrant pid (EndpointId ep)
+      if not allowed
+        then do
+          Dmesg.dmesgLog ("ipc deny pid=" ++ show pid ++ " ep=" ++ show ep)
+          resumeWith negEPERM
+        else do
+          mIn <- readUser pid pdir va nw
+          case mIn of
+            Nothing -> return ()
+            Just (Left rc) -> resumeWith (fromIntegral rc)
+            Just (Right ws) -> do
+              mep <- IPC.lookupEndpoint ep
+              case mep of
+                Nothing -> resumeWith negENOENT
+                Just h -> case mkMessage tag ws Nothing of
+                  Left _ -> resumeWith negINVAL
+                  Right msg -> do
+                    res <- IPC.callTimeout 5000000 h msg
+                    case res of
+                      Left e -> resumeWith (sendErrno e)
+                      Right reply -> do
+                        mRc <- writeUser pid pdir va (take (fromIntegral nw) (msgWords reply))
+                        case mRc of
+                          Just 0 -> resumeWith 0
+                          Just rc -> resumeWith (fromIntegral rc)
+                          Nothing -> return ()
+    handleRecv ep va nw = do
+      allowed <- hasGrant pid (EndpointId ep)
+      if not allowed
+        then do
+          Dmesg.dmesgLog ("ipc deny pid=" ++ show pid ++ " ep=" ++ show ep)
+          resumeWith negEPERM
+        else do
           mep <- IPC.lookupEndpoint ep
           case mep of
             Nothing -> resumeWith negENOENT
-            Just h -> case mkMessage tag ws Nothing of
-              Left _ -> resumeWith negINVAL
-              Right msg -> do
-                res <- IPC.callTimeout 5000000 h msg
-                case res of
-                  Left e -> resumeWith (sendErrno e)
-                  Right reply -> do
-                    mRc <- writeUser pid pdir va (take (fromIntegral nw) (msgWords reply))
-                    case mRc of
-                      Just 0 -> resumeWith 0
-                      Just rc -> resumeWith (fromIntegral rc)
-                      Nothing -> return ()
-    handleRecv ep va nw = do
-      mep <- IPC.lookupEndpoint ep
-      case mep of
-        Nothing -> resumeWith negENOENT
-        Just h -> do
-          mRv <- liftIO (T.timeout 5000000 (runH (IPC.recv h)))
-          case mRv of
-            Nothing -> resumeWith negAGAIN
-            Just (msg, hReply) -> do
-              mRc <- withQSem userSem $ do
-                mp <- readRef procMap
-                case Map.lookup pid mp of
-                  Nothing -> return Nothing
-                  Just _ -> do
-                    modifyRef pendingReply (Map.insert pid hReply)
-                    let ws = take (min 8 (fromIntegral nw)) (msgWords msg)
-                    if null ws
-                      then return (Just 0)
-                      else allocaArray 8 $ \buf -> do
-                        mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
-                        rc <- liftIO (c_user_write pdir va buf (fromIntegral (length ws)))
-                        if rc /= 0
-                          then do modifyRef pendingReply (Map.delete pid); return (Just rc)
-                          else return (Just 0)
-              case mRc of
-                Nothing -> do
-                  _ <- liftIO (tryPutMVar hReply (Left NoSuchEndpoint))
-                  return ()
-                Just 0 -> resumeWith (msgTag msg)
-                Just rc -> resumeWith (fromIntegral rc)
+            Just h -> do
+              mRv <- liftIO (T.timeout 5000000 (runH (IPC.recv h)))
+              case mRv of
+                Nothing -> resumeWith negAGAIN
+                Just (msg, hReply) -> do
+                  mRc <- withQSem userSem $ do
+                    mp <- readRef procMap
+                    case Map.lookup pid mp of
+                      Nothing -> return Nothing
+                      Just _ -> do
+                        modifyRef pendingReply (Map.insert pid hReply)
+                        let ws = take (min 8 (fromIntegral nw)) (msgWords msg)
+                        if null ws
+                          then return (Just 0)
+                          else allocaArray 8 $ \buf -> do
+                            mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
+                            rc <- liftIO (c_user_write pdir va buf (fromIntegral (length ws)))
+                            if rc /= 0
+                              then do modifyRef pendingReply (Map.delete pid); return (Just rc)
+                              else return (Just 0)
+                  case mRc of
+                    Nothing -> do
+                      _ <- liftIO (tryPutMVar hReply (Left NoSuchEndpoint))
+                      return ()
+                    Just 0 -> resumeWith (msgTag msg)
+                    Just rc -> resumeWith (fromIntegral rc)
     handleReply _ep va nw tag = do
       mIn <- readUser pid pdir va nw
       case mIn of
@@ -1577,7 +1688,8 @@ CLOSE fd, SEEK fd/off/whence), 0x08 to fork (no args), 0x09 to wait
 VA), 0x0D to unlink (x0 = path VA), 0x0E to stat / 0x0F to getdents
 (x0 = path VA, x1 = buf, x2 = len), 0x10..0x13 to IPC (with the
 trapped x0..x3 as ep/va/nwords/tag), 0x1F to a COW fault (trapped x0 plus
-the fault VA from the slot), 0x1E to a timer preemption (trapped x0),
+the fault VA from the slot), 0x1D to an unhandled EL0 fault kill (trapped
+x0 plus the fault VA), 0x1E to a timer preemption (trapped x0),
 anything else is unknown (resumed with
 ENOSYS by the park loop, never trusted).
 -}
@@ -1600,7 +1712,12 @@ tryTakeParkedOnce pdir = do
             then do
               va <- liftIO (c_el0_fault_addr pdir)
               return (Just (ReqFault a0 va))
-            else return (Just (classify w a0 a1 a2 a3))
+            else
+              if w == 0x1D
+                then do
+                  va <- liftIO (c_el0_fault_addr pdir)
+                  return (Just (ReqFaultKill a0 va))
+                else return (Just (classify w a0 a1 a2 a3))
   where
     classify 0 _ _ _ _ = ReqYield
     classify 0x03 nb _ _ _ = ReqBrk nb
@@ -1673,15 +1790,19 @@ procBrkGrow pid newBrk = withQSem userSem $ do
           if isJust occupied
             then return (Left (BadSegment "occupied brk page"))
             else do
-              mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
-              case mp of
-                Nothing -> return (Left NoSpace)
-                Just pg -> do
-                  HPages.zeroPage pg
-                  ok <- VM.setPage pdir lo (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
-                  if not ok
-                    then do HPages.freePage pg; return (Left NoSpace)
-                    else growPages pdir (lo + 4096) hi
+              allowed <- liftIO (c_budget_acquire (VM.fromPageMap pdir) 1)
+              if allowed /= 1
+                then return (Left NoSpace)
+                else do
+                  mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                  case mp of
+                    Nothing -> return (Left NoSpace)
+                    Just pg -> do
+                      HPages.zeroPage pg
+                      ok <- VM.setPage pdir lo (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr pg), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
+                      if not ok
+                        then do HPages.freePage pg; return (Left NoSpace)
+                        else growPages pdir (lo + 4096) hi
 
 mapPreparedImage :: VM.PageMap -> PreparedImage -> H (Either LoadError MappedImage)
 mapPreparedImage pdir image = case image of

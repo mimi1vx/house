@@ -9,8 +9,8 @@
 //!
 //! Errno mapping once the ring lands (mirrors `Kernel.Userspace.Syscall` and
 //! `Kernel.IPC.Types`): unknown/freed endpoint id → `NoSuchEndpoint` (-2,
-//! `ENOENT`; the `nsLookupChecked` miss path, dmesg-logged); capability
-//! mismatch → `NotOwner` (-1, `EPERM`; log-only in this slice via `checkCap`);
+//! `ENOENT`; the `nsLookupChecked` miss path, dmesg-logged); ungranted
+//! endpoint id → `NotOwner` (-1, `EPERM`; denied without touching the queue);
 //! full queue → `QueueFull` (`EAGAIN`); `callTimeout` expiry → `WouldBlock`.
 //! Capability tokens are minted in `newEndpoint`; the trap boundary keeps
 //! non-blocking try semantics so a hostile EL0 caller cannot wedge the queue.

@@ -18,7 +18,7 @@ module H.Interrupts (
 )
 where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, catch)
 import Control.Monad (when)
 import Data.Array.IO (IOArray, newArray, readArray, writeArray)
@@ -26,6 +26,7 @@ import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Ix (Ix)
 import Data.Word (Word32)
 import Foreign.StablePtr (StablePtr, deRefStablePtr, newStablePtr)
+import H.Concurrency (forkSupervisedIO)
 import H.Monad (H, liftIO, runH)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -52,6 +53,10 @@ foreign import ccall unsafe "house_irq_disable" c_irqDisable :: IO ()
 foreign import ccall unsafe "house_irq_pop" c_irqPop :: IO Int
 
 foreign import ccall unsafe "house_irq_pipe_drain" c_irqPipeDrain :: IO ()
+
+foreign import ccall unsafe "house_irq_pipe_fd" c_irqPipeFd :: IO Int
+
+foreign import ccall unsafe "house_irq_pipe_readable" c_irqPipeReadable :: Int -> IO Int
 
 enableInt :: IntId -> H ()
 enableInt (IntId n) = liftIO $ c_enableInt n
@@ -83,8 +88,9 @@ dispatcherStarted :: IORef Bool
 dispatcherStarted = unsafePerformIO $ newIORef False
 
 {- | Install a handler for an INTID. Idempotently starts the dispatcher thread
-on first call. The dispatcher blocks in threadWaitRead on the IRQ pipe fd
-(poll shim proven by phase-2 timerfd) and drains the SPSC ring.
+on first call. The dispatcher waits on the IRQ pipe readable predicate
+(`house_irq_pipe_readable`) and drains the SPSC ring; a bounded fallback
+delay keeps progress on a lost pipe byte.
 -}
 installHandler :: IntId -> H () -> H ()
 installHandler (IntId n) handler = liftIO $ do
@@ -98,23 +104,33 @@ installHandler (IntId n) handler = liftIO $ do
     then return ()
     else do
       writeIORef dispatcherStarted True
-      -- fork dispatcher; exceptions inside handler are caught so one bad handler
-      -- cannot kill the dispatcher
-      _ <- forkIO dispatcherLoop
+      -- Supervised dispatcher; a dead dispatcher is logged, not silent.
+      -- Handler exceptions are caught and logged so one bad handler cannot
+      -- kill the dispatcher or leave the machine in an undefined state.
+      _ <- forkSupervisedIO dispatcherLoop
       return ()
   return ()
 
 -- Dispatcher: drains the SPSC ring the ISR fills and runs the matching handler.
--- Sleeps with threadDelay (not a busy spin) so threads sharing the
--- cooperative scheduler still run; the old busyDelay spin starved them.
+-- Waits on the pipe readable predicate so bursts wake immediately; a bounded
+-- fallback delay keeps progress if a pipe byte is ever missed. Drains to the
+-- ring depth (256) so a burst larger than 64 is not split across windows.
 dispatcherLoop :: IO ()
 dispatcherLoop = loop
   where
     loop = do
-      threadDelay 20000
-      c_irqPipeDrain
-      drainBounded (64 :: Int)
-      loop
+      fd <- c_irqPipeFd
+      readable <- if fd < 0 then return 0 else c_irqPipeReadable fd
+      if readable /= 0
+        then do
+          c_irqPipeDrain
+          drainBounded (256 :: Int)
+          loop
+        else do
+          threadDelay 5000
+          c_irqPipeDrain
+          drainBounded (256 :: Int)
+          loop
 
     -- Drain at most n entries per wakeup so the dispatcher always yields back
     -- to the scheduler; the ring refills at the timer rate and the next poll
@@ -134,5 +150,5 @@ dispatcherLoop = loop
             Nothing -> drainBounded (n - 1)
             Just sptr -> do
               h <- deRefStablePtr sptr
-              runH h `catch` \(_ :: SomeException) -> return ()
+              runH h `catch` \(e :: SomeException) -> putStrLn ("irq handler died: " ++ show e)
               drainBounded (n - 1)

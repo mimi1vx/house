@@ -57,7 +57,9 @@ pub unsafe extern "C" fn buddy_init(start: u64, end: u64) {
 pub unsafe extern "C" fn buddy_alloc_page() -> *mut u8 {
     let mut p: *mut u8 = core::ptr::null_mut();
     LOCK.lock();
-    // SAFETY: FREE_HEAD/CUR protected by LOCK.
+    // SAFETY: FREE_HEAD/CUR protected by LOCK. Zero inside the critical
+    // section before publishing: unlocking first would hand a half-zeroed
+    // page to a concurrent free+realloc.
     unsafe {
         if !FREE_HEAD.is_null() {
             let hb = FREE_HEAD;
@@ -73,18 +75,16 @@ pub unsafe extern "C" fn buddy_alloc_page() -> *mut u8 {
                 FREE_PAGES -= 1;
             }
         }
-    }
-    LOCK.unlock();
-    if !p.is_null() {
-        // SAFETY: p is 4K page from buddy region, valid for writes, 8-byte aligned.
-        // Manual zero-fill to avoid `write_bytes` precondition panic (core checks).
-        unsafe {
+        if !p.is_null() {
+            // SAFETY: p is 4K page from buddy region, valid for writes, 8-byte aligned.
+            // Manual zero-fill to avoid `write_bytes` precondition panic (core checks).
             let p64 = p as *mut u64;
             for off in 0..(PAGE_SIZE / 8) {
                 *p64.wrapping_add(off) = 0;
             }
         }
     }
+    LOCK.unlock();
     p
 }
 
@@ -218,6 +218,23 @@ mod tests {
             assert_eq!(p2, p0);
             assert_eq!(buddy_free_count(), pages - 2);
 
+            // Reuse is zeroed: dirty, free, realloc observes a fully-zeroed
+            // page, so a concurrent free+realloc cannot hand out half-zeroed
+            // bytes (publish-then-mutate is closed by zeroing under the lock).
+            for i in 0..4096 {
+                *p2.add(i) = 0xA5;
+            }
+            buddy_free_page(p2);
+            let p3 = buddy_alloc_page();
+            assert_eq!(p3, p2);
+            for i in 0..4096 {
+                assert_eq!(*p3.add(i), 0);
+            }
+            buddy_free_page(p3);
+            let p4 = buddy_alloc_page();
+            assert_eq!(p4, p3);
+            assert_eq!(buddy_free_count(), pages - 2);
+
             // Out-of-range, misaligned, and null frees are ignored.
             buddy_free_page(core::ptr::null_mut());
             buddy_free_page(0x1000 as *mut u8);
@@ -247,7 +264,7 @@ mod tests {
 
             // Return the two held pages; free-list head count recovers.
             buddy_free_page(p1);
-            buddy_free_page(p2);
+            buddy_free_page(p4);
             assert_eq!(buddy_free_count(), 2);
         }
     }

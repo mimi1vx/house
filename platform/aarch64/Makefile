@@ -134,7 +134,10 @@ build/Spike.o: Spike.hs | build
 build/H/Monad.o: ../../kernel/H/Monad.hs | build
 	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
 
-build/H/Interrupts.o: ../../kernel/H/Interrupts.hs build/H/Monad.o | build
+build/H/Concurrency.o: ../../kernel/H/Concurrency.hs build/H/Monad.o | build
+	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
+
+build/H/Interrupts.o: ../../kernel/H/Interrupts.hs build/H/Monad.o build/H/Concurrency.o | build
 	ghc -O1 $(HS_GHCFLAGS) -c $< -o $@
 
 # Generic pattern for VM and other Haskell modules

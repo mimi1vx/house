@@ -24,7 +24,7 @@ import Data.Word (Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
-import H.Concurrency (QSem, newQSem, withQSem)
+import H.Concurrency (QSem, newQSem, threadDelay, withQSem)
 import H.Interrupts (spi)
 import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
@@ -58,8 +58,6 @@ foreign import ccall unsafe "virtio_transport_dc_flush" c_dc_flush :: Word64 -> 
 
 foreign import ccall unsafe "virtio_page_pa" c_pagePa :: Ptr Word8 -> Word64
 
-foreign import ccall unsafe "house_uptime_ns" c_uptime_ns :: IO Word64
-
 data ConServer = ConServer ConDevice
   deriving (Eq, Show)
 
@@ -74,15 +72,6 @@ conSem = unsafePerformH $ newQSem 1
 {-# NOINLINE conRxGrants #-}
 conRxGrants :: Ref (Map Int (Map Word32 Grant))
 conRxGrants = unsafePerformH $ newRef Map.empty
-
-busyDelayUs :: Int -> H ()
-busyDelayUs us = liftIO $ do
-  t0 <- c_uptime_ns
-  let target = t0 + fromIntegral us * 1000
-  let loop = do
-        t <- c_uptime_ns
-        when (t < target) loop
-  loop
 
 wantedMask :: Word64
 wantedMask = (1 `shiftL` 32) + (1 `shiftL` 29)
@@ -282,7 +271,7 @@ pollTx :: Int -> Int -> Word32 -> Int -> H Bool
 pollTx slot qidx reqId tries
   | tries <= 0 = return False
   | otherwise = do
-      busyDelayUs 2000
+      threadDelay 2000
       r <- conPollUsed slot qidx
       case r of
         Right (Just (cid, _)) -> if cid == reqId then return True else pollTx slot qidx reqId (tries - 1)
@@ -367,7 +356,7 @@ waitCtrlEvent :: Int -> Word32 -> Ptr Word8 -> Int -> H (Maybe (Int, Int))
 waitCtrlEvent slot rid ptr tries
   | tries <= 0 = return Nothing
   | otherwise = do
-      busyDelayUs 2000
+      threadDelay 2000
       r <- conPollUsed slot 2
       case r of
         Right (Just (cid, ulen)) ->

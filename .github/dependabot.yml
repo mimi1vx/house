@@ -13,6 +13,10 @@ updates:
       - "rust"
 
   # Pinned nightly in rust-toolchain.toml (Miri needs nightly).
+  # Single source is rust/toolchain.lock (channel + resolved rustc commit);
+  # mk-dynamic-probe.sh derives its pins from there, so a bump must update
+  # rust-toolchain.toml, rust/toolchain.lock, Containerfile, and
+  # docs/TOOLCHAIN.md together. Dependabot stays off this ecosystem.
   - package-ecosystem: "rust-toolchain"
     directory: "/"
     schedule:
@@ -20,6 +24,8 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
     labels:
       - "deps"
       - "rust"

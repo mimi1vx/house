@@ -17,14 +17,14 @@ macOS host, never inside (see `docs/HOST-QEMU.md`).
 ## Toolchains
 
 The table records the resolved image contents. GHC is pinned in the
-Containerfile and Rust to nightly-2026-09-23; refresh the table whenever
+Containerfile and Rust to nightly-2026-09-30; refresh the table whenever
 a pin moves.
 
 | Tool | Provisioned by | Resolved version |
 |------|---------------|------------------|
 | GHC | `ghcup install ghc 9.14.1 --set` | 9.14.1 |
 | Cabal | `ghcup install cabal --set` | 3.16.1.0 |
-| rustc/cargo | `rustup` default nightly-2026-09-23, minimal profile | 1.100.0-nightly (6bb1652a0 2026-09-22) |
+| rustc/cargo | `rustup` default nightly-2026-09-30, minimal profile | 1.101.0-nightly (5c543b0b8 2026-09-29) |
 | clippy/rustfmt | `rustup component add` | 0.1.100 / 1.10.0-nightly (ships with the toolchain) |
 | miri | `rustup component add miri` (nightly-only) | 0.1.0 (same nightly); `make miri` green: buddy lifecycle + 15 mem tests |
 | fourmolu | `ghcup install fourmolu 0.20.1.0 --set` | 0.20.1.0 (matches host) |

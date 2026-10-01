@@ -1,7 +1,7 @@
 {- | L4 sync rendezvous Endpoint — bounded queue 32, QSem+MVar.
 Send blocks until paired recv/reply; trySend is non-blocking fire-and-forget.
 'newEndpoint' mints an owner 'CapToken' distinct from the public id;
-'checkCap' denies mismatches. The EL0 trap path still resolves by numeric id
+'checkCap' denies mismatches and anonymous callers. The EL0 trap path still resolves by numeric id
 (token-checked lookup rides a later slice).
 -}
 module Kernel.IPC.Endpoint (
@@ -167,12 +167,12 @@ endpointToken (Endpoint eid) = withQSem endpointSem $ do
   m <- readRef endpointOwner
   return (Map.lookup eid m)
 
-{- | Capability check: anonymous (Nothing) stays silent for compat; a wrong
+{- | Capability check: anonymous (Nothing) denies. A wrong
 token or freed id logs and denies.
 -}
 checkCap :: Endpoint -> Maybe CapToken -> H Bool
 checkCap ep@(Endpoint eid) mtok = case mtok of
-  Nothing -> return True
+  Nothing -> do logCap ("anonymous ep=" ++ show eid); return False
   Just t -> do
     owned <- endpointToken ep
     case owned of
@@ -287,8 +287,8 @@ endpointId :: Endpoint -> EndpointId
 endpointId = epId
 
 {- | Lookup by numeric id for the EL0 trap path (guest passes the raw id).
-EL0 carries no capability token in this slice (same log-only trust as the
-EL1 path); token-checked lookup rides a later slice.
+The per-pid grant check lives in 'Kernel.Userspace.Process' ahead of this
+lookup, so an ungranted id never reaches the queue.
 -}
 lookupEndpoint :: Word64 -> H (Maybe Endpoint)
 lookupEndpoint w = withQSem endpointSem $ do

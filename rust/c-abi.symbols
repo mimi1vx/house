@@ -139,6 +139,7 @@ house_el0_exit_status
 house_el0_fault_addr
 house_el0_park
 house_el0_park_fault
+house_el0_park_kill
 house_el0_parked
 house_el0_register
 house_el0_set_entry
@@ -188,6 +189,8 @@ house_mmu_enable_secondary
 house_mmu_map_kernel
 house_mmu_set_ttbr0
 house_mmu_update_alias
+house_page_budget_reset
+house_page_budget_try_acquire
 house_probe_addr
 house_probe_core
 house_probe_faulted

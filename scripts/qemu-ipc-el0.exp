@@ -63,6 +63,41 @@ expect {
     eof { puts "\nFAIL: eof before el0pp ok"; exit 1 }
 }
 expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after el0pp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "run /bin/ipc_pp guess 0\r"
+expect {
+    -re "guess denied" { puts "\nPASS: ungranted guess denied EPERM" }
+    timeout { puts "\nFAIL: guess denied timeout (grant check missing?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before guess denied"; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: guesser exited 0" }
+    timeout { puts "\nFAIL: guesser exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before guesser exit"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after guess timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "ipc el0pp pp\r"
+expect {
+    -re "served ok" { puts "\nPASS: owner rendezvous undisturbed after denied guess" }
+    timeout { puts "\nFAIL: second served ok timeout (guess disturbed owner?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before second served ok"; exit 1 }
+}
+expect {
+    -re "pong ok" { puts "\nPASS: second pong ok" }
+    timeout { puts "\nFAIL: second pong timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before second pong"; exit 1 }
+}
+expect {
+    -re "ipc el0pp ok server=0 client=0" { puts "\nPASS: second pair exited 0" }
+    timeout { puts "\nFAIL: second el0pp ok timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before second el0pp ok"; exit 1 }
+}
+expect {
     -re "> " { puts "\nPASS: prompt at end" }
     timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof at end"; exit 1 }

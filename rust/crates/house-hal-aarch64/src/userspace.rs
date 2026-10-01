@@ -202,6 +202,7 @@ pub unsafe extern "C" fn house_release_pdir(pdir: *mut u8) -> i32 {
             RECORDED_PDIR = ttbr0_l0.as_ptr() as *mut u8;
         }
         let _ = evict_asid(pdir);
+        budget_remove(pdir as u64);
         // Unconditional, unlike `house_asid_forget_pdir`: this is the point of
         // no return for the root, so whatever the map held, a recycled root
         // must not inherit the old image's translations.
@@ -383,6 +384,143 @@ pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
 // throughput and one more thing to keep in step with the allocator.
 static PDIR_WALK_LOCK: RawSpinLock = RawSpinLock::new();
 
+// Per-pdir demand-page budget: one process cannot drain the buddy for
+// everyone. Counts data pages installed by `fault_locked` per root; tables
+// are uncounted overhead (a 64 GiB scan needs 16 M data pages but only ~32 k
+// tables, so capping data still stops the scan). Cap is 10% of total pages
+// with a 1024-page floor, mirroring the RamFs 10% quota idiom, so it scales
+// with RAM instead of being a constant. Counts reset on register/release
+// (Haskell also resets on exec, which reuses the same root).
+static BUDGET_LOCK: RawSpinLock = RawSpinLock::new();
+static mut BUDGET_TAB: [(u64, u32); 64] = [(0, 0); 64];
+static mut BUDGET_N: usize = 0;
+
+unsafe extern "C" {
+    fn buddy_total_count() -> i32;
+}
+
+fn budget_cap() -> u32 {
+    let total = unsafe { buddy_total_count() } as u32;
+    core::cmp::max(total / 10, 1024)
+}
+
+fn budget_count(pdir: u64) -> u32 {
+    unsafe {
+        for i in 0..BUDGET_N {
+            if BUDGET_TAB[i].0 == pdir {
+                return BUDGET_TAB[i].1;
+            }
+        }
+        0
+    }
+}
+
+fn budget_inc(pdir: u64) {
+    unsafe {
+        for i in 0..BUDGET_N {
+            if BUDGET_TAB[i].0 == pdir {
+                BUDGET_TAB[i].1 = BUDGET_TAB[i].1.saturating_add(1);
+                return;
+            }
+        }
+        if BUDGET_N < 64 {
+            BUDGET_TAB[BUDGET_N] = (pdir, 1);
+            BUDGET_N += 1;
+        }
+    }
+}
+
+fn budget_over(pdir: u64) -> bool {
+    BUDGET_LOCK.lock();
+    let over = budget_count(pdir) >= budget_cap();
+    BUDGET_LOCK.unlock();
+    over
+}
+
+/// Reset a root's demand count to zero (new incarnation: register, exec).
+///
+/// # Safety
+///
+/// The caller must own `pdir` (freshly registered or just exec-cleared).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_page_budget_reset(pdir: *mut u8) {
+    if pdir.is_null() {
+        return;
+    }
+    let key = pdir as u64;
+    BUDGET_LOCK.lock();
+    unsafe {
+        for i in 0..BUDGET_N {
+            if BUDGET_TAB[i].0 == key {
+                BUDGET_TAB[i].1 = 0;
+                BUDGET_LOCK.unlock();
+                return;
+            }
+        }
+        if BUDGET_N < 64 {
+            BUDGET_TAB[BUDGET_N] = (key, 0);
+            BUDGET_N += 1;
+        }
+    }
+    BUDGET_LOCK.unlock();
+}
+
+fn budget_remove(pdir: u64) {
+    BUDGET_LOCK.lock();
+    unsafe {
+        let mut i = 0;
+        while i < BUDGET_N {
+            if BUDGET_TAB[i].0 == pdir {
+                let last = BUDGET_N - 1;
+                BUDGET_TAB[i] = BUDGET_TAB[last];
+                BUDGET_TAB[last] = (0, 0);
+                BUDGET_N = last;
+                break;
+            }
+            i += 1;
+        }
+    }
+    BUDGET_LOCK.unlock();
+}
+
+/// Try to charge `n` pages to a root's budget: `1` allowed and counted,
+/// `0` denied (at cap). Shared by the Haskell brk/COW paths so demand (Rust)
+/// and eager (Haskell) allocations draw from one cap.
+///
+/// # Safety
+///
+/// The caller must own `pdir` (a live EL0 root).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_page_budget_try_acquire(pdir: *mut u8, n: u32) -> i32 {
+    if pdir.is_null() {
+        return -22;
+    }
+    let key = pdir as u64;
+    BUDGET_LOCK.lock();
+    let allowed = unsafe {
+        let cur = budget_count(key);
+        let cap = budget_cap();
+        match cur.checked_add(n) {
+            Some(next) if next <= cap => {
+                for i in 0..BUDGET_N {
+                    if BUDGET_TAB[i].0 == key {
+                        BUDGET_TAB[i].1 = next;
+                        break;
+                    }
+                }
+                if (0..BUDGET_N).all(|i| BUDGET_TAB[i].0 != key) && BUDGET_N < 64 {
+                    BUDGET_TAB[BUDGET_N] = (key, next);
+                    BUDGET_N += 1;
+                }
+                true
+            }
+            _ => false,
+        }
+    };
+    BUDGET_LOCK.unlock();
+    if allowed { 1 } else { 0 }
+}
+
 // TLB shootdown acknowledgements: `house_tlb_shootdown` stamps a generation,
 // sends SGI 1 to every peer, and waits for each peer's ack to reach it.
 static TLB_SD_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -506,6 +644,9 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
     const PTE_PXN: u64 = 1 << 53;
     const PTE_AP_RW: u64 = 1 << 6;
     let va = far & !4095;
+    if budget_over(pdir as u64) {
+        return -28;
+    }
     unsafe {
         let page = buddy_alloc_page();
         if page.is_null() {
@@ -606,6 +747,9 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             | PTE_AP_RW;
         *l3.add(i3) = desc;
         core::arch::asm!("dsb ishst; tlbi vae1is, {0}; dsb ish; isb", in(reg) va >> 12, options(nostack, preserves_flags));
+        BUDGET_LOCK.lock();
+        budget_inc(pdir as u64);
+        BUDGET_LOCK.unlock();
         1
     }
 }
@@ -804,5 +948,62 @@ mod tests {
         assert!(!ack_satisfies(1, 2));
         assert!(ack_satisfies(0, u32::MAX));
         assert!(!ack_satisfies(u32::MAX, 0));
+    }
+
+    #[test]
+    fn budget_cap_has_floor() {
+        assert!(budget_cap() >= 1024);
+    }
+
+    #[test]
+    fn budget_acquire_caps_at_cap() {
+        let pdir = 0x71000000 as *mut u8;
+        unsafe { house_page_budget_reset(pdir) };
+        let cap = budget_cap();
+        assert!(cap >= 1024);
+        for _ in 0..cap {
+            assert_eq!(unsafe { house_page_budget_try_acquire(pdir, 1) }, 1);
+        }
+        assert_eq!(unsafe { house_page_budget_try_acquire(pdir, 1) }, 0);
+        unsafe { house_page_budget_reset(pdir) };
+        assert_eq!(unsafe { house_page_budget_try_acquire(pdir, 1) }, 1);
+        budget_remove(pdir as u64);
+    }
+
+    #[test]
+    fn budget_bulk_acquire_fails_over_cap() {
+        let pdir = 0x72000000 as *mut u8;
+        unsafe { house_page_budget_reset(pdir) };
+        let cap = budget_cap();
+        assert_eq!(unsafe { house_page_budget_try_acquire(pdir, cap) }, 1);
+        assert_eq!(unsafe { house_page_budget_try_acquire(pdir, 1) }, 0);
+        budget_remove(pdir as u64);
+    }
+
+    #[test]
+    fn budget_remove_clears_entry() {
+        let pdir = 0x73000000 as *mut u8;
+        unsafe { house_page_budget_reset(pdir) };
+        assert_eq!(unsafe { house_page_budget_try_acquire(pdir, 5) }, 1);
+        budget_remove(pdir as u64);
+        assert_eq!(budget_count(pdir as u64), 0);
+        assert!(!budget_over(pdir as u64));
+        budget_remove(pdir as u64);
+    }
+
+    #[test]
+    fn budget_over_false_when_empty() {
+        let pdir = 0x74000000u64;
+        budget_remove(pdir);
+        assert!(!budget_over(pdir));
+        budget_remove(pdir);
+    }
+
+    #[test]
+    fn budget_null_pdir_rejected() {
+        assert_eq!(
+            unsafe { house_page_budget_try_acquire(core::ptr::null_mut(), 1) },
+            -22
+        );
     }
 }

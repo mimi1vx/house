@@ -16,7 +16,7 @@ module Kernel.Shell.Loop (
 )
 where
 
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (forM_, void, when)
@@ -35,6 +35,7 @@ import GHC.Conc (
   pseq,
   setNumCapabilities,
  )
+import H.Concurrency (forkSupervisedIO)
 import H.Monad (liftIO, runH)
 import H.Mutable (writeRef)
 import H.VirtualMemory qualified as VM
@@ -121,7 +122,7 @@ loop = do
         _ -> withCString "usage: parfib <n>\n" c_uart_puts
       ["mvar", nStr] -> case reads nStr of
         [(n, "")] -> do ok <- mvarTest n; withCString (if ok then "mvar ok\n" else "mvar fail\n") c_uart_puts
-        _ -> withCString "usage: mvar <number>\n" c_uart_puts
+        _ -> withCString "usage: mvar <number> (capped at 5000 over 32 workers)\n" c_uart_puts
       ["ls"] -> handleLs "/"
       ["ls", p] -> handleLs p
       ["cat", p] -> handleCat p
@@ -258,7 +259,11 @@ loop = do
         Right () -> withCString ("registered " ++ name ++ "\n") c_uart_puts
     handleIpcPing name = do
       r <- runH $ do
-        mep <- NS.nsLookupChecked name Nothing
+        base <- NS.nsLookup name
+        mtok <- case base of
+          Nothing -> return Nothing
+          Just ep -> IPC.endpointToken ep
+        mep <- NS.nsLookupChecked name mtok
         case mep of
           Left _ -> return (Left (show name ++ " not found"))
           Right ep -> do
@@ -276,7 +281,11 @@ loop = do
         case mg of
           Left e -> return (Left (show e))
           Right g -> do
-            mep <- NS.nsLookupChecked "pl011" Nothing
+            base <- NS.nsLookup "pl011"
+            mtok <- case base of
+              Nothing -> return Nothing
+              Just ep0 -> IPC.endpointToken ep0
+            mep <- NS.nsLookupChecked "pl011" mtok
             case mep of
               Left _ -> do
                 -- no server yet, just free and report ok (grant alloc succeeded)
@@ -296,7 +305,11 @@ loop = do
         Right s -> withCString (s ++ "\n") c_uart_puts
     handleIpcEl0pp name = do
       r <- runH $ do
-        mep <- NS.nsLookupChecked name Nothing
+        base <- NS.nsLookup name
+        mtok <- case base of
+          Nothing -> return Nothing
+          Just ep0 -> IPC.endpointToken ep0
+        mep <- NS.nsLookupChecked name mtok
         case mep of
           Left _ -> return (Left ("not found: " ++ name))
           Right ep -> do
@@ -311,10 +324,12 @@ loop = do
                   case sRes of
                     Left le2 -> return (Left (toExecError le2))
                     Right sPid -> do
+                      U.grantEndpoint sPid (IPC.endpointId ep)
                       cRes <- U.runElf elf ("/bin/ipc_pp" : ["client", show w]) defaultEnv
                       case cRes of
                         Left le2 -> return (Left (toExecError le2))
                         Right cPid -> do
+                          U.grantEndpoint cPid (IPC.endpointId ep)
                           sCode <- U.waitPid sPid
                           cCode <- U.waitPid cPid
                           return (Right (sCode, cCode))
@@ -715,7 +730,7 @@ loop = do
           jb <- VM.getPage (U.procPdir pb) va
           case (ja, jb) of
             (Just a, Just b) ->
-              return (broke && VM.physPage a /= VM.physPage b && VM.writable a && not (VM.cow a) && not (VM.writable b) && VM.cow b)
+              return (broke == U.CowOk && VM.physPage a /= VM.physPage b && VM.writable a && not (VM.cow a) && not (VM.writable b) && VM.cow b)
             _ -> return False
         _ -> return False
     handleFdtest = do
@@ -879,7 +894,7 @@ loop = do
           mv <- newEmptyMVar
           -- Bracket the helper thread: an async exception while waiting
           -- must not orphan the forked putter.
-          bracket (forkIO $ putMVar mv (parFib (n - 1))) killThread $ \_ -> do
+          bracket (forkSupervisedIO $ putMVar mv (parFib (n - 1))) killThread $ \_ -> do
             let b = parFib (n - 2)
             a <- takeMVar mv
             return (a + b)
@@ -891,7 +906,7 @@ loop = do
       res <- timeout (10 * 1000000) $ do
         m <- newEmptyMVar
         forM_ [1 .. workers] $ \w ->
-          forkIO $ do
+          forkSupervisedIO $ do
             let k = q + if w <= r then 1 else 0
             forM_ [1 .. k] $ \_ -> putMVar m (1 :: Int)
         s <- sumMVars n' m 0

@@ -32,7 +32,10 @@ module Kernel.Userspace (
   Kernel.Userspace.Process.procBrkGrow,
   Kernel.Userspace.Process.stackTop,
   Kernel.Userspace.Process.breakCow,
+  Kernel.Userspace.Process.CowBreak (..),
   Kernel.Userspace.Process.cowLiveCount,
+  Kernel.Userspace.Process.grantEndpoint,
+  Kernel.Userspace.Process.hasGrant,
   Kernel.Userspace.Process.ParkRequest (..),
 
   -- * Scheduler (multiprocess preemption: global run queue, timer quantum)

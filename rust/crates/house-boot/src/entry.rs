@@ -13,8 +13,9 @@
 // - `sp` per-core `house_boot_stack_top - core*64K` (or `__early_stacks_top` fallback)
 //   is valid per `aarch64.ld` `HOUSE_MAX_SMP*64K` reservation; `TLBI VMALLE1IS` not
 //   needed until later `TTBR0` switch (done in `exception.rs`).
-// - `R_AARCH64_RELATIVE` loop processes host `.rela.dyn` entries with `cmp x5,#1027`
-//   exactly as C `start.S:73-85`; primary only (secondary skips relocs/BSS).
+// - `R_AARCH64_RELATIVE` loop applies host `.rela.dyn` entries as B+A
+//   (B=0, linked at load address) with `cmp x5,#1027` plus an image-window
+//   bound check; primary only (secondary skips relocs/BSS).
 // - `__rela_start/end`, `__bss_start/end`, `__early_stacks_top`, `house_boot_stack_top`,
 //   `vectors`, `house_mmu_early`, `house_mmu_enable_secondary`, `c_start`,
 //   `c_start_secondary` are `extern` C/ld symbols resolved at `ld -T build/aarch64.ld`.
@@ -84,7 +85,9 @@ el1_setup:
     cbnz    x19, secondary_spin
 
     /* Primary (core 0) — Self-relocation: static link of PIC archives leaves
-       R_AARCH64_RELATIVE entries nobody else applies (bias is 0). */
+       R_AARCH64_RELATIVE entries nobody else applies. ET_EXEC is linked at
+       its load address so bias B is 0 and B+A is the addend; r_offset is
+       bound-checked against the 16 MiB image window before the store. */
     ldr     x0, =__rela_start
     ldr     x1, =__rela_end
 1:  cmp     x0, x1
@@ -96,6 +99,13 @@ el1_setup:
     cmp     x5, #1027               /* R_AARCH64_RELATIVE */
     b.ne    3f
     cbz     x2, 3f
+    movz    x5, #0x4008, lsl #16
+    cmp     x2, x5
+    b.lo    3f
+    movz    x5, #0x4108, lsl #16
+    cmp     x2, x5
+    b.hs    3f
+    add     x4, x4, xzr             /* B+A, B=0 for linked-at-load EXEC */
     str     x4, [x2]
 3:  add     x0, x0, #24
     b       1b

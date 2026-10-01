@@ -1,11 +1,13 @@
 // EL0 IPC ping-pong probe for the park/resume delegation ring
 // (plans/multiprocess.md step 6). One binary, role from argv[1]:
-// `server` does RECV (0x11) then REPLY (0x13); `client` does CALL (0x12).
+// `server` does RECV (0x11) then REPLY (0x13); `client` does CALL (0x12);
+// `guess` does SEND (0x10) to the given id and expects EPERM (-1).
 // Endpoint id (decimal) comes from argv[2]. Payload is verified both ways:
 // client sends [0x22221111, 0x44443333] tag 0x70, server checks them and
 // replies [0x5a5abeee] tag 0x71, client checks the reply word.
 // Success: server prints `served ok` + exits 0, client prints `pong ok` +
-// exits 0. Any mismatch prints `pp fail` + exits 1.
+// exits 0, guess prints `guess denied` + exits 0 on EPERM. Any mismatch
+// prints `pp fail` + exits 1.
 .arch armv8-a
 .text
 .global _start
@@ -32,7 +34,29 @@ atoi_loop:
 atoi_done:
     cmp     w12, #99                // 'c' -> client
     b.eq    client
+    cmp     w12, #103               // 'g' -> guess (expects EPERM)
+    b.eq    guess
     b       server
+
+guess:
+    adrp    x1, msgbuf
+    add     x1, x1, :lo12:msgbuf
+    mov     x2, #0x1111
+    movk    x2, #0x2222, lsl #16
+    str     x2, [x1]
+    mov     x0, x19                 // ep (unguessed, ungranted)
+    mov     x2, #1                  // nwords
+    mov     x3, #0x70               // tag
+    svc     #0x10                   // SEND -> x0 = -1 EPERM when denied
+    cmn     x0, #1                  // -1?
+    b.ne    fail
+    adrp    x1, guessmsg
+    add     x1, x1, :lo12:guessmsg
+    mov     x2, #13
+    mov     x0, #1
+    svc     #1                      // WRITE(1, "guess denied\n", 13)
+    mov     x0, #0
+    svc     #2                      // EXIT(0)
 
 client:
     adrp    x1, msgbuf
@@ -109,6 +133,8 @@ pongmsg:
     .ascii  "pong ok\n"
 servmsg:
     .ascii  "served ok\n"
+guessmsg:
+    .ascii  "guess denied\n"
 failmsg:
     .ascii  "pp fail\n"
 

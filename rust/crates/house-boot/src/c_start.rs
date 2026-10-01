@@ -105,6 +105,7 @@ unsafe extern "C" {
     fn house_is_ro_page(va: u64) -> i32;
     fn house_is_cow_page(va: u64) -> i32;
     fn house_el0_park_fault(elr: u64, sp_el0: u64, gpr: *const u64, far: u64) -> i32;
+    fn house_el0_park_kill(elr: u64, sp_el0: u64, gpr: *const u64, far: u64) -> i32;
     fn house_svc_dispatch(imm: u32, x0: u64, x1: u64, x2: u64, x3: u64, gpr: *mut u64) -> i64;
     fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *const u64) -> i32;
     fn house_ipc_should_park(op: u32, x1: u64, x2: u64) -> i32;
@@ -203,14 +204,14 @@ pub unsafe extern "C" fn c_handle_sync(
             && (HOUSE_USER_VA_MIN..=HOUSE_USER_VA_MAX).contains(&far)
         {
             // SAFETY: house_handle_user_fault allocates via buddy, sets PTE, uses dsb/isb.
-            // 1 paged, -12 out of memory (park for the supervisor to kill),
-            // 0 not ours.
+            // 1 paged, -12 out of memory and -28 budget exhausted (both park
+            // for the supervisor to reap), 0 not ours.
             let handled = unsafe { house_handle_user_fault(far) };
             if handled == 1 {
                 unsafe { core::arch::asm!("dsb ish; isb", options(nostack, preserves_flags)) };
                 return elr;
             }
-            if handled == -12 && !gpr.is_null() {
+            if (handled == -12 || handled == -28) && !gpr.is_null() {
                 let sp_el0: u64;
                 // SAFETY: mrs sp_el0 at EL1 handler.
                 unsafe {
@@ -440,6 +441,44 @@ pub unsafe extern "C" fn c_handle_sync(
             uart_puts(b"[svc] EL1 SVC unexpected imm=\0".as_ptr());
             puthex(esr & 0xFFFF);
             uart_puts(b"\n\0".as_ptr());
+        }
+    }
+    // Unhandled fault kill: an EL0 abort no earlier handler claimed kills
+    // the process instead of halting the core. Gate is SPSR.M (0 = EL0);
+    // EL1 faults still halt loudly below. Logs ESR/FAR/ELR here (uart) and
+    // lets Haskell dmesg the pid + VA on reap.
+    {
+        let spsr: u64;
+        unsafe {
+            core::arch::asm!("mrs {0}, spsr_el1", out(reg) spsr, options(nostack, preserves_flags))
+        };
+        if (spsr & 0xF) == 0 && !gpr.is_null() {
+            let sp_el0: u64;
+            unsafe {
+                core::arch::asm!("mrs {0}, sp_el0", out(reg) sp_el0, options(nostack, preserves_flags))
+            };
+            unsafe {
+                uart_puts(b"[kill] EL0 fault ESR=\0".as_ptr());
+                puthex(esr);
+                uart_puts(b" FAR=\0".as_ptr());
+                puthex(far);
+                uart_puts(b" ELR=\0".as_ptr());
+                puthex(elr);
+                uart_puts(b"\n\0".as_ptr());
+            }
+            let parked = unsafe { house_el0_park_kill(elr, sp_el0, gpr as *const u64, far) };
+            if parked != 0 {
+                unsafe {
+                    house_set_recorded_pdir(ttbr0_l0.as_mut_ptr() as *mut u8);
+                    core::arch::asm!("msr ttbr0_el1, {0}", in(reg) ttbr0_l0.as_ptr() as u64, options(nostack, preserves_flags));
+                    core::arch::asm!(
+                        "dsb ish; tlbi vmalle1is; dsb ish; isb",
+                        options(nostack, preserves_flags)
+                    );
+                    core::arch::asm!("msr spsr_el1, {0}", in(reg) 0x3c5u64, options(nostack, preserves_flags));
+                }
+                return svc_exit_trampoline as *const () as u64;
+            }
         }
     }
     unsafe {

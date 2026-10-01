@@ -72,6 +72,10 @@ const EL0_REQ_FAULT: u32 = 0x1F;
 // over-quantum EL0 frame so Haskell can hand the CPU to the next runnable
 // pid; resumed x0 is the trapped x0 so the interrupted insn retries).
 const EL0_REQ_PREEMPT: u32 = 0x1E;
+// Unhandled EL0 fault kill (not an svc number: any EL0 abort not claimed by
+// the pager/RO guard parks here so Haskell reaps the pid instead of halting
+// the core; EL1 faults still halt).
+const EL0_REQ_FAULT_KILL: u32 = 0x1D;
 
 #[derive(Clone, Copy)]
 struct El0Slot {
@@ -734,9 +738,47 @@ pub unsafe extern "C" fn house_el0_park_fault(
     }
 }
 
+// SAFETY: fatal-context (`c_handle_sync` unhandled EL0 abort); bounded
+// 112-word copy with no locks or allocation. Parks the faulting frame as
+// FAULT_KILL with the page-aligned VA so Haskell reaps the pid instead of
+// halting the core. Returns 1 when parked, 0 when the pdir holds no slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_park_kill(
+    elr: u64,
+    sp_el0: u64,
+    gpr: *const u64,
+    far: u64,
+) -> i32 {
+    unsafe {
+        if gpr.is_null() {
+            return 0;
+        }
+        sched_reset_quantum();
+        let cur = current_pdir() as u64;
+        if cur == 0 {
+            return 0;
+        }
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == cur {
+                // SAFETY: gpr is the 896B vec_sync frame (112 u64), slot save
+                // is a static 112-word field; single bounded copy, no overlap.
+                core::ptr::copy_nonoverlapping(gpr, EL0_TABLE[i].save.as_mut_ptr(), 112);
+                EL0_TABLE[i].elr = elr;
+                EL0_TABLE[i].sp_el0 = sp_el0;
+                EL0_TABLE[i].req = EL0_REQ_FAULT_KILL;
+                EL0_TABLE[i].fault_va = far & !4095;
+                EL0_TABLE[i].parked = 1;
+                core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+                return 1;
+            }
+        }
+        0
+    }
+}
+
 // SAFETY: EL1 thread context (Haskell park loop); returns the parked fault
-// VA (page-aligned) for the pid, 0 when the pid holds no FAULT request.
-// VA 0 is never a parked fault (user window starts at 0x01000000).
+// VA (page-aligned) for the pid, 0 when the pid holds no FAULT/FAULT_KILL
+// request. VA 0 is never a parked fault (user window starts at 0x01000000).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_el0_fault_addr(pdir: *mut u8) -> u64 {
     unsafe {
@@ -746,7 +788,9 @@ pub unsafe extern "C" fn house_el0_fault_addr(pdir: *mut u8) -> u64 {
         let key = pdir as u64;
         for i in 0..EL0_N {
             if EL0_TABLE[i].pdir == key {
-                if EL0_TABLE[i].parked != 0 && EL0_TABLE[i].req == EL0_REQ_FAULT {
+                if EL0_TABLE[i].parked != 0
+                    && (EL0_TABLE[i].req == EL0_REQ_FAULT || EL0_TABLE[i].req == EL0_REQ_FAULT_KILL)
+                {
                     return EL0_TABLE[i].fault_va;
                 }
                 return 0;

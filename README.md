@@ -34,7 +34,7 @@ Static AArch64 ELF programs load from the active VFS namespace into the `0x01000
 
 The Haskell process layer assigns PIDs over a 64-slot Rust EL0 session table keyed by page-directory pointer. `spawn` runs a program concurrently, `jobs` lists live processes, and `wait [pid]` reaps one or all non-self processes; parent-child ownership is not enforced. Timer-driven preemption uses a 10-tick default quantum; `quantum <ticks>` changes it, with `0` selecting one tick. Fork uses copy-on-write page sharing, exec replaces the image while retaining the PID and open descriptors, and fork inherits the VFS namespace.
 
-SVC `0x00` yields, `0x01` writes to the console, `0x02` exits, `0x03` manages the break, `0x04..0x07` provide open/read/write/close, `0x08..0x0B` provide fork/wait/seek/exec, and `0x10..0x13` provide IPC send/receive/call/reply. Blocking operations cross the trap boundary through the park/resume delegation ring. Grant-map `0x14` returns `ENOSYS`. Endpoint IDs are not authorization capabilities: any EL0 process that knows an endpoint ID can invoke it, and capability mismatches are logged but permitted.
+SVC `0x00` yields, `0x01` writes to the console, `0x02` exits, `0x03` manages the break, `0x04..0x07` provide open/read/write/close, `0x08..0x0B` provide fork/wait/seek/exec, and `0x10..0x13` provide IPC send/receive/call/reply. Blocking operations cross the trap boundary through the park/resume delegation ring. Grant-map `0x14` returns `ENOSYS`. Each EL0 process holds an explicit grant list for the endpoint IDs it may use (populated at spawn, inherited across fork, retained across exec); SEND/CALL/RECV on an ungranted id fails with `EPERM` without touching the rendezvous, and anonymous capability checks deny.
 
 ### Boot
 

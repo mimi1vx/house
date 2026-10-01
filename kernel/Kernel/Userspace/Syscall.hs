@@ -19,8 +19,8 @@ Stability   : experimental
  For slice, syscalls are handled in Rust (uart/exit) with IPC args validated.
 +Errno mapping once the delegation ring lands: unknown/freed endpoint id ->
 +`NoSuchEndpoint` (~ENOENT -2, also the `nsLookupChecked` miss path, logged to
-+dmesg); capability mismatch -> `NotOwner` (~EPERM -1, log-only in this slice:
-+allowed + dmesg via `checkCap`); full queue -> `QueueFull` (~EAGAIN);
++dmesg); ungranted endpoint id -> `NotOwner` (~EPERM -1, denied without
++touching the queue, logged via `checkCap`); full queue -> `QueueFull` (~EAGAIN);
 +`callTimeout` expiry -> `WouldBlock`.
 +EL0 return convention (resume x0): SEND/CALL 0 with reply words in the user
 +buffer (truncated to the sender nwords); RECV the sender tag with received

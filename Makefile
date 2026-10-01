@@ -281,6 +281,16 @@ house-proc-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-proc.exp $(SPIKE_DIR)/build/house.bin 'proc-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
+# Fault budget: a window scan is capped at 10% of buddy, reaped exit 1.
+house-fault-budget-check: house-build initrd
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house-fault-budget.exp $(SPIKE_DIR)/build/house.bin 'fault-budget-ok' 120 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-house-fault-budget.exp $(SPIKE_DIR)/build/house.bin 'fault-budget-ok' 180 tcg $(SPIKE_MEM) $(SMP_N)
+
+# Fault kill: unhandled EL0 aborts reap exit 1, core alive.
+house-fault-kill-check: house-build initrd
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-fault-kill.exp $(SPIKE_DIR)/build/house.bin 'fault-kill-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-fault-kill.exp $(SPIKE_DIR)/build/house.bin 'fault-kill-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
+
 # EL0 fork/wait/exec via park ring (multiprocess step 9): fork probe
 # parent/child distinct + wait reaps; exec probe replaces image w/ hello
 house-fork-check: house-build initrd
@@ -479,4 +489,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg

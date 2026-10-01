@@ -50,6 +50,7 @@ import Kernel.Driver.Virtio.Net.Types qualified as NT
 import Kernel.FileSystem.BlkPersist qualified as BP
 import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as Vfs
+import Kernel.IPC.Endpoint qualified as Endpoint
 import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
 import Kernel.Userspace.Linker qualified as Linker
@@ -1411,6 +1412,7 @@ main = do
           (Ldr.loadErrorToString (Ldr.DependencyMissing "libmissing.so.0") == "DependencyMissing: libmissing.so.0")
       , checkIO "lib version pin format" libVersionPinGolden
       , checkIO "lib version skew lines" libVersionSkewGolden
+      , checkIO "cap deny anonymous" capCheckGolden
       , assertLinkError
           "link missing dependency"
           (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
@@ -1798,6 +1800,20 @@ blkTruncGolden :: IO Bool
 blkTruncGolden = case BP.encodeImage [("/a", [1, 2, 3])] of
   Left _ -> check "blk trunc body" False
   Right img -> assertLeft "blk trunc body" (BP.decodeImage (trunc img))
+
+-- | Capability gate: anonymous denies, wrong token denies, owner allows.
+capCheckGolden :: IO Bool
+capCheckGolden = HM.runH $ do
+  ep <- Endpoint.newEndpoint
+  mtok <- Endpoint.endpointToken ep
+  case mtok of
+    Nothing -> return False
+    Just right@(Endpoint.CapToken w) -> do
+      okRight <- Endpoint.checkCap ep (Just right)
+      okAnon <- Endpoint.checkCap ep Nothing
+      okWrong <- Endpoint.checkCap ep (Just (Endpoint.CapToken (w + 1)))
+      Endpoint.freeEndpoint ep
+      return (okRight && not okAnon && not okWrong)
 
 {- | A layer's /lib version record is a digest over its own /lib content,
 so a lower block root is attacker-controlled: only exactly 64 lowercase

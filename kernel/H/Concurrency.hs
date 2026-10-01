@@ -3,7 +3,7 @@ module H.Concurrency (module H.Concurrency {- H,-}, Chan, MVar, QSem, ThreadId) 
 
 import Control.Concurrent (Chan, MVar, QSem, ThreadId)
 import Control.Concurrent qualified as IO
-import Control.Exception (bracket_)
+import Control.Exception (SomeException, bracket_, catch)
 import H.Monad (H, liftIO, runH, trappedRunH)
 
 ------------------------ INTERFACE ---------------------------------------------
@@ -11,6 +11,7 @@ import H.Monad (H, liftIO, runH, trappedRunH)
 -- * Thread control
 
 forkH :: H a -> H ThreadId
+forkSupervisedIO :: IO () -> IO ThreadId
 killH :: ThreadId -> H ()
 yield :: H ()
 threadDelay :: Int -> H ()
@@ -47,6 +48,14 @@ withQSem :: QSem -> H a -> H a
 
 -- Thread control---------------------------------------------------------------
 forkH = liftIO . IO.forkIO . trappedRunH
+
+{- | Supervised IO fork: an exception is logged (not silent) and the thread
+ends; the machine keeps running. All raw IO forks go through here, so no
+unsupervised thread holds kernel state.
+-}
+forkSupervisedIO act = IO.forkIO (act `catch` handler)
+  where
+    handler (e :: SomeException) = putStrLn ("supervised thread died: " ++ show e)
 
 killH = liftIO . IO.killThread
 

@@ -14,9 +14,9 @@ module Kernel.Init (
 )
 where
 
-import Control.Concurrent (forkIO)
 import Data.ByteString qualified as BS
 import Foreign.C.String (withCString)
+import H.Concurrency (forkSupervisedIO)
 import H.Monad (runH)
 import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.FileSystem.Vfs qualified as FS
@@ -45,7 +45,7 @@ launchPid1 = do
       runH (Dmesg.dmesgLog ("initramfs: init fail " ++ e))
     Right n -> do
       withCString ("init pid " ++ show n ++ "\n") c_uart_puts
-      _ <- forkIO $ do
+      _ <- forkSupervisedIO $ do
         code <- runH (U.waitPid (U.Pid n))
         withCString ("init exit " ++ show code ++ "\n") c_uart_puts
         runH (Dmesg.dmesgLog ("init exit " ++ show code))

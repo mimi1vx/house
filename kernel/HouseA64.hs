@@ -3,7 +3,6 @@
 
 module HouseA64 (house_main) where
 
-import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (forM_, void, when)

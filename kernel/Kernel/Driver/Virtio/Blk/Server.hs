@@ -41,17 +41,6 @@ import Kernel.Driver.Virtio.Transport qualified as VTrans
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Types (Endpoint, Grant (..))
 
-foreign import ccall unsafe "house_uptime_ns" c_uptime_ns :: IO Word64
-
-busyDelayUs :: Int -> H ()
-busyDelayUs us = liftIO $ do
-  t0 <- c_uptime_ns
-  let target = t0 + fromIntegral us * 1000
-  let loop = do
-        t <- c_uptime_ns
-        when (t < target) loop
-  loop
-
 -- | Blk device record (mirrors VirtioDevice but block-specific).
 data BlkDevice = BlkDevice {
   blkSlot :: Int
@@ -114,7 +103,7 @@ waitForCompletion slot reqId grant = loop (200 :: Int)
   where
     loop 0 = return (Left (BlkIoError 99))
     loop n = do
-      busyDelayUs 2000
+      HC.threadDelay 2000
       r <- blkPollUsed slot
       case r of
         Left e -> return (Left e)

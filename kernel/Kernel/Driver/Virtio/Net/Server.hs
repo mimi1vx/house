@@ -21,7 +21,7 @@ module Kernel.Driver.Virtio.Net.Server (
 )
 where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, when)
 import Data.Bits (shiftL, (.&.), (.|.))
 import Data.Map.Strict (Map)
