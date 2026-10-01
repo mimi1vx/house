@@ -14,12 +14,13 @@ endif
 
 # Docker on Linux leaves bind-mounted outputs root-owned while Apple
 # `container` mounts stay writable, so restore host ownership before any
-# host-side step that follows a container step (initrd packing, Cabal).
+# host-side step that follows a container step (initrd packing, Cabal,
+# host cargo test which writes rust/target).
 ifeq ($(RUNNER),container)
   FIXUP_OWNERSHIP :=
 else
   FIXUP_OWNERSHIP = $(RUNNER) run --rm -v "$(CURDIR)":/work $(IMAGE) \
-    chown -R $(shell id -u):$(shell id -g) /work/build /work/initramfs-staging /work/dist-newstyle
+    sh -c 'mkdir -p /work/build /work/initramfs-staging /work/dist-newstyle /work/rust/target && chown -R $(shell id -u):$(shell id -g) /work/build /work/initramfs-staging /work/dist-newstyle /work/rust/target'
 endif
 
 # Named-volume container runner (house-ng pattern, step 5).
@@ -138,6 +139,7 @@ rust-abi-check: volumes
 HOST_TRIPLE := $(shell rustc -vV | sed -n "s/^host: //p")
 
 rust-test:
+	-$(FIXUP_OWNERSHIP)
 	cargo test --manifest-path rust/Cargo.toml --target $(HOST_TRIPLE) --lib -p house-hal -p house-hal-aarch64 -p house-libc -p house-el0-tiny -- --test-threads=1
 
 rust-check: volumes rust-abi-check rust-test
