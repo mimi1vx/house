@@ -80,8 +80,10 @@ LOADER_CHECK=$(cabal list-bin exe:house-loader-check 2>/dev/null | tail -1)
 	exit 1
 }
 
+# Stable C exports; the rust_begin_unwind mangling embeds a crate hash that
+# moves with the toolchain, so audit_symbols checks its shape (exactly one)
+# separately instead of pinning the bytes here.
 cat >"$WORK/expected-exports" <<'EOF'
-_RNvCshKLH2LI99iV_7___rustc17rust_begin_unwind
 memcpy
 memset
 strlen
@@ -109,9 +111,15 @@ audit_symbols() {
 		return 1
 	fi
 	nm -D --defined-only --format=posix "$artifact" | awk '{print $1}' | LC_ALL=C sort >"$WORK/actual-exports"
-	if ! cmp -s "$expected" "$WORK/actual-exports"; then
+	n_unwind=$(grep -c 'rust_begin_unwind$' "$WORK/actual-exports" || true)
+	if [ "$n_unwind" != 1 ]; then
+		echo "dynamic-elf-check: want exactly one rust_begin_unwind export in $artifact" >&2
+		return 1
+	fi
+	grep -v 'rust_begin_unwind$' "$WORK/actual-exports" >"$WORK/actual-exports-stable" || true
+	if ! cmp -s "$expected" "$WORK/actual-exports-stable"; then
 		echo "dynamic-elf-check: export-set drift in $artifact" >&2
-		diff -u "$expected" "$WORK/actual-exports" >&2 || true
+		diff -u "$expected" "$WORK/actual-exports-stable" >&2 || true
 		return 1
 	fi
 }
