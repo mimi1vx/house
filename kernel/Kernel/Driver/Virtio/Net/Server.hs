@@ -16,10 +16,12 @@ module Kernel.Driver.Virtio.Net.Server (
   netArpLs,
   netIfConfig,
   netGetMac,
+  netIcmpCap,
+  insertIcmpSeen,
 )
 where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (forM_, when)
 import Data.Bits (shiftL, (.&.), (.|.))
 import Data.Map.Strict (Map)
@@ -88,6 +90,15 @@ netArpMap = unsafePerformH $ newRef Map.empty
 netIcmpSeen :: Ref (Map (Word16, Word16) Word64)
 netIcmpSeen = unsafePerformH $ newRef Map.empty
 
+netIcmpCap :: Int
+netIcmpCap = 1024
+
+insertIcmpSeen :: (Word16, Word16) -> Word64 -> Map (Word16, Word16) Word64 -> Map (Word16, Word16) Word64
+insertIcmpSeen k now m =
+  let live = Map.filter (\t -> now - t < 60000000000) m
+      trimmed = if Map.size live >= netIcmpCap then Map.deleteMin live else live
+   in Map.insert k now trimmed
+
 {-# NOINLINE netDhcpSeen #-}
 netDhcpSeen :: Ref (Maybe Stack.DhcpMsg)
 netDhcpSeen = unsafePerformH $ newRef Nothing
@@ -113,13 +124,7 @@ netRxBatchCap :: Int
 netRxBatchCap = 16
 
 busyDelayUs :: Int -> H ()
-busyDelayUs us = liftIO $ do
-  t0 <- c_uptime_ns
-  let target = t0 + fromIntegral us * 1000
-  let loop = do
-        t <- c_uptime_ns
-        when (t < target) loop
-  loop
+busyDelayUs = liftIO . threadDelay
 
 wantedMask :: Word64
 wantedMask = (1 `shiftL` 32) + (1 `shiftL` 29)
@@ -252,8 +257,7 @@ netServerTeardown slot
               Nothing -> return []
           mapM_ G.grantFree grants
           DGIC.disableSpi (fromIntegral (16 + slot))
-          case netEndpoint dev of
-            ep -> do _ <- NS.nsUnregister ("virtio-net" ++ show slot); IPC.freeEndpoint ep; return ()
+          do _ <- NS.nsUnregister ("virtio-net" ++ show slot); IPC.freeEndpoint (netEndpoint dev); return ()
           _ <- DrvReg.unregisterDriver ("virtio-net" ++ show slot)
           freeQueue (netRxQueue dev)
           freeQueue (netTxQueue dev)
@@ -320,7 +324,7 @@ txPacket slot pkt
       mg <- G.grantAlloc
       case mg of
         Left _ -> return (Left NetNoSpace)
-        Right g -> do
+        Right g0 -> G.withGrantAllocated g0 $ \g -> do
           let ptr = grantPage g
           liftIO $ do
             mapM_ (\i -> poke (ptr `plusPtr` i) (0 :: Word8)) [0 .. 11]
@@ -684,7 +688,7 @@ drainRx slot = go netRxBatchCap
                     now <- liftIO c_uptime_ns
                     withQSem netSem $ do
                       m <- readRef netIcmpSeen
-                      writeRef netIcmpSeen (Map.insert (ident, seqN) now m)
+                      writeRef netIcmpSeen (insertIcmpSeen (ident, seqN) now m)
                   _ -> return ()
                 17 -> case decodeUdp (ipv4Payload ipkt) of
                   Right udp

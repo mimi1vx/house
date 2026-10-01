@@ -886,12 +886,17 @@ loop = do
     mvarTest :: Int -> IO Bool
     mvarTest n = do
       let n' = min n 5000
-      r <- timeout (10 * 1000000) $ do
+          workers = 32
+          (q, r) = n' `divMod` workers
+      res <- timeout (10 * 1000000) $ do
         m <- newEmptyMVar
-        forM_ [1 .. n'] $ \_ -> forkIO $ putMVar m (1 :: Int)
+        forM_ [1 .. workers] $ \w ->
+          forkIO $ do
+            let k = q + if w <= r then 1 else 0
+            forM_ [1 .. k] $ \_ -> putMVar m (1 :: Int)
         s <- sumMVars n' m 0
         return (s == n')
-      return (r == Just True)
+      return (res == Just True)
       where
         sumMVars 0 _ acc = return acc
         sumMVars k mv acc = do v <- takeMVar mv; sumMVars (k - 1) mv (acc + v)

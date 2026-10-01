@@ -150,6 +150,11 @@ pub unsafe extern "C" fn house_mem_stats(total: *mut u64, free_out: *mut u64) {
     }
 }
 
+pub(crate) fn buddy_in_heap(addr: u64) -> bool {
+    let (s, e) = unsafe { (BUDDY_START, BUDDY_END) };
+    e > s && addr >= s && addr < e
+}
+
 /// int buddy_contains(void *p)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_contains(p: *mut u8) -> i32 {

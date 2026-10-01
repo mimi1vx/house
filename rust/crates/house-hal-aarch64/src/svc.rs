@@ -1065,7 +1065,6 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 let va = x1;
                 let len = x2;
                 if fd != 1 {
-                    uart_puts(b"[svc] write bad fd\n\0".as_ptr());
                     if !gpr.is_null() {
                         *gpr = -9i64 as u64;
                     }
@@ -1084,7 +1083,6 @@ pub unsafe extern "C" fn house_svc_dispatch(
                     return 0;
                 }
                 if validate_user_buffer(va, len) != 0 {
-                    uart_puts(b"[svc] write EFAULT\n\0".as_ptr());
                     if !gpr.is_null() {
                         *gpr = -14i64 as u64;
                     }
@@ -1143,7 +1141,6 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 // trap-side errno (bad buffer/path, never parked).
                 let r = validate_fd(imm, x0, x1, x2);
                 if r == VALID_PARK {
-                    uart_puts(b"[svc] ENOSYS fd\n\0".as_ptr());
                     if !gpr.is_null() {
                         *gpr = -38i64 as u64;
                     }
@@ -1161,7 +1158,6 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 // slot (fail closed ENOSYS) or a trap-side errno.
                 let r = validate_dir(imm, x0, x1, x2);
                 if r == VALID_PARK {
-                    uart_puts(b"[svc] ENOSYS dir\n\0".as_ptr());
                     if !gpr.is_null() {
                         *gpr = -38i64 as u64;
                     }
@@ -1177,7 +1173,6 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 // Registered sessions park in `c_handle_sync` before reaching
                 // dispatch (no user memory for fork; wait carries only a pid
                 // Haskell validates); this arm is the fail-closed fallback.
-                uart_puts(b"[svc] ENOSYS fork\n\0".as_ptr());
                 if !gpr.is_null() {
                     *gpr = -38i64 as u64;
                 }
@@ -1189,7 +1184,6 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 // (fail closed ENOSYS) or a trap-side errno (bad path).
                 let r = validate_cstring_current(x0, 256);
                 if r == 0 {
-                    uart_puts(b"[svc] ENOSYS exec\n\0".as_ptr());
                     if !gpr.is_null() {
                         *gpr = -38i64 as u64;
                     }
@@ -1210,18 +1204,82 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 if !gpr.is_null() {
                     *gpr = r as u64;
                 }
-                if r == -38 {
-                    uart_puts(b"[svc] ENOSYS ipc\n\0".as_ptr());
-                }
+                if r == -38 {}
                 r
             }
             _ => {
-                uart_puts(b"[svc] ENOSYS imm=0x\0".as_ptr());
                 if !gpr.is_null() {
                     *gpr = -38i64 as u64;
                 }
                 -38
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_words_rejects_bad_shape() {
+        let io = 0x1000 as *const u64;
+        let pdir = 0x2000 as *mut u8;
+        assert_eq!(
+            check_user_words(core::ptr::null_mut(), 0x01000000, io, 1),
+            -14
+        );
+        assert_eq!(
+            check_user_words(pdir, 0x01000000, core::ptr::null(), 1),
+            -14
+        );
+        assert_eq!(check_user_words(pdir, 0x01000000, io, 9), -22);
+        assert_eq!(check_user_words(pdir, 0x01000001, io, 1), -22);
+        assert_eq!(check_user_words(pdir, u64::MAX - 7, io, 1), -14);
+        assert_eq!(check_user_words(pdir, 0x1000, io, 1), -14);
+        assert_eq!(check_user_words(pdir, 0x01000000, io, 0), 0);
+        assert_eq!(check_user_words(pdir, 0x01000000, io, 1), 0);
+    }
+
+    #[test]
+    fn buffer_prechecks_hold_without_tables() {
+        unsafe {
+            assert_eq!(validate_user_buffer(0x01000000, 0), 0);
+            assert_eq!(validate_user_buffer(0x01000000, 65537), -1);
+            assert_eq!(validate_user_buffer(u64::MAX - 1, 8), -1);
+            assert_eq!(validate_user_buffer(0x1000, 8), -1);
+            assert_eq!(validate_user_buffer(0x01000000, 8), -1);
+        }
+    }
+
+    #[test]
+    fn cstring_prechecks_hold() {
+        unsafe {
+            assert_eq!(validate_cstring_current(0x1000, 256), -14);
+            assert_eq!(validate_cstring_current(u64::MAX - 10, 256), -14);
+            assert_eq!(validate_cstring_current(0x01000000, 256), -14);
+        }
+    }
+
+    #[test]
+    fn fd_gates_shape() {
+        unsafe {
+            assert_eq!(validate_fd(0xFF, 0, 0, 0), -22);
+            assert_eq!(validate_fd(HOUSE_SVC_READ, 0, 0x01000000, 65537), -22);
+            assert_eq!(validate_fd(HOUSE_SVC_READ, 0, 0x01000000, 8), -14);
+            assert_eq!(validate_fd(HOUSE_SVC_CLOSE, 0, 0, 0), 1);
+        }
+    }
+
+    #[test]
+    fn dir_gates_shape() {
+        unsafe {
+            assert_eq!(validate_dir(0xFF, 0, 0, 0), -22);
+            assert_eq!(
+                validate_dir(HOUSE_SVC_STAT, 0x01000000, 0x01000000, 65537),
+                -14
+            );
+            assert_eq!(validate_dir(HOUSE_SVC_MKDIR, 0x01000000, 0, 0), -14);
         }
     }
 }

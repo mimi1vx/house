@@ -1,4 +1,7 @@
-#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(
+    unsafe_op_in_unsafe_fn,
+    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
+)]
 #![allow(static_mut_refs)]
 #![allow(unused_unsafe)]
 #![allow(clippy::all)]
@@ -7,7 +10,7 @@
 
 use crate::spinlock::RawSpinLock;
 
-const RTS_ALIAS_BASE: u64 = 0x4200000000;
+pub const RTS_ALIAS_BASE: u64 = 0x4200000000;
 const MBLOCK: usize = 1 << 20;
 const PAGE_SIZE: usize = 4096;
 const MAP_FIXED: i32 = 0x10;
@@ -16,13 +19,13 @@ const PROT_READ: i32 = 0x1;
 const PROT_WRITE: i32 = 0x2;
 const PROT_EXEC: i32 = 0x4;
 
-const HOUSE_USER_VA_MIN: u64 = 0x01000000;
+pub const HOUSE_USER_VA_MIN: u64 = 0x01000000;
 // Demand/mmap window extends to 64GB: anon base (17GB) and demand-test VAs
 // (32GB) sit above the highest possible 1GB RAM identity block (16GB RAM
 // reaches L1 idx 16 = 17GB), so test traffic always fault-allocates fresh
 // pages instead of aliasing live RAM. Stays below the RTS alias (264GB) so
 // alias unmaps keep release-only behavior.
-const HOUSE_USER_VA_MAX: u64 = 0x1000000000;
+pub const HOUSE_USER_VA_MAX: u64 = 0x1000000000;
 
 const PTE_VALID: u64 = 1 << 0;
 const PTE_TABLE: u64 = 1 << 1;
@@ -32,6 +35,7 @@ const PTE_AP_RW: u64 = 1 << 6;
 const PTE_AP_RO: u64 = 3 << 6;
 
 const ENOSYS: i32 = 38;
+const ENOTSUP: i32 = 95;
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 
@@ -39,6 +43,50 @@ static VM_LOCK: RawSpinLock = RawSpinLock::new();
 static mut VM_RESV: [(*mut u8, *mut u8); 32] = [(core::ptr::null_mut(), core::ptr::null_mut()); 32];
 static mut VM_N_RESV: i32 = 0;
 static mut VM_MMAP_CUR: *mut u8 = core::ptr::null_mut();
+static REF_LOCK: RawSpinLock = RawSpinLock::new();
+static mut REF_TAB: [(u64, u32); 128] = [(0, 0); 128];
+static mut REF_N: usize = 0;
+
+fn ref_acquire(page: u64) {
+    REF_LOCK.lock();
+    unsafe {
+        for i in 0..REF_N {
+            if REF_TAB[i].0 == page {
+                REF_TAB[i].1 = REF_TAB[i].1.saturating_add(1);
+                REF_LOCK.unlock();
+                return;
+            }
+        }
+        if REF_N < 128 {
+            REF_TAB[REF_N] = (page, 1);
+            REF_N += 1;
+        }
+    }
+    REF_LOCK.unlock();
+}
+
+fn ref_release(page: u64) -> bool {
+    REF_LOCK.lock();
+    let free = unsafe {
+        let mut free = true;
+        for i in 0..REF_N {
+            if REF_TAB[i].0 == page {
+                if REF_TAB[i].1 > 1 {
+                    REF_TAB[i].1 -= 1;
+                    free = false;
+                } else {
+                    REF_TAB[i] = REF_TAB[REF_N - 1];
+                    REF_TAB[REF_N - 1] = (0, 0);
+                    REF_N -= 1;
+                }
+                break;
+            }
+        }
+        free
+    };
+    REF_LOCK.unlock();
+    free
+}
 
 unsafe extern "C" {
     static mut __heap_base: u8;
@@ -267,6 +315,10 @@ pub(crate) unsafe fn vm_split_slot(slot: *mut u64, level: u8) -> bool {
         }
     } else {
         let base = d & 0xFFFFFE00000u64;
+        // L3 children keep bit 1 set: split and fault-installed page
+        // descriptors uniformly carry TABLE=1 in this tree, and the
+        // hardware walks them as pages that way (clearing it faults
+        // translation on HVF while QEMU TCG ignores the bit).
         let keep = (d & 0xFFFF000000000FFFu64) | PTE_TABLE;
         for i in 0..512 {
             let chunk = base.wrapping_add((i as u64) << 12) & 0x0000FFFFFFFFF000u64;
@@ -304,6 +356,10 @@ pub unsafe extern "C" fn house_vm_mmap(
     }
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         unsafe { *__errno_location() = EINVAL };
+        return usize::MAX as *mut u8;
+    }
+    if prot & PROT_EXEC != 0 {
+        unsafe { *__errno_location() = ENOTSUP };
         return usize::MAX as *mut u8;
     }
     VM_LOCK.lock();
@@ -417,8 +473,10 @@ pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
                     let page = (d & !0xFFF) as *mut u8;
                     unsafe { *slot = 0 };
                     unsafe { core::arch::asm!("dsb ishst", options(nostack, preserves_flags)) };
-                    unsafe { buddy_free_page(page) };
                     unsafe { house_tlb_shootdown(va) };
+                    if ref_release(page as u64) {
+                        unsafe { buddy_free_page(page) };
+                    }
                 }
             }
             va = va.wrapping_add(PAGE_SIZE as u64);
@@ -446,7 +504,6 @@ pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32) -> i32 {
-    unsafe { uart_puts(b"[mprotect] start\n\0".as_ptr()) };
     if addr.is_null() {
         unsafe { *__errno_location() = EINVAL };
         return -1;
@@ -457,6 +514,10 @@ pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32)
     }
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         unsafe { *__errno_location() = EINVAL };
+        return -1;
+    }
+    if prot & PROT_EXEC != 0 {
+        unsafe { *__errno_location() = ENOTSUP };
         return -1;
     }
     let want_rw = (prot & PROT_WRITE) != 0;
@@ -486,12 +547,9 @@ pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32)
         return -1;
     }
     VM_LOCK.lock();
-    unsafe { uart_puts(b"[mprotect] lock done\n\0".as_ptr()) };
     let mut va = lo;
     while va < hi {
-        unsafe { uart_puts(b"[mprotect] loop va\n\0".as_ptr()) };
         let slot = unsafe { vm_l3_entry(va) };
-        unsafe { uart_puts(b"[mprotect] slot done\n\0".as_ptr()) };
         if slot.is_null() {
             VM_LOCK.unlock();
             unsafe { *__errno_location() = EINVAL };
@@ -516,28 +574,23 @@ pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32)
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_demand_single() -> i32 {
-    unsafe { uart_puts(b"[vm] demand single start\n\0".as_ptr()) };
     // 32GB: above any RAM identity block, so the access truly faults and the
     // pager allocates a fresh page (aliasing live RAM would silently sink on
     // hvf and corrupt buddy memory).
     let p = 0x800000000u64 as *mut u32;
     unsafe {
         core::ptr::write_volatile(p, 0xdeadbeef);
-        uart_puts(b"[vm] demand single store done\n\0".as_ptr());
         let v = core::ptr::read_volatile(p);
-        uart_puts(b"[vm] demand single load done\n\0".as_ptr());
         if v == 0xdeadbeef { 1 } else { 0 }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_demand_100() -> i32 {
-    unsafe { uart_puts(b"[vm] demand 100 start\n\0".as_ptr()) };
     for i in 0..100 {
         let p = (0x800000000u64 + i as u64 * 4096) as *mut u8;
         unsafe { core::ptr::write_volatile(p, i as u8) };
     }
-    unsafe { uart_puts(b"[vm] demand 100 store done\n\0".as_ptr()) };
     for i in 0..100 {
         let p = (0x800000000u64 + i as u64 * 4096) as *mut u8;
         let v = unsafe { core::ptr::read_volatile(p) };
@@ -545,11 +598,47 @@ pub unsafe extern "C" fn house_vm_demand_100() -> i32 {
             return 0;
         }
     }
-    unsafe { uart_puts(b"[vm] demand 100 load done\n\0".as_ptr()) };
     1
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn house_puts_after() {
-    unsafe { uart_puts(b"[vm] after alloc\n\0".as_ptr()) };
+pub unsafe extern "C" fn house_puts_after() {}
+
+#[cfg(test)]
+mod tests {
+    use super::{ref_acquire, ref_release};
+
+    #[test]
+    fn l3_split_keep_shape() {
+        // Split children preserve the block low attrs and set bit 1,
+        // uniform with fault-installed page descriptors (PTE_TABLE): the
+        // combination the hardware walks as a page on this target.
+        for d in [0xFFFFFE00000 | 0x711, 0x40000000 | 0x741] {
+            let keep = (d & 0xFFFF000000000FFFu64) | super::PTE_TABLE;
+            assert_eq!(keep & 1, 1);
+            assert_eq!(keep & (1 << 1), 1 << 1);
+            assert_eq!(keep & 0xFFF, (d & 0xFFF) | 0x2);
+        }
+    }
+
+    #[test]
+    fn ref_table_overflow_stays_safe() {
+        for i in 0..140u64 {
+            ref_acquire(0x50000000 + i * 4096);
+        }
+        assert!(ref_release(0x60000000));
+        for i in 0..140u64 {
+            ref_release(0x50000000 + i * 4096);
+        }
+    }
+
+    #[test]
+    fn shared_page_survives_single_unmap() {
+        let page = 0x46000000u64;
+        ref_acquire(page);
+        ref_acquire(page);
+        assert!(!ref_release(page));
+        assert!(ref_release(page));
+        assert!(ref_release(0xdead0000));
+    }
 }

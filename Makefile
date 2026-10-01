@@ -135,7 +135,12 @@ rust-abi-check: volumes
 	$(RUN_IN_CONTAINER) cargo build -p house-hal --manifest-path rust/Cargo.toml --no-default-features --features riscv64
 	sh scripts/abi-symbols.sh check
 
-rust-check: volumes rust-abi-check
+HOST_TRIPLE := $(shell rustc -vV | sed -n "s/^host: //p")
+
+rust-test:
+	cargo test --manifest-path rust/Cargo.toml --target $(HOST_TRIPLE) --lib -p house-hal -p house-hal-aarch64 -p house-libc -p house-el0-tiny -- --test-threads=1
+
+rust-check: volumes rust-abi-check rust-test
 	$(RUN_IN_CONTAINER) \
 	  cargo clippy --manifest-path rust/Cargo.toml --target aarch64-unknown-none -- -D warnings
 	$(RUN_IN_CONTAINER) \
@@ -303,6 +308,11 @@ house-fd-el0-check: house-build initrd
 	expect scripts/qemu-fd-el0.exp $(SPIKE_DIR)/build/house.bin 'fd-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 IPC ping-pong (multiprocess step 6): server RECV+REPLY + client CALL via the park ring
+# EL0 TLS isolation: garbage TPIDR_EL0 + park must not compromise the kernel.
+house-tls-el0-check: house-build initrd
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-tls-el0.exp $(SPIKE_DIR)/build/house.bin 'tls-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-tls-el0.exp $(SPIKE_DIR)/build/house.bin 'tls-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
+
 house-ipc-el0-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-ipc-el0.exp $(SPIKE_DIR)/build/house.bin 'ipc-el0-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
@@ -459,6 +469,7 @@ check:
 	$(MAKE) house-initrd-check
 	$(MAKE) house-pid1-check
 	$(MAKE) house-dynamic-userspace-check
+	$(MAKE) house-tls-el0-check
 	$(MAKE) house-dynamic-root-check
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
@@ -468,4 +479,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg

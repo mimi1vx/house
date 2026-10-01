@@ -329,11 +329,26 @@ vfsForkPid parentPid childPid = do
     m <- readRef pidNs
     writeRef pidNs (Map.insert childPid childNs m)
 
--- | Release a pid's namespace binding (no backend teardown).
+{- | Release a pid's namespace binding, deleting its namespace once no
+pid references it. 'defaultNamespace' is immortal: boot mounts live there
+and unbound contexts (shell builtins, line-editor completion) use it
+without holding a pid binding, so refcounting alone would reap it under
+a live system.
+-}
 vfsReleasePid :: Int -> H ()
 vfsReleasePid pid = withQSem registrySem $ do
   m <- readRef pidNs
-  writeRef pidNs (Map.delete pid m)
+  case Map.lookup pid m of
+    Nothing -> return ()
+    Just ns -> do
+      let m' = Map.delete pid m
+      writeRef pidNs m'
+      let still = ns == defaultNamespace || ns `elem` Map.elems m'
+      if still
+        then return ()
+        else do
+          t <- readRef nsTable
+          writeRef nsTable (Map.delete ns t)
 
 -- | Resolve a path through a pid's namespace.
 vfsLookupPid :: Int -> FilePath -> H (Either FsError (FsOps, FilePath))

@@ -315,6 +315,8 @@ before use, same fail-closed pattern as the `memory`/`reg` walk.
 | `house-hal-aarch64` | `house_in_probe` | `int house_in_probe` | `house_probe.c` |
 | `house-hal-aarch64` | `house_probe_faulted` | `int house_probe_faulted` | `house_probe.c` |
 | `house-hal-aarch64` | `house_probe_recovery` | `uint64_t house_probe_recovery` | `house_probe.c` |
+| `house-hal-aarch64` | `house_probe_core` | `uint64_t house_probe_core` | `house_probe.c` |
+| `house-hal-aarch64` | `house_probe_addr` | `uint64_t house_probe_addr` | `house_probe.c` |
 | `house-hal-aarch64` | `house_ram_bytes` | `uint64_t house_ram_bytes` | `house_detect.c` |
 | `house-hal-aarch64` | `house_boot_stack_top` | `uint64_t house_boot_stack_top` | `house_detect.c` |
 | `house-hal-aarch64` | `house_smp` | `int house_smp` | `house_detect.c` |
@@ -403,6 +405,12 @@ Single owner of `#[panic_handler]` (`panic.rs`) and `__stack_chk_guard` /
 called from the HAL rearm path; `house_uptime_ns` backs timerfd pacing.
 
 ### `sys` — `tinylibc/sys.c` → `sys/mod.rs` + `sys/time.rs` + `sys/errno.rs`
+
+Signal state is a single-address-space approximation: handlers, masks, and
+pending state are process-global, not per-thread. `deliver` invokes
+`SA_SIGINFO` handlers with null info/context instead of dropping them, and
+`kill` only delivers to self (`getpid`, `-1`, `0`, `-getpid`) with `ESRCH`
+otherwise.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|

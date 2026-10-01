@@ -199,7 +199,7 @@ blkReadBlocks slot lba = do
             mg <- G.grantAlloc
             case mg of
               Left _ -> return (Left BlkNoSpace)
-              Right g -> do
+              Right g0 -> G.withGrantAllocated g0 $ \g -> do
                 let ptr = grantPage g
                 sub <- blkSubmitRead slot lba ptr
                 case sub of
@@ -228,7 +228,7 @@ blkWriteBlocks slot lba txt = do
             mg <- G.grantAlloc
             case mg of
               Left _ -> return (Left BlkNoSpace)
-              Right g -> do
+              Right g0 -> G.withGrantAllocated g0 $ \g -> do
                 fillGrant g txt
                 liftIO $ c_dc_flush (c_pagePa (grantPage g)) 4096
                 let ptr = grantPage g
@@ -261,7 +261,7 @@ blkReadBlockBytes slot lba = do
             mg <- G.grantAlloc
             case mg of
               Left _ -> return (Left BlkNoSpace)
-              Right g -> do
+              Right g0 -> G.withGrantAllocated g0 $ \g -> do
                 let ptr = grantPage g
                 sub <- blkSubmitRead slot lba ptr
                 case sub of
@@ -291,7 +291,7 @@ blkWriteBlockBytes slot lba bytes = do
             mg <- G.grantAlloc
             case mg of
               Left _ -> return (Left BlkNoSpace)
-              Right g -> do
+              Right g0 -> G.withGrantAllocated g0 $ \g -> do
                 let ptr = grantPage g
                 liftIO $ do
                   let n = min (length bytes) 4096

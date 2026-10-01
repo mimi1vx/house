@@ -1,4 +1,7 @@
-#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(
+    unsafe_op_in_unsafe_fn,
+    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
+)]
 #![allow(static_mut_refs)]
 #![allow(clippy::all)]
 //! Virtio console (ID 3) — `virtio_con.c` transliteration.

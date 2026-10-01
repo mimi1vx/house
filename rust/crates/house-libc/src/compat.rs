@@ -137,7 +137,39 @@ pub unsafe extern "C" fn ftruncate(_fd: i32, _len: i64) -> i32 {
     -1
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qsort(_base: *mut c_void, _nm: usize, _sz: usize, _cmp: *const c_void) {}
+pub unsafe extern "C" fn qsort(
+    base: *mut c_void,
+    nm: usize,
+    sz: usize,
+    cmp: Option<unsafe extern "C" fn(*const c_void, *const c_void) -> i32>,
+) {
+    // SAFETY: caller guarantees base valid for nm*sz bytes and cmp total order.
+    if base.is_null() || nm < 2 || sz == 0 || cmp.is_none() {
+        return;
+    }
+    let cmp = cmp.unwrap();
+    let n = nm.min(1024);
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 {
+            let a = unsafe { (base as *mut u8).add((j - 1) * sz) as *const c_void };
+            let b = unsafe { (base as *mut u8).add(j * sz) as *const c_void };
+            if unsafe { cmp(a, b) } <= 0 {
+                break;
+            }
+            unsafe {
+                let pa = (base as *mut u8).add((j - 1) * sz);
+                let pb = (base as *mut u8).add(j * sz);
+                for k in 0..sz {
+                    let t = *pa.add(k);
+                    *pa.add(k) = *pb.add(k);
+                    *pb.add(k) = t;
+                }
+            }
+            j -= 1;
+        }
+    }
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statfs(_p: *const u8, _b: *mut c_void) -> i32 {
     -1
@@ -151,21 +183,58 @@ pub unsafe extern "C" fn __printf_chk(_fl: i32, _fmt: *const u8) -> i32 {
     0
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __memcpy_chk(_d: *mut u8, _s: *const u8, _n: usize, _l: usize) -> *mut u8 {
-    _d
+pub unsafe extern "C" fn __memcpy_chk(d: *mut u8, s: *const u8, n: usize, l: usize) -> *mut u8 {
+    // SAFETY: caller guarantees s valid for n bytes, d valid for l bytes.
+    if n > l {
+        unsafe {
+            __assert_fail(
+                b"memcpy\0".as_ptr(),
+                b"chk\0".as_ptr(),
+                0,
+                b"__memcpy_chk\0".as_ptr(),
+            )
+        };
+    }
+    if !d.is_null() && !s.is_null() && n != 0 {
+        unsafe { core::ptr::copy_nonoverlapping(s, d, n) };
+    }
+    d
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __memmove_chk(
-    _d: *mut u8,
-    _s: *const u8,
-    _n: usize,
-    _l: usize,
-) -> *mut u8 {
-    _d
+pub unsafe extern "C" fn __memmove_chk(d: *mut u8, s: *const u8, n: usize, l: usize) -> *mut u8 {
+    // SAFETY: caller guarantees s valid for n bytes, d valid for l bytes; may overlap.
+    if n > l {
+        unsafe {
+            __assert_fail(
+                b"memmove\0".as_ptr(),
+                b"chk\0".as_ptr(),
+                0,
+                b"__memmove_chk\0".as_ptr(),
+            )
+        };
+    }
+    if !d.is_null() && !s.is_null() && n != 0 {
+        unsafe { core::ptr::copy(s, d, n) };
+    }
+    d
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __memset_chk(_d: *mut u8, _c: i32, _n: usize, _l: usize) -> *mut u8 {
-    _d
+pub unsafe extern "C" fn __memset_chk(d: *mut u8, c: i32, n: usize, l: usize) -> *mut u8 {
+    // SAFETY: caller guarantees d valid for l bytes.
+    if n > l {
+        unsafe {
+            __assert_fail(
+                b"memset\0".as_ptr(),
+                b"chk\0".as_ptr(),
+                0,
+                b"__memset_chk\0".as_ptr(),
+            )
+        };
+    }
+    if !d.is_null() && n != 0 {
+        unsafe { core::ptr::write_bytes(d, c as u8, n) };
+    }
+    d
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __assert_fail(_a: *const u8, _f: *const u8, _l: u32, _fn: *const u8) -> ! {

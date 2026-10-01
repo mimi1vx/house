@@ -10,11 +10,12 @@ module Kernel.Driver.Registry (
 )
 where
 
+import Control.Exception (onException)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Interrupts (IntId)
-import H.Monad (H)
+import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Types (DriverError (..), DriverInfo (..), DriverKind)
@@ -56,7 +57,10 @@ registerDriver name ep mIntId kind = case validDriverName name of
       else do
         let info = DriverInfo name ep kind mIntId Nothing
         writeRef drvMap (Map.insert name info m)
-        r <- NS.nsRegister name ep
+        let rollback = do
+              m2 <- readRef drvMap
+              writeRef drvMap (Map.delete name m2)
+        r <- liftIO (runH (NS.nsRegister name ep) `onException` runH rollback)
         case r of
           Right () -> return (Right ())
           Left IPC.NameExists -> do

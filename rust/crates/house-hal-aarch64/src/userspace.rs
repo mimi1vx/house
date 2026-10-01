@@ -248,6 +248,13 @@ pub unsafe extern "C" fn init_page_dir(pdir: *mut u8) {
     }
 }
 
+#[cfg(test)]
+pub(crate) unsafe fn userspace_set_recorded_for_test(pdir: *mut u8) {
+    unsafe {
+        RECORDED_PDIR = pdir;
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn current_pdir() -> *mut u8 {
     unsafe { RECORDED_PDIR }
@@ -381,6 +388,16 @@ static PDIR_WALK_LOCK: RawSpinLock = RawSpinLock::new();
 static TLB_SD_SEQ: AtomicU32 = AtomicU32::new(0);
 static TLB_SD_ACK: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
 
+#[inline]
+fn core_slot(mpidr: u64) -> usize {
+    ((mpidr & 0xFF) as usize) & 31
+}
+
+#[inline]
+fn ack_satisfies(ack: u32, seq: u32) -> bool {
+    ack.wrapping_sub(seq) < 0x80000000
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
     unsafe extern "C" {
@@ -392,9 +409,9 @@ pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
         core::arch::asm!("dsb ishst; tlbi vae1is, {0}; dsb ish; isb", in(reg) va, options(nostack, preserves_flags));
         // Broadcast SGI 1 to online cores except self; offline cores are
         // skipped so a down core never takes a shootdown IPI.
-        let mut me: u64;
-        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags));
-        let me = (me & 0xFF) as u32;
+        let mut me_raw: u64;
+        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me_raw, options(nostack, preserves_flags));
+        let me = core_slot(me_raw) as u32;
         let mask = core::ptr::read_volatile(&raw const house_smp_online_mask);
         let seq = TLB_SD_SEQ.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
         let mut pending: u32 = 0;
@@ -418,7 +435,9 @@ pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
                 let Some(bit) = 1u32.checked_shl(core) else {
                     continue;
                 };
-                if pending & bit != 0 && TLB_SD_ACK[core as usize].load(Ordering::Acquire) == seq {
+                if pending & bit != 0
+                    && ack_satisfies(TLB_SD_ACK[core as usize].load(Ordering::Acquire), seq)
+                {
                     pending &= !bit;
                 }
             }
@@ -451,23 +470,17 @@ pub unsafe extern "C" fn house_tlb_shootdown_ack(seq: u32) {
     unsafe {
         let mut me: u64;
         core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags));
-        TLB_SD_ACK[((me & 0xFF) as usize) & 31].store(seq, Ordering::Release);
+        TLB_SD_ACK[core_slot(me)].store(seq, Ordering::Release);
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
-    const MIN_V: u64 = 0x01000000;
-    // Matches mm/vm.rs HOUSE_USER_VA_MAX. Deliberately wider than
-    // Linker.maxUserEnd (4 GiB): the window also serves anonymous and
-    // demand-test mappings, and a demand-zeroed anon page and a placed image are
-    // different things. Only the linker bounds where an image may land.
-    const MAX_V: u64 = 0x1000000000;
-    // Don't handle kernel buddy region
-    if far >= 0x46000000 && far < 0x60000000 {
+    use crate::mm::vm::{HOUSE_USER_VA_MAX, HOUSE_USER_VA_MIN};
+    if crate::buddy::buddy_in_heap(far & !4095) {
         return 0;
     }
-    if far < MIN_V || far > MAX_V {
+    if far < HOUSE_USER_VA_MIN || far > HOUSE_USER_VA_MAX {
         return 0;
     }
     let pdir = unsafe { core::ptr::read_volatile(&raw const RECORDED_PDIR) };
@@ -496,7 +509,7 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
     unsafe {
         let page = buddy_alloc_page();
         if page.is_null() {
-            return 0;
+            return -12;
         }
         let l0 = pdir as *mut u64;
         let i0 = ((va >> 39) & 0x1FF) as usize;
@@ -505,7 +518,7 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             let nl1 = buddy_alloc_page() as *mut u64;
             if nl1.is_null() {
                 buddy_free_page(page);
-                return 0;
+                return -12;
             }
             for i in 0..512 {
                 *nl1.add(i) = 0;
@@ -524,7 +537,7 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             let nl2 = buddy_alloc_page() as *mut u64;
             if nl2.is_null() {
                 buddy_free_page(page);
-                return 0;
+                return -12;
             }
             for i in 0..512 {
                 *nl2.add(i) = 0;
@@ -539,7 +552,7 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             // mapping, instead of overwriting it.
             if !crate::mm::vm::vm_split_slot(s1, 1) {
                 buddy_free_page(page);
-                return 0;
+                return -12;
             }
             d1 = *s1;
             l2 = (d1 & !0xFFF) as *mut u64;
@@ -554,7 +567,7 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             let nl3 = buddy_alloc_page() as *mut u64;
             if nl3.is_null() {
                 buddy_free_page(page);
-                return 0;
+                return -12;
             }
             for i in 0..512 {
                 *nl3.add(i) = 0;
@@ -568,7 +581,7 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             // 2MB block: split, preserving the mapping.
             if !crate::mm::vm::vm_split_slot(s2, 2) {
                 buddy_free_page(page);
-                return 0;
+                return -12;
             }
             d2 = *s2;
             l3 = (d2 & !0xFFF) as *mut u64;
@@ -594,5 +607,202 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
         *l3.add(i3) = desc;
         core::arch::asm!("dsb ishst; tlbi vae1is, {0}; dsb ish; isb", in(reg) va >> 12, options(nostack, preserves_flags));
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_folds_aff0_onto_32() {
+        for mpidr in 0..=0xFFu64 {
+            let slot = core_slot(mpidr);
+            assert!(slot < 32);
+            assert_eq!(slot, ((mpidr & 0xFF) as usize) & 31);
+        }
+        assert_eq!(core_slot(0), 0);
+        assert_eq!(core_slot(31), 31);
+        assert_eq!(core_slot(32), 0);
+        assert_eq!(core_slot(0xFF), 31);
+    }
+
+    #[test]
+    fn thread_switch_frame_matches_thread_init() {
+        let sw = include_str!("../../house-libc/src/threads/switch.rs");
+        let init = include_str!("../../house-libc/src/threads/threads.rs");
+        let regs = |line: &str| -> Option<(String, String)> {
+            let line = line.trim();
+            let (op, rest) = line.split_once(char::is_whitespace)?;
+            if op != "stp" && op != "ldp" {
+                return None;
+            }
+            let rest = rest.split(',').collect::<Vec<_>>();
+            if rest.len() < 2 {
+                return None;
+            }
+            Some((
+                rest[0].trim().to_string(),
+                rest[1].split_whitespace().next()?.to_string(),
+            ))
+        };
+        let pushes: Vec<(String, String)> = sw.lines().filter_map(regs).collect();
+        // pushes: stp lines come before ldp lines in switch.rs
+        let first_ldp = sw
+            .lines()
+            .position(|l| l.trim_start().starts_with("ldp"))
+            .unwrap();
+        let mut push_seq = Vec::new();
+        let mut pop_seq = Vec::new();
+        for (i, line) in sw.lines().enumerate() {
+            if let Some(p) = regs(line) {
+                if i < first_ldp {
+                    push_seq.push(p);
+                } else {
+                    pop_seq.push(p);
+                }
+            }
+        }
+        assert!(!push_seq.is_empty());
+        let mut rev = push_seq.clone();
+        rev.reverse();
+        assert_eq!(pop_seq, rev, "switch frame must pop in reverse push order");
+        let frame_bytes = push_seq.len() * 16;
+        // x30 link slot: word index of x30 in pop order from sp.
+        let mut words = Vec::new();
+        for (a, b) in &pop_seq {
+            words.push(a.clone());
+            words.push(b.clone());
+        }
+        let link_word = words.iter().position(|r| r == "x30").expect("x30 saved");
+        let get_num = |src: &str, key: &str| -> usize {
+            let line = src
+                .lines()
+                .find(|l| l.contains(key))
+                .expect("thread init frame constant");
+            line.split(|c: char| !c.is_ascii_digit())
+                .filter(|t| !t.is_empty())
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        let get_tramp_word = || -> usize {
+            let line = init
+                .lines()
+                .find(|l| l.contains("house_thread_trampoline as"))
+                .expect("trampoline slot");
+            let after_add = line.split("sp.add(").nth(1).unwrap();
+            after_add.split(')').next().unwrap().parse().unwrap()
+        };
+        assert_eq!(get_num(init, "top = top -"), frame_bytes);
+        assert_eq!(get_tramp_word(), link_word);
+        let top_pos = init.find("top = top -").expect("frame base");
+        let zero_line = init[top_pos..]
+            .lines()
+            .find(|l| l.contains("for i in 0.."))
+            .expect("zero loop");
+        let zero_end: usize = zero_line
+            .split("0..")
+            .nth(1)
+            .unwrap()
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|t| !t.is_empty())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(zero_end, frame_bytes / 8);
+    }
+
+    #[test]
+    fn thread_switch_saves_full_callee_fp() {
+        let src = include_str!("../../house-libc/src/threads/switch.rs");
+        let mut seen = std::collections::BTreeSet::new();
+        // minimal scan for d<nn> tokens following stp/ldp
+        let mut i = 0;
+        let b = src.as_bytes();
+        while i < b.len() {
+            if b[i] == b'd' && i + 1 < b.len() && b[i + 1].is_ascii_digit() {
+                let mut j = i + 1;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if let Ok(n) = src[i + 1..j].parse::<u32>() {
+                    // only count when line contains stp or ldp
+                    let line_start = src[..i].rfind('\n').map(|k| k + 1).unwrap_or(0);
+                    let line_end = src[i..].find('\n').map(|k| i + k).unwrap_or(src.len());
+                    let line = &src[line_start..line_end];
+                    if line.contains("stp") || line.contains("ldp") {
+                        seen.insert(n);
+                    }
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        let expect: std::collections::BTreeSet<u32> = (8..=15).chain(24..=31).collect();
+        assert_eq!(seen, expect);
+    }
+
+    #[test]
+    fn oom_returns_enomem_not_not_mine() {
+        // Drain the buddy so the next fault has no page to give.
+        let mut drained: Vec<*mut u8> = Vec::new();
+        loop {
+            let p = unsafe { crate::buddy::buddy_alloc_page() };
+            if p.is_null() {
+                break;
+            }
+            drained.push(p);
+            if drained.len() > 1 << 24 {
+                break;
+            }
+        }
+        let rc = unsafe { fault_locked(core::ptr::null_mut(), 0x01000000) };
+        assert_eq!(rc, -12);
+        for p in drained {
+            unsafe { crate::buddy::buddy_free_page(p) };
+        }
+    }
+
+    #[test]
+    fn oom_propagates_through_handler() {
+        let mut drained: Vec<*mut u8> = Vec::new();
+        loop {
+            let p = unsafe { crate::buddy::buddy_alloc_page() };
+            if p.is_null() {
+                break;
+            }
+            drained.push(p);
+            if drained.len() > 1 << 24 {
+                break;
+            }
+        }
+        let fake = 0x70000000 as *mut u8;
+        unsafe { userspace_set_recorded_for_test(fake) };
+        let rc = unsafe { house_handle_user_fault(0x01000000) };
+        unsafe { userspace_set_recorded_for_test(core::ptr::null_mut()) };
+        assert_eq!(rc, -12);
+        for p in drained {
+            unsafe { crate::buddy::buddy_free_page(p) };
+        }
+    }
+
+    #[test]
+    fn slot_ignores_upper_affinity() {
+        assert_eq!(core_slot(0x0000000100000020), 0);
+        assert_eq!(core_slot(0x000000FF0000001F), 31);
+        assert_eq!(core_slot(u64::MAX), 31);
+    }
+
+    #[test]
+    fn newer_ack_satisfies_older_seq() {
+        assert!(ack_satisfies(2, 1));
+        assert!(ack_satisfies(1, 1));
+        assert!(!ack_satisfies(1, 2));
+        assert!(ack_satisfies(0, u32::MAX));
+        assert!(!ack_satisfies(u32::MAX, 0));
     }
 }

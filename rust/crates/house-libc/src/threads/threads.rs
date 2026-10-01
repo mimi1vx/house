@@ -2,7 +2,10 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
-#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(
+    unsafe_op_in_unsafe_fn,
+    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
+)]
 #![allow(static_mut_refs)]
 #![allow(suspicious_runtime_symbol_definitions)]
 #![allow(unused_assignments)]
@@ -714,12 +717,16 @@ pub unsafe extern "C" fn pthread_create(
         // SAFETY: memset sigmask 0 like C memset(&t->sigmask,0,sizeof...)
         (*t).sigmask = [0; 2];
         let top = (stack as usize + HOUSE_THREAD_STACK_BYTES) & !15;
-        let top = top - 160;
+        // Initial frame matches house_thread_switch pop order: d30-d31,
+        // d28-d29, d26-d27, d24-d25, d14-d15, d12-d13, d10-d11, d8-d9,
+        // x29-x30, x27-x28, x25-x26, x23-x24, x21-x22, x19-x20 (224 B);
+        // the link slot is word 17.
+        let top = top - 224;
         let sp = top as *mut u64;
-        for i in 0..20 {
+        for i in 0..28 {
             *sp.add(i) = 0;
         }
-        *sp.add(9) = house_thread_trampoline as *const () as usize as u64;
+        *sp.add(17) = house_thread_trampoline as *const () as usize as u64;
         (*t).sp = top as *mut u8;
         (*t).state = HOUSE_THR_RUNNABLE;
         enqueue_run_core(target, t);

@@ -214,12 +214,15 @@ house_enter_el0:
     // Preserve the AAPCS64 callee-saved regs across the EL0 session: the
     // guest may clobber x19-x28 (hello only uses x0-x2, which is why this
     // went unnoticed) and svc_exit_trampoline must see Haskell's values.
-    // Frame below x29/x30: 80 B, total 96 B (16-byte aligned).
+    // Frame below x29/x30: 80 B callee-saved + 16 B TLS slot, total 112 B (16-byte aligned).
     stp     x19, x20, [sp, #-16]!
     stp     x21, x22, [sp, #-16]!
     stp     x23, x24, [sp, #-16]!
     stp     x25, x26, [sp, #-16]!
     stp     x27, x28, [sp, #-16]!
+    mrs     x9, tpidr_el0
+    stp     x9, xzr, [sp, #-16]!
+    msr     tpidr_el0, xzr
     // set TTBR0 = pdir | (asid << 48)
     mov     x9, x2
     bfi     x9, x3, #48, #16
@@ -247,6 +250,8 @@ svc_exit_trampoline:
     isb
     // Restore the callee-saved regs stashed by house_enter_el0 (reverse
     // order), then the x29/x30 pair, and return to the Haskell FFI caller.
+    ldp     x9, xzr, [sp], #16
+    msr     tpidr_el0, x9
     ldp     x27, x28, [sp], #16
     ldp     x25, x26, [sp], #16
     ldp     x23, x24, [sp], #16
@@ -267,7 +272,7 @@ vec_fatal:
 
 // SAFETY: resume entry for parked EL0 sessions (`house_resume_el0` in
 // `house-hal-aarch64/src/svc.rs` passes save/elr/sp_el0/pdir/asid in
-// x0-x4). The callee-saved prologue matches `house_enter_el0` (96 B) so the
+// x0-x4). The callee-saved prologue matches `house_enter_el0` (112 B) so the
 // shared `svc_exit_trampoline` pops it on the next park/exit trap and `ret`s
 // to the Rust wrapper's caller. `elr` is the ELR as parked (already the next
 // pc — no +4, per the trap-resume audit); x0 is pre-staged to the resume
@@ -284,6 +289,9 @@ house_resume_asm:
     stp     x23, x24, [sp, #-16]!
     stp     x25, x26, [sp, #-16]!
     stp     x27, x28, [sp, #-16]!
+    mrs     x9, tpidr_el0
+    stp     x9, xzr, [sp, #-16]!
+    msr     tpidr_el0, xzr
     // TTBR0 = pdir | (asid << 48), full TLB flush (migration-safe)
     mov     x9, x3
     bfi     x9, x4, #48, #16

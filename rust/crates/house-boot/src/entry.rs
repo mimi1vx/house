@@ -80,7 +80,7 @@ el1_setup:
     /* SMP: check core id; non-zero cores that land on _start (not PSCI)
        spin on wfe — real secondaries arrive via secondary_entry. */
     mrs     x19, MPIDR_EL1
-    and     x19, x19, #0xff
+    and     x19, x19, #0x1f
     cbnz    x19, secondary_spin
 
     /* Primary (core 0) — Self-relocation: static link of PIC archives leaves
@@ -95,6 +95,7 @@ el1_setup:
     lsr     x5, x3, #32
     cmp     x5, #1027               /* R_AARCH64_RELATIVE */
     b.ne    3f
+    cbz     x2, 3f
     str     x4, [x2]
 3:  add     x0, x0, #24
     b       1b
@@ -146,7 +147,7 @@ secondary_spin:
     .align 12
     .global secondary_entry
 secondary_entry:
-    mov     x19, x0                 /* save core_id */
+    and     x19, x0, #0x1f          /* save core_id, clamp to 32 slots */
     msr     daifset, #0xf
 
     /* Handle EL2/EL3 if firmware entered secondary at higher EL. */

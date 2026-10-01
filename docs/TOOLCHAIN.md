@@ -39,8 +39,10 @@ and Miri use the same pinned nightly baked into the image.
 ## Gates
 
 - `make lint`: container `cargo clippy --target aarch64-unknown-none
-  -- -D warnings` (blanket pedantic rejected — intentional syscall-ABI
-  casts trip it; `--all-targets` excluded, no `test` crate on bare metal)
+  -- -D warnings` (transliteration files carry `#![allow(clippy::all)]` —
+  intentional syscall-ABI casts and `no_mangle` signatures trip default
+  correctness/style lints; narrowing to per-lint allows is in progress;
+  `--all-targets` excluded, no `test` crate on bare metal)
   + `cargo fmt --check`, plus host
   `fourmolu -m check` + `hlint` over the full tree.
 - `make miri` runs 20 pure-logic tests with `cargo miri test -p house-hal

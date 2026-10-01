@@ -188,6 +188,8 @@ house_mmu_enable_secondary
 house_mmu_map_kernel
 house_mmu_set_ttbr0
 house_mmu_update_alias
+house_probe_addr
+house_probe_core
 house_probe_faulted
 house_probe_recovery
 house_puts_after

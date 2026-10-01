@@ -1,7 +1,10 @@
 #![allow(clippy::all)]
 #![allow(unused_variables)]
 #![allow(unexpected_cfgs)]
-#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(
+    unsafe_op_in_unsafe_fn,
+    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
+)]
 #![allow(static_mut_refs)]
 #![allow(clashing_extern_declarations)]
 pub mod errno;
@@ -723,7 +726,8 @@ pub unsafe extern "C" fn getenv(n: *const u8) -> *mut u8 {
         return core::ptr::null_mut();
     }
     unsafe {
-        let s = core::ffi::CStr::from_ptr(n);
+        // SAFETY: null checked above; NUL-terminated C string per ABI.
+        let s = core::ffi::CStr::from_ptr(n.cast::<core::ffi::c_char>());
         if s.to_bytes() == b"LANG" || s.to_bytes() == b"LC_ALL" || s.to_bytes() == b"LC_CTYPE" {
             return b"C.UTF-8\0".as_ptr() as *mut u8;
         }
@@ -921,16 +925,20 @@ unsafe fn deliver(sig: i32) {
     }
     let rec = unsafe { RECORDED[sig as usize] };
     let h = rec.handler;
-    // SAFETY: check SA_SIGINFO flag and SIG_IGN (1) / SIG_DFL (0)
-    if (rec.flags & SA_SIGINFO) != 0 {
-        return;
-    }
     if h.is_null() || h as usize == 1 {
         return;
     }
-    // SAFETY: handler is valid function pointer installed via sigaction
-    let f: unsafe extern "C" fn(i32) = unsafe { core::mem::transmute(h) };
-    unsafe { f(sig) };
+    if (rec.flags & SA_SIGINFO) != 0 {
+        // SAFETY: SA_SIGINFO handler takes (sig, info, ctx); no info in this
+        // single-address-space replay, so pass nulls.
+        let f: unsafe extern "C" fn(i32, *mut c_void, *mut c_void) =
+            unsafe { core::mem::transmute(h) };
+        unsafe { f(sig, core::ptr::null_mut(), core::ptr::null_mut()) };
+    } else {
+        // SAFETY: handler is valid function pointer installed via sigaction
+        let f: unsafe extern "C" fn(i32) = unsafe { core::mem::transmute(h) };
+        unsafe { f(sig) };
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -985,7 +993,12 @@ pub unsafe extern "C" fn raise(sig: i32) -> i32 {
     0
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kill(_p: i32, sig: i32) -> i32 {
+pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
+    // Single address space: only self-directed kills are meaningful.
+    if pid != 42 && pid != -1 && pid != 0 && pid != -(42) {
+        unsafe { *__errno_location() = 3 };
+        return -1;
+    }
     unsafe { deliver(sig) };
     0
 }
@@ -1003,15 +1016,18 @@ pub unsafe extern "C" fn house_rts_tick() {
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setitimer(_w: i32, nv: *const c_void, ov: *mut c_void) -> i32 {
-    // SAFETY: nv/ov point to itimerval { it_interval, it_value } each = timeval { sec, usec }
+    // SAFETY: nv/ov point to itimerval (32 bytes: two timevals).
     if !ov.is_null() {
-        unsafe { core::ptr::write_bytes(ov as *mut u8, 0, 16) };
+        unsafe { core::ptr::write_bytes(ov as *mut u8, 0, 32) };
     }
     if !nv.is_null() {
         // SAFETY: itimerval layout: [interval_sec, interval_usec, value_sec, value_usec] as i64
         let secs = unsafe { *(nv as *const i64).add(2) } as u64;
         let usecs = unsafe { *(nv as *const i64).add(3) } as u64;
-        let ns = secs * 1000000000 + usecs * 1000;
+        let ns = secs
+            .checked_mul(1000000000)
+            .and_then(|a| usecs.checked_mul(1000).and_then(|b| a.checked_add(b)))
+            .unwrap_or(u64::MAX);
         unsafe { TICK_INTERVAL_NS = ns };
     }
     0
@@ -1021,7 +1037,7 @@ pub unsafe extern "C" fn getitimer(_w: i32, v: *mut c_void) -> i32 {
     if v.is_null() {
         return 0;
     }
-    unsafe { core::ptr::write_bytes(v as *mut u8, 0, 16) };
+    unsafe { core::ptr::write_bytes(v as *mut u8, 0, 32) };
     let ns = unsafe { TICK_INTERVAL_NS };
     unsafe {
         let p = v as *mut i64;

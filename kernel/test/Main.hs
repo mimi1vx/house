@@ -44,6 +44,7 @@ import Foreign.Ptr (plusPtr)
 import H.AdHocMem (H, allocaArray, bytesEqual, peek, poke, pokeBytes)
 import H.FileSystem qualified as FS
 import H.Monad qualified as HM
+import Kernel.Driver.Virtio.Net.Server qualified as NetServer
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types qualified as NT
 import Kernel.FileSystem.BlkPersist qualified as BP
@@ -795,6 +796,25 @@ ramfsQuotaGolden = HM.runH $ do
   RamFs.ramfsInit
   return (r == Left Vfs.ENOSPC && used == 0)
 
+vfsReleaseReapsGolden :: IO Bool
+vfsReleaseReapsGolden = do
+  a <- newMemBackend
+  HM.runH $ do
+    _ <- Vfs.vfsMount Vfs.defaultNamespace "/" a
+    _ <- Vfs.vfsWrite Vfs.defaultNamespace "/keep" [7]
+    _ <- Vfs.vfsEnsurePid 7001
+    Vfs.vfsForkPid 7001 7002
+    Vfs.vfsReleasePid 7002
+    Vfs.vfsReleasePid 7001
+    r <- Vfs.vfsRead Vfs.defaultNamespace "/keep"
+    return (r == Right [7])
+
+icmpCapGolden :: Bool
+icmpCapGolden =
+  let pairs = [((fromIntegral i, fromIntegral (i * 7)), fromIntegral i) | i <- [1 .. 10000 :: Int]]
+      m = foldl (\acc (k, n) -> NetServer.insertIcmpSeen k n acc) Map.empty pairs
+   in Map.size m <= NetServer.netIcmpCap
+
 -- Main ----------------------------------------------------------------------
 
 main :: IO ()
@@ -858,6 +878,8 @@ main = do
       , checkIO "vfs prefix routing" vfsPrefixGolden
       , checkIO "vfs dotdot per-backend" vfsDotDotGolden
       , checkIO "vfs nsFork invisibility" vfsForkGolden
+      , checkIO "vfs release reaps ns" vfsReleaseReapsGolden
+      , check "icmp cap bounded" icmpCapGolden
       , checkIO "vfs layer first hit" vfsLayerFirstHitGolden
       , checkIO "vfs layer fallback" vfsLayerFallbackGolden
       , checkIO "vfs layer order" vfsLayerOrderGolden

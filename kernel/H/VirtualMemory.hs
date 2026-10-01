@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -Wno-unused-top-binds #-}
-
 -- | Virtual Memory (section 3.2 in the paper) — aarch64 4KB granule.
 module H.VirtualMemory (
   VAddr,
@@ -28,8 +26,6 @@ import H.Utils
 foreign import ccall unsafe "house_mmu_clone_kernel_l1" c_clone_l1 :: Table -> IO ()
 
 foreign import ccall unsafe "house_mmu_clone_kernel_l2" c_clone_l2 :: Table -> IO ()
-
-foreign import ccall unsafe "house_puts_after" c_puts_after_vm :: IO ()
 
 ------------------------------- INTERFACE --------------------------------------
 
@@ -92,12 +88,15 @@ toPageMap :: PDir -> PageMap
 toPageMap = PageMap
 
 -- Descriptor bits (aarch64 4KB granule, page descriptor)
-bValid, bAF, bNG, bUXN, bPXN :: Int
+bValid, bAF, bNG :: Int
 bValid = 0
 bAF = 10
 bNG = 11
-bUXN = 54
-bPXN = 53
+
+-- Execute-never bit positions, reserved for future EXEC support.
+_bUXN, _bPXN :: Int
+_bUXN = 54
+_bPXN = 53
 
 -- SW bits for dirty/accessed structure-level round-trip (never walked by HW)
 bSwDirty, bSwAccessed, bSwCow :: Int
@@ -303,39 +302,7 @@ allocPageMap =
                 -- initPDir deferred to Process.runElf after mapping segments, to keep TTBR0 kernel during map
                 return (Just pm)
 
-freePageMap _ = return () -- nop; pdirs are freed explicitly via freePDir
-
-freePDir :: PDir -> H Bool
-freePDir l0 =
-  do
-    pdir' <- currentPDir
-    if l0 == pdir'
-      then return False
-      else do
-        d0 <- peekElemOff l0 (l0Index minVAddr)
-        case tableFromDesc d0 of
-          Nothing -> P.freePage l0 >> return True
-          Just l1 -> do
-            -- free all L2s reachable via L1 (window now up to 4GB = L1 0..3, but iterate all 512 to be safe)
-            forM_ [0 .. pageEntries - 1] $ \i1 -> do
-              d1 <- peekElemOff l1 i1
-              case tableFromDesc d1 of
-                Just l2 | P.validPage l2 -> do
-                  forM_ [0 .. pageEntries - 1] $ \i2 -> do
-                    d2 <- peekElemOff l2 i2
-                    case tableFromDesc d2 of
-                      Just l3 | P.validPage l3 -> P.freePage l3
-                      _ -> return ()
-                  P.freePage l2
-                _ -> return ()
-            P.freePage l1
-            P.freePage l0
-            return True
-
-foreign import ccall unsafe "init_page_dir" initPDirIO :: PDir -> IO ()
-
-initPDir :: PDir -> H ()
-initPDir = liftIO . initPDirIO
+freePageMap _ = return () -- nop; pdirs are freed explicitly via Process.freePDir
 
 foreign import ccall unsafe "current_pdir" currentPDirIO :: IO PDir
 

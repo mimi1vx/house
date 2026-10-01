@@ -31,9 +31,7 @@ const IPC_GRANT_MAP: u32 = 0x14;
 const IPC_MAX_WORDS: u64 = 8;
 // Single-page cap for `house_ipc_copy_msg` (grant moves are page-sized).
 const IPC_MAX_COPY: usize = 4096;
-// TTBR0 user window (see `svc.rs` `validate_user_buffer`).
-const USER_LO: u64 = 0x01000000;
-const USER_HI: u64 = 0x1000000000;
+use crate::mm::vm::{HOUSE_USER_VA_MAX, HOUSE_USER_VA_MIN};
 
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
@@ -140,11 +138,7 @@ pub unsafe extern "C" fn house_ipc_should_park(op: u32, x1: u64, x2: u64) -> i32
 }
 
 fn range_in_window(ptr: u64, end: u64) -> bool {
-    if ptr < USER_HI {
-        ptr >= USER_LO && end <= USER_HI && end >= ptr
-    } else {
-        end >= ptr
-    }
+    ptr >= HOUSE_USER_VA_MIN && end <= HOUSE_USER_VA_MAX.wrapping_add(1) && end >= ptr
 }
 
 #[unsafe(no_mangle)]
@@ -170,7 +164,7 @@ pub unsafe extern "C" fn house_ipc_copy_msg(src: *const u8, dst: *mut u8, len: u
         return;
     }
     // SAFETY: non-null, `len <= IPC_MAX_COPY`, no wrap on `+len`, both ranges
-    // inside the user window (or kernel-high with no wrap); byte copy needs no
+    // inside the user window; byte copy needs no
     // overlap precondition and `dmb ish` ordering is preserved.
     unsafe {
         core::arch::asm!("dmb ish", options(nostack, preserves_flags));
@@ -179,5 +173,69 @@ pub unsafe extern "C" fn house_ipc_copy_msg(src: *const u8, dst: *mut u8, len: u
             *dst.add(i) = *src.add(i);
         }
         core::arch::asm!("dmb ish", options(nostack, preserves_flags));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        HOUSE_USER_VA_MAX, HOUSE_USER_VA_MIN, inline_words_ok, range_in_window, validate_ipc,
+    };
+
+    #[test]
+    fn high_kernel_ptr_rejected() {
+        assert!(!range_in_window(0x8000000000, 0x8000001000));
+        assert!(!range_in_window(0x4200000000, 0x4200001000));
+    }
+
+    #[test]
+    fn inline_words_gate_counts() {
+        unsafe {
+            assert_eq!(inline_words_ok(0x01000000, 9), super::EINVAL);
+            assert_eq!(inline_words_ok(0x01000000, 0), 0);
+            assert_eq!(inline_words_ok(0x01000000, 1), super::EFAULT);
+        }
+    }
+
+    #[test]
+    fn ipc_gate_routes_ops() {
+        unsafe {
+            assert_eq!(super::validate_ipc(0xFF, 0, 0), super::EINVAL);
+            assert_eq!(
+                super::validate_ipc(super::IPC_RECV, 0, 0),
+                super::VALID_PARK
+            );
+            assert_eq!(
+                super::validate_ipc(super::IPC_GRANT_MAP, 0x01000001, 0),
+                super::EINVAL
+            );
+            assert_eq!(
+                super::validate_ipc(super::IPC_GRANT_MAP, 0x01000000, 2),
+                super::EINVAL
+            );
+            assert_eq!(
+                super::validate_ipc(super::IPC_SEND, 0x01000000, 1),
+                super::EFAULT
+            );
+        }
+    }
+
+    #[test]
+    fn window_edges_agree() {
+        assert_eq!(HOUSE_USER_VA_MIN, 0x01000000);
+        assert_eq!(HOUSE_USER_VA_MAX, 0x1000000000);
+        assert!(range_in_window(HOUSE_USER_VA_MIN, HOUSE_USER_VA_MIN + 8));
+        assert!(range_in_window(
+            HOUSE_USER_VA_MAX - 8,
+            HOUSE_USER_VA_MAX + 1
+        ));
+        assert!(!range_in_window(
+            HOUSE_USER_VA_MIN - 1,
+            HOUSE_USER_VA_MIN + 8
+        ));
+        assert!(!range_in_window(
+            HOUSE_USER_VA_MAX + 1,
+            HOUSE_USER_VA_MAX + 9
+        ));
     }
 }

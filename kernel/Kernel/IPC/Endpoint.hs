@@ -1,8 +1,8 @@
 {- | L4 sync rendezvous Endpoint — bounded queue 32, QSem+MVar.
 Send blocks until paired recv/reply; trySend is non-blocking fire-and-forget.
-Capability slice (Track S, log-only): 'newEndpoint' mints an owner 'CapToken';
-'checkCap'/'nsLookupChecked' log mismatches to dmesg but still allow, so no
-gate bricks until a deny-by-default landing proves green on both accels.
+'newEndpoint' mints an owner 'CapToken' distinct from the public id;
+'checkCap' denies mismatches. The EL0 trap path still resolves by numeric id
+(token-checked lookup rides a later slice).
 -}
 module Kernel.IPC.Endpoint (
   newEndpoint,
@@ -23,7 +23,8 @@ where
 
 import Control.Concurrent (MVar, tryPutMVar)
 import Control.Concurrent qualified as C
-import Control.Exception (bracketOnError)
+import Control.Exception (bracketOnError, onException)
+import Data.Bits (shiftR, xor)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word64)
@@ -42,6 +43,8 @@ import Kernel.IPC.Types (
   Message (..),
  )
 import System.Timeout qualified as T
+
+foreign import ccall unsafe "house_uptime_ns" c_uptime_ns :: IO Word64
 
 -- | Maximum rendezvous queued per endpoint (HIGH OOM bound).
 maxQueueDepth :: Int
@@ -72,9 +75,20 @@ endpointSem = unsafePerformH $ newQSem 1
 nextEpId :: Ref Word64
 nextEpId = unsafePerformH $ newRef 0
 
--- | Owner capability token minted per endpoint (Track S, log-only slice).
+-- | Owner capability token minted per endpoint, never equal to the public id.
 newtype CapToken = CapToken Word64
   deriving (Eq, Show)
+
+{-# NOINLINE capSecret #-}
+capSecret :: Ref Word64
+capSecret = unsafePerformH $ newRef 0
+
+splitMix64 :: Word64 -> Word64
+splitMix64 z =
+  let z1 = (z + 0x9E3779B97F4A7C15) * 0xBF58476D1CE4E5B9
+      z2 = (z1 `xor` (z1 `shiftR` 30)) * 0xBF58476D1CE4E5B9
+      z3 = z2 `xor` (z2 `shiftR` 31)
+   in z3
 
 {-# NOINLINE endpointOwner #-}
 endpointOwner :: Ref (Map EndpointId CapToken)
@@ -94,7 +108,10 @@ logCap why = do
     return c'
   Dmesg.dmesgLog ("ipc cap[" ++ show n ++ "]: " ++ why)
 
--- | Create a new endpoint (capability). Id + owner token minted under QSem.
+{- | Create a new endpoint (capability). Id is public and sequential; the
+owner token mixes a per-boot secret sampled from uptime, so it is distinct
+from the id and not derivable from it alone.
+-}
 newEndpoint :: H Endpoint
 newEndpoint = withQSem endpointSem $ do
   n <- readRef nextEpId
@@ -102,7 +119,20 @@ newEndpoint = withQSem endpointSem $ do
   let eid = EndpointId n
   st <- newRef (EndpointState [])
   modifyRef endpointTable (Map.insert eid st)
-  modifyRef endpointOwner (Map.insert eid (CapToken n))
+  sec <- readRef capSecret
+  sec' <-
+    if sec == 0
+      then do
+        t <- liftIO c_uptime_ns
+        let s = if t == 0 then 0x243F6A8885A308D3 else t
+        writeRef capSecret s
+        return s
+      else return sec
+  let tok = CapToken (splitMix64 (sec' + n * 0x9E3779B97F4A7C15 + 1))
+  liftIO
+    ( runH (modifyRef endpointOwner (Map.insert eid tok))
+        `onException` runH (modifyRef endpointTable (Map.delete eid))
+    )
   return (Endpoint eid)
 
 -- | Destroy endpoint, waking pending senders with NoSuchEndpoint and freeing grant pages.
@@ -137,9 +167,8 @@ endpointToken (Endpoint eid) = withQSem endpointSem $ do
   m <- readRef endpointOwner
   return (Map.lookup eid m)
 
-{- | Capability check, log-only: anonymous (Nothing) stays silent for compat;
-a wrong token or freed id logs to dmesg but still allows. Deny-by-default
-lands once ipc ping/grant stay green on both accels with this on.
+{- | Capability check: anonymous (Nothing) stays silent for compat; a wrong
+token or freed id logs and denies.
 -}
 checkCap :: Endpoint -> Maybe CapToken -> H Bool
 checkCap ep@(Endpoint eid) mtok = case mtok of
@@ -148,7 +177,7 @@ checkCap ep@(Endpoint eid) mtok = case mtok of
     owned <- endpointToken ep
     case owned of
       Just o | o == t -> return True
-      _ -> do logCap ("mismatch ep=" ++ show eid); return True
+      _ -> do logCap ("mismatch ep=" ++ show eid); return False
 
 -- | Blocking send: enqueue and wait for reply. Returns Left on QueueFull or NoSuchEndpoint.
 send :: Endpoint -> Message -> H (Either IpcError Message)

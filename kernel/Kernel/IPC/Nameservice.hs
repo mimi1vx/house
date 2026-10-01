@@ -1,8 +1,8 @@
 {- | Well-known name registry (String -> Endpoint) + delegatable caps.
 Names ≤255, no empty or '/' per H.FileSystem.splitPath style.
 Lock order: nsSem -> epSem (never hold epSem across nsRegister).
-Capability slice (Track S, log-only): 'nsLookupChecked' runs 'checkCap'
-(dmesg on mismatch, still allows) so violations are visible pre-deny.
+Capability enforcement: 'nsLookupChecked' runs 'checkCap'
+(denies with NotOwner on mismatch).
 -}
 module Kernel.IPC.Nameservice (
   nsRegister,
@@ -58,14 +58,16 @@ nsLookup name = withQSem nsSem $ do
   return (Map.lookup name m)
 
 {- | Checked lookup: miss logs to dmesg (maps to NoSuchEndpoint at the trap
-boundary); hit runs 'checkCap' (log-only, still allows on mismatch).
+boundary); hit denies on capability mismatch (NotOwner).
 -}
 nsLookupChecked :: String -> Maybe CapToken -> H (Either IpcError Endpoint)
 nsLookupChecked name mtok = do
   mep <- nsLookup name
   case mep of
     Nothing -> do Dmesg.dmesgLog ("ns miss: " ++ take 64 name); return (Left NameNotFound)
-    Just ep -> do _ <- checkCap ep mtok; return (Right ep)
+    Just ep -> do
+      ok <- checkCap ep mtok
+      if ok then return (Right ep) else return (Left NotOwner)
 
 -- | Unregister name.
 nsUnregister :: String -> H (Either IpcError ())

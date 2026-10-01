@@ -17,6 +17,10 @@ house_thread_switch:
     stp d10, d11, [sp, #-16]!
     stp d12, d13, [sp, #-16]!
     stp d14, d15, [sp, #-16]!
+    stp d24, d25, [sp, #-16]!
+    stp d26, d27, [sp, #-16]!
+    stp d28, d29, [sp, #-16]!
+    stp d30, d31, [sp, #-16]!
     mov x2, sp
     str x2, [x0]
     mrs x2, tpidr_el0
@@ -28,6 +32,10 @@ house_thread_switch:
     msr tpidr_el0, x2
     isb
     dsb sy
+    ldp d30, d31, [sp], #16
+    ldp d28, d29, [sp], #16
+    ldp d26, d27, [sp], #16
+    ldp d24, d25, [sp], #16
     ldp d14, d15, [sp], #16
     ldp d12, d13, [sp], #16
     ldp d10, d11, [sp], #16

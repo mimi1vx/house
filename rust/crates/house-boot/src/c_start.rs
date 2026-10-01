@@ -1,4 +1,7 @@
-#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(
+    unsafe_op_in_unsafe_fn,
+    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
+)]
 #![allow(static_mut_refs)]
 #![allow(clippy::manual_c_str_literals)]
 #![allow(clippy::missing_safety_doc)]
@@ -16,6 +19,8 @@
 //! this crate supplies `c_start` symbols and `build/c_start.o` is not linked.
 
 use core::sync::atomic::Ordering;
+
+use house_hal_aarch64::mm::vm::{HOUSE_USER_VA_MAX, HOUSE_USER_VA_MIN};
 
 core::arch::global_asm!(
     r#"
@@ -65,6 +70,8 @@ unsafe extern "C" {
     static mut house_in_probe: i32;
     static mut house_probe_recovery: u64;
     static mut house_probe_faulted: i32;
+    static mut house_probe_core: u64;
+    static mut house_probe_addr: u64;
     fn uart_init();
     fn uart_puts(s: *const u8);
     fn uart_putc(c: u8);
@@ -92,6 +99,7 @@ unsafe extern "C" {
     fn psci_cpu_off() -> i64;
     fn house_smp_should_off(core: u32) -> i32;
     fn house_handle_user_fault(far: u64) -> i32;
+    fn current_pdir() -> *mut u8;
     fn house_tlb_shootdown_seq() -> u32;
     fn house_tlb_shootdown_ack(seq: u32);
     fn house_is_ro_page(va: u64) -> i32;
@@ -155,27 +163,74 @@ pub unsafe extern "C" fn c_handle_sync(
     gpr: *mut u64,
     _fpi: *mut u8,
 ) -> u64 {
-    // probe guard: house_in_probe && (ec 0x24/0x25) → skip 4B
-    // SAFETY: house_in_probe is i32 single-def in probe.rs, reads volatile-safe (single writer).
-    let in_probe = unsafe { core::ptr::read_volatile(&raw const house_in_probe) } != 0;
+    // probe guard: in-probe data abort on the probing core at the recorded
+    // address → record and skip 4B. Anything else stays fatal.
+    // SAFETY: probe globals single-writer (probing core), volatile reads.
     let ec = ((esr >> 26) & 0x3f) as u32;
+    let in_probe = unsafe { core::ptr::read_volatile(&raw const house_in_probe) } != 0;
     if in_probe && (ec == 0x24 || ec == 0x25) {
+        let mut me: u64;
         unsafe {
-            core::ptr::write_volatile(&raw mut house_probe_faulted, 1);
-            core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+            core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags))
+        };
+        let probe_core = unsafe { core::ptr::read_volatile(&raw const house_probe_core) };
+        let probe_addr = unsafe { core::ptr::read_volatile(&raw const house_probe_addr) };
+        if (me & 0xFF) == probe_core && far == probe_addr {
+            unsafe {
+                core::ptr::write_volatile(&raw mut house_probe_faulted, 1);
+                core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+            }
+            return elr.wrapping_add(4);
         }
-        return elr.wrapping_add(4);
     }
-    // demand pager: EL1 faults on TTBR0 user VA (see mm/vm.rs HOUSE_USER_VA_MAX)
+    // demand pager: faults on TTBR0 user VA against the recorded table.
+    // Both the RTS heap (EL1, kernel root) and EL0 processes page through
+    // this path, so the gate is table ownership, not exception level: a fault
+    // whose TTBR0 is not the recorded table is serviced nowhere instead of
+    // corrupting the wrong table.
     {
         let is_data_abort = ec == 0x24 || ec == 0x25;
         let is_insn_abort = ec == 0x20 || ec == 0x21;
-        if (is_data_abort || is_insn_abort) && (0x01000000u64..=0x1000000000u64).contains(&far) {
+        let ttbr0: u64;
+        unsafe {
+            core::arch::asm!("mrs {0}, ttbr0_el1", out(reg) ttbr0, options(nostack, preserves_flags))
+        };
+        let recorded = unsafe { current_pdir() } as u64;
+        let owns_table =
+            (ttbr0 & 0x0000FFFFFFFFF000) == (recorded & 0x0000FFFFFFFFF000) && recorded != 0;
+        if owns_table
+            && (is_data_abort || is_insn_abort)
+            && (HOUSE_USER_VA_MIN..=HOUSE_USER_VA_MAX).contains(&far)
+        {
             // SAFETY: house_handle_user_fault allocates via buddy, sets PTE, uses dsb/isb.
+            // 1 paged, -12 out of memory (park for the supervisor to kill),
+            // 0 not ours.
             let handled = unsafe { house_handle_user_fault(far) };
-            if handled != 0 {
+            if handled == 1 {
                 unsafe { core::arch::asm!("dsb ish; isb", options(nostack, preserves_flags)) };
                 return elr;
+            }
+            if handled == -12 && !gpr.is_null() {
+                let sp_el0: u64;
+                // SAFETY: mrs sp_el0 at EL1 handler.
+                unsafe {
+                    core::arch::asm!("mrs {0}, sp_el0", out(reg) sp_el0, options(nostack, preserves_flags))
+                };
+                // SAFETY: gpr is the 896B frame; park copies it with a bounded scan.
+                let parked = unsafe { house_el0_park_fault(elr, sp_el0, gpr as *const u64, far) };
+                if parked != 0 {
+                    // SAFETY: ttbr0_l0 is kernel L0, EL1 only.
+                    unsafe {
+                        house_set_recorded_pdir(ttbr0_l0.as_mut_ptr() as *mut u8);
+                        core::arch::asm!("msr ttbr0_el1, {0}", in(reg) ttbr0_l0.as_ptr() as u64, options(nostack, preserves_flags));
+                        core::arch::asm!(
+                            "dsb ish; tlbi vmalle1is; dsb ish; isb",
+                            options(nostack, preserves_flags)
+                        );
+                        core::arch::asm!("msr spsr_el1, {0}", in(reg) 0x3c5u64, options(nostack, preserves_flags));
+                    }
+                    return svc_exit_trampoline as *const () as u64;
+                }
             }
         }
     }
@@ -187,7 +242,7 @@ pub unsafe extern "C" fn c_handle_sync(
         let is_permission = (0x0C..=0x0F).contains(&dfsc);
         let wnr = ((esr >> 6) & 1) != 0;
         if (is_data_abort || is_insn_abort) && is_permission && wnr {
-            if (0x01000000u64..=0x1000000000u64).contains(&far) {
+            if (HOUSE_USER_VA_MIN..=HOUSE_USER_VA_MAX).contains(&far) {
                 // SAFETY: checks PTE AP bits.
                 let is_ro = unsafe { house_is_ro_page(far) } != 0;
                 if is_ro {
@@ -195,6 +250,11 @@ pub unsafe extern "C" fn c_handle_sync(
                     // faulting store retries after resume (ELR as-delivered,
                     // never +4). Same trampoline path as the svc parks, so the
                     // RTS capability is freed while Haskell handles the fault.
+                    // A plain RO store (loader stub writability probe,
+                    // mprotect text) is refused by skipping it: stores have no
+                    // errno channel, and the refusal is observable by
+                    // read-back. Parking those would livelock the stub loop,
+                    // which retries at the faulting address.
                     // SAFETY: PTE SW-bit read only, no locks or allocation.
                     let is_cow = unsafe { house_is_cow_page(far) } != 0;
                     if is_cow && !gpr.is_null() {
@@ -221,25 +281,7 @@ pub unsafe extern "C" fn c_handle_sync(
                             return svc_exit_trampoline as *const () as u64;
                         }
                     }
-                    unsafe {
-                        uart_puts(b"[demand] perm fault RO far=\0".as_ptr());
-                        puthex(far);
-                        uart_puts(b" DFSC=\0".as_ptr());
-                        puthex(dfsc);
-                        uart_puts(b" ESR=\0".as_ptr());
-                        puthex(esr);
-                        uart_puts(b"\n\0".as_ptr());
-                        core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
-                    }
                     return elr.wrapping_add(4);
-                } else {
-                    unsafe {
-                        uart_puts(b"[demand] perm fault far=\0".as_ptr());
-                        puthex(far);
-                        uart_puts(b" DFSC=\0".as_ptr());
-                        puthex(dfsc);
-                        uart_puts(b"\n\0".as_ptr());
-                    }
                 }
             }
         }
@@ -630,7 +672,7 @@ pub unsafe extern "C" fn c_start_secondary(core_id: u64) {
         // Atomic OR online mask
         {
             let ptr = &raw mut house_smp_online_mask as *mut core::sync::atomic::AtomicU32;
-            (*ptr).fetch_or(1u32 << core, Ordering::SeqCst);
+            (*ptr).fetch_or(1u32.checked_shl(core).unwrap_or(0), Ordering::SeqCst);
             core::arch::asm!("dmb sy; dsb sy; sev", options(nostack, preserves_flags));
         }
         uart_puts(b"[house] secondary core=\0".as_ptr());

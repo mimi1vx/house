@@ -18,11 +18,23 @@ pub static mut house_in_probe: i32 = 0;
 pub static mut house_probe_recovery: u64 = 0;
 #[unsafe(no_mangle)]
 pub static mut house_probe_faulted: i32 = 0;
+#[unsafe(no_mangle)]
+pub static mut house_probe_core: u64 = 0;
+#[unsafe(no_mangle)]
+pub static mut house_probe_addr: u64 = 0;
+static mut PROBE_NEST: u32 = 0;
 
 #[inline(never)]
 unsafe fn probe_addr(addr: u64) -> bool {
-    // SAFETY: sets house_in_probe and recovery, then LDR that may fault. c_handle_sync checks house_in_probe and DFSC 0x04..0x07.
+    // SAFETY: records core + probed address with a nesting count, then LDR
+    // that may fault. The handler only swallows a data abort (EC 0x24/0x25)
+    // on the probing core with FAR equal to the recorded address.
     unsafe {
+        let mut me: u64;
+        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags));
+        house_probe_core = me & 0xFF;
+        house_probe_addr = addr;
+        PROBE_NEST = PROBE_NEST.saturating_add(1);
         house_in_probe = 1;
         core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
         let after: u64;
@@ -39,7 +51,10 @@ unsafe fn probe_addr(addr: u64) -> bool {
             tmp = inout(reg) tmp,
             options(nostack),
         );
-        house_in_probe = 0;
+        PROBE_NEST = PROBE_NEST.saturating_sub(1);
+        if PROBE_NEST == 0 {
+            house_in_probe = 0;
+        }
         let f = house_probe_faulted;
         house_probe_faulted = 0;
         if f != 0 {
