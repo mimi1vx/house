@@ -84,6 +84,7 @@ audit_symbols() {
 	artifact=$1
 	expected=${2:-$WORK/expected-exports}
 	expected_undefined=${3:-$WORK/expected-undefined-none}
+	want_unwind=${4:-1}
 	nm -D --undefined-only --format=posix "$artifact" 2>/dev/null |
 		awk 'NF {print $1}' | LC_ALL=C sort >"$WORK/actual-undefined"
 	if ! cmp -s "$expected_undefined" "$WORK/actual-undefined"; then
@@ -92,12 +93,16 @@ audit_symbols() {
 		return 1
 	fi
 	nm -D --defined-only --format=posix "$artifact" | awk '{print $1}' | LC_ALL=C sort >"$WORK/actual-exports"
-	n_unwind=$(grep -c 'rust_begin_unwind$' "$WORK/actual-exports" || true)
-	if [ "$n_unwind" != 1 ]; then
-		echo "dynamic-elf-check: want exactly one rust_begin_unwind export in $artifact" >&2
-		return 1
+	if [ "$want_unwind" = 1 ]; then
+		n_unwind=$(grep -c 'rust_begin_unwind$' "$WORK/actual-exports" || true)
+		if [ "$n_unwind" != 1 ]; then
+			echo "dynamic-elf-check: want exactly one rust_begin_unwind export in $artifact" >&2
+			return 1
+		fi
+		grep -v 'rust_begin_unwind$' "$WORK/actual-exports" >"$WORK/actual-exports-stable" || true
+	else
+		cp "$WORK/actual-exports" "$WORK/actual-exports-stable"
 	fi
-	grep -v 'rust_begin_unwind$' "$WORK/actual-exports" >"$WORK/actual-exports-stable" || true
 	if ! cmp -s "$expected" "$WORK/actual-exports-stable"; then
 		echo "dynamic-elf-check: export-set drift in $artifact" >&2
 		diff -u "$expected" "$WORK/actual-exports-stable" >&2 || true
@@ -190,6 +195,7 @@ check_soname() {
 	expected_exports=$3
 	expected_undefined=$4
 	expected_needed=$5
+	want_unwind=${6:-1}
 	soname=$(readelf -dW "$artifact" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
 	[ "$soname" = "$expected" ] || {
 		echo "dynamic-elf-check: SONAME allowlist failed: $soname" >&2
@@ -200,7 +206,7 @@ check_soname() {
 		echo "dynamic-elf-check: shared library has a forbidden dependency" >&2
 		exit 1
 	fi
-	audit_symbols "$artifact" "$expected_exports" "$expected_undefined"
+	audit_symbols "$artifact" "$expected_exports" "$expected_undefined" "$want_unwind"
 	audit_common "$artifact"
 }
 
@@ -332,7 +338,7 @@ EOF
 check_soname "$A/$SONAME" "$SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
 check_house_image
 
-check_soname "$A/$MID_SONAME" "$MID_SONAME" "$WORK/expected-exports-mid" "$WORK/expected-undefined-mid" "$SONAME "
+check_soname "$A/$MID_SONAME" "$MID_SONAME" "$WORK/expected-exports-mid" "$WORK/expected-undefined-mid" "$SONAME " 0
 check_soname "$A/$MISSING_SONAME" "$MISSING_SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
 check_hello "$A/hello-dyn" "$SONAME"
 check_hello "$A/$INIT_MAIN" "$SONAME"
