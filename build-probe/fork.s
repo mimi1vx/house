@@ -1,4 +1,4 @@
-// EL0 fork/wait probe (plans/multiprocess.md step 9) + COW divergence
+// EL0 fork/wait probe + COW divergence
 // (step 10). Scratch is zeroed pre-fork so the share walk maps it shared;
 // after fork each side stores a distinct halfword and reads it back. A
 // skipped store (plain-RO fault, no COW break) reads back stale data and

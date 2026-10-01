@@ -1,4 +1,7 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "console entry point mirrors C provenance"
+)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_print(s: *const u8) {
     if s.is_null() {

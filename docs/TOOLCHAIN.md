@@ -39,10 +39,10 @@ and Miri use the same pinned nightly baked into the image.
 ## Gates
 
 - `make lint`: container `cargo clippy --target aarch64-unknown-none
-  -- -D warnings` (transliteration files carry `#![allow(clippy::all)]` —
-  intentional syscall-ABI casts and `no_mangle` signatures trip default
-  correctness/style lints; narrowing to per-lint allows is in progress;
-  `--all-targets` excluded, no `test` crate on bare metal)
+  -- -D warnings` (transliteration files carry per-lint `#![allow]`
+  with a `reason` — syscall-ABI casts, `no_mangle` signatures, and C-mirror
+  control flow trip default correctness/style lints; `--all-targets`
+  excluded, no `test` crate on bare metal)
   + `cargo fmt --check`, plus host
   `fourmolu -m check` + `hlint` over the full tree.
 - `make miri` runs 20 pure-logic tests with `cargo miri test -p house-hal
@@ -55,13 +55,16 @@ and Miri use the same pinned nightly baked into the image.
   pays for the sysroot build.
 - `make haskell-check`: full-tree fourmolu+hlint + `cabal build all
   --enable-tests` + `cabal test all` (test-only package needs the flag).
-- `make check`: doctor + spike + irq + house + shell + posix + initrd +
-  pid1 + dynamic userspace + mounted-root dynamic + rust (clippy + fmt +
-  deny + abi) + haskell + el0tiny + dynamic ELF,
+- `make check`: the 19 gates named by the banner (doctor, gate-coverage,
+  spike, irq, house, shell, posix, initrd, pid1, dynamic userspace,
+  fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic,
+  rust (clippy + fmt + deny + abi), haskell, el0tiny, dynamic ELF),
   hvf+tcg where applicable.
 - `make check-tcg`: the check legs with `TCG_ONLY=1` (Linux CI has no nested
   virt, so the hvf halves are skipped), minus house-dynamic-root-check,
-  which needs QEMU 11+ for virtio-mmio-transports.
+  which needs QEMU 11+ for virtio-mmio-transports. The remaining focused
+  gates run in nightly (`house-fs/ipc/driver/virtio-*/userspace/fd-el0/
+  fork/proc`, `smp-check`, `smp-hotplug-check` plus the scaling/memory/Miri legs).
 
 ## Linker
 
@@ -95,7 +98,7 @@ on named volumes.
 ## Host-side setup (not baked into the image)
 
 ```sh
-brew install qemu expect                        # QEMU 11.1.1, expect 5.45
+brew install qemu expect socat                      # QEMU 11.1.1, expect 5.45, socat for virtio-con
 container builder start -c 4 -m 4G              # 4 CPU / 4 GB floor (Apple path)
 ```
 

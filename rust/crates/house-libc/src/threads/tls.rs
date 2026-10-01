@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 core::arch::global_asm!(
     r#"
     .text

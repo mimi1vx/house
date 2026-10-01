@@ -251,6 +251,9 @@ Unknown `imm` is rejected; user pointers are validated before copy.
 | `house-hal-aarch64` | `house_el0_set_entry` | `int house_el0_set_entry(void *pdir, uint64_t entry, uint64_t sp)` | `svc.rs` (new: redirect parked session at entry/sp for exec, regs cleared; `0` ok / `-22` unknown slot) |
 | `house-hal-aarch64` | `house_el0_park_fault` | `int house_el0_park_fault(uint64_t elr, uint64_t sp_el0, const uint64_t *gpr, uint64_t far)` | `svc.rs` (new: park an RO write to a COW page as request `0x1F` with the page-aligned fault VA; ELR as-delivered so resume retries; `1` parked / `0` unknown slot) |
 | `house-hal-aarch64` | `house_el0_park_kill` | `int house_el0_park_kill(uint64_t elr, uint64_t sp_el0, const uint64_t *gpr, uint64_t far)` | `svc.rs` (new: park an unhandled EL0 abort as request `0x1D` with the page-aligned VA so Haskell reaps the pid instead of halting; `1` parked / `0` unknown slot) |
+| `house-hal-aarch64` | `house_el0_park_pipe_fd` | `int house_el0_park_pipe_fd(void)` | `svc.rs` (new: park-notify pipe read end, separate from the IRQ pipe so device IRQ drain accounting stays honest; lazily created, `-1` until first park) |
+| `house-hal-aarch64` | `house_el0_park_pipe_readable` | `int house_el0_park_pipe_readable(int fd)` | `svc.rs` (new: pipe readability probe for the park pipe) |
+| `house-hal-aarch64` | `house_el0_park_pipe_drain` | `void house_el0_park_pipe_drain(void)` | `svc.rs` (new: drain the park pipe after consuming a park request) |
 | `house-hal-aarch64` | `house_sched_set_runnable` | `void house_sched_set_runnable(uint64_t n)` | `svc.rs` (new: Haskell-advertised oversubscription for the timer-preempt gate; atomic store) |
 | `house-hal-aarch64` | `house_sched_set_quantum` | `void house_sched_set_quantum(uint64_t n)` | `svc.rs` (new: preempt quantum in ticks, `0` means 1; atomic store) |
 | `house-hal-aarch64` | `house_sched_tick_preempt` | `int house_sched_tick_preempt(uint64_t *gpr, uint64_t elr, uint64_t sp_el0, int is_el0)` | `svc.rs` (new: timer-IRQ quantum countdown, parks the EL0 frame as `0x1E` on expiry with oversubscription; `1` parked / `0` keep running; lock-free) |
@@ -487,6 +490,7 @@ otherwise.
 | `house-libc` | `sched_yield` / `sched_getaffinity` / `sched_setaffinity` | `int sched_yield(void)` etc. | `threads.c` |
 | `house-libc` | `pthread_sigmask` | `int pthread_sigmask(int how, const sigset_t *set, sigset_t *old)` | `threads.c` |
 | `house-libc` | `nanosleep` / `poll` / `select` / `pause` | `int nanosleep(...)` etc. | `threads.c` |
+| `house-libc` | `house_pipe_wait` | `int house_pipe_wait(int fd, uint64_t timeout_us)` | `threads.rs` (new: single-fd `wfe` wait extracted from `poll` so Haskell blocks instead of polling; `1` readable / `0` timeout) |
 | `house-libc` | `house_spin_init` | `void house_spin_init(uint32_t *l)` | `spinlock.h` |
 | `house-libc` | `house_spin_lock` | `void house_spin_lock(uint32_t *l)` | `spinlock.h` |
 | `house-libc` | `house_spin_trylock` | `int house_spin_trylock(uint32_t *l)` | `spinlock.h` |

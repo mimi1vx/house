@@ -1,4 +1,4 @@
-#![allow(clippy::all)]
+#![allow(clippy::missing_safety_doc, reason = "math shims mirror C headers")]
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn ldexp(x: f64, _e: i32) -> f64 {
     x

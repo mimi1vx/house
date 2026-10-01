@@ -13,7 +13,7 @@ A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3
 ### Toolchain
 
 * Build container `house-port:latest` (Debian 13, nightly Rust with `aarch64-unknown-none` and Miri, plus GHC 9.14.1 aarch64 via GHCup). Firmware compilation runs through `$(RUNNER) run --platform linux/arm64 ...` (Apple `container` on macOS, Docker on Linux; see `Containerfile`); host-side Haskell formatting, linting, and pure tests are the exception. The sole `CONTAINER_DEFAULT_PLATFORM=linux/arm64` assignment is local to the Apple `container build` command in `Makefile`; never export it globally. Each `run` pins `--platform linux/arm64`, and image inspect asserts an arm64-only image. The HAL, boot, and libc compatibility layer are Rust (`rust/crates/house-boot`, `rust/crates/house-hal-aarch64`, and `rust/crates/house-libc`); see `rust/ARCHITECTURE.md`.
-* QEMU runs on the macOS host (`brew install qemu expect`, HVF acceleration) and TCG-only on Linux CI. The container is build-only. `make check` also requires host GHC/Cabal, Fourmolu 0.20.1.0, and a GHC2024-capable HLint (3.10 is known to work). See `docs/TOOLCHAIN.md` and `docs/HOST-QEMU.md`.
+* QEMU runs on the macOS host (`brew install qemu expect socat`, HVF acceleration; plus `qemu-img` via the qemu cask and `shasum` stock on macOS) and TCG-only on Linux CI. The container is build-only. `make check` also requires host GHC/Cabal, Fourmolu 0.20.1.0, and a GHC2024-capable HLint (3.10 is known to work). See `docs/TOOLCHAIN.md` and `docs/HOST-QEMU.md`.
 * Guest RAM is auto-detected (DTB `reg` from the `x0` QEMU passes on its Linux boot path → open-ended fault probe doubling from 128M → `512M` fallback; one binary boots at `512M`/`1G`/`2G`/`4G`/`6G`/`8G`/`16G` without rebuild, hvf+tcg). QEMU only takes that path for non-ELF images, so `-kernel` boots the `objcopy -O binary` flat image (`build/*.bin`; `.elf` stays for `readelf`/`gdb`) — ELF `-kernel` boots get `x0=0` and no DTB, and the fault probe false-positives on hvf (reads beyond RAM succeed, later stores abort QEMU with `hvf_handle_exception`). `SPIKE_MEM ?= 4G` only drives QEMU `-m`. `SMP_N ?= 2` only drives QEMU `-smp` and expect args; core count is detected at runtime (DTB → PSCI/GICR max) with per-core 64 KiB stacks (`house_boot_stack_top - core*64K`, `__early_stacks` 32-entry HW reservation, HW bound 32, tested to 8). `TCR EPD1=0` split `TTBR1=kernel` / `TTBR0=user` with 8-bit ASID, `TLBI VAE1IS` + SGI 1 `VMALLE1IS` shootdown (online-only broadcast).
 
 ### What boots
@@ -94,8 +94,8 @@ SMP_N=2 make smp-check                               # 2 cores online + Haskell 
 SMP_N=4 make smp-check                               # 4 cores online + Haskell parallel (hvf+tcg, 4G working set)
 
 # all gates from clean (CI runs the TCG subset)
-make check              # spike + irq + house + shell + POSIX + Rust + Haskell gates
-make check-tcg          # TCG-only subset for Linux CI (no dynamic-root: needs QEMU 11+)
+make check              # the 19 gates named by the banner
+make check-tcg          # TCG-only subset for Linux CI (no dynamic-root: needs QEMU 11+); nightly covers the rest
 make run                # alias for house-run (hvf, $SPIKE_MEM)
 ```
 
@@ -192,4 +192,20 @@ EXTS = -XGHC2024
 
 ## License
 
-MIT — see `LICENSE`. Inspired by House/hOp (S. Carlier / J. Bobbio, Programatica, 2004–2005) but no verbatim original code is retained; this aarch64/GHC-9.14 port is a clean rewrite. MIT is compatible with GHC 9.14's BSD-3-Clause RTS/license.
+MIT — see `LICENSE`. Inspired by House/hOp (S. Carlier / J. Bobbio, Programatica, 2004–2005) but no verbatim original code is retained; this aarch64/GHC-9.14 port is a clean rewrite.
+
+### Third-party components
+
+| Component | Version source | License | How linked |
+|---|---|---|---|
+| GHC RTS + `base`/`ghc-prim`/`ghc-bignum`/`ghc-internal`/`containers`/`pretty`/`mtl`/`array`/`transformers`/`deepseq` archives | `ghc --print-libdir` / `ghc-pkg field` at build time (GHC 9.14.1) | BSD-3-Clause | Static archives into the flat `.bin` via `ld.lld` |
+| `libgmp.a` (`/usr/lib/aarch64-linux-gnu/libgmp.a`) | Debian 13 `libgmp-dev` in `house-port` | LGPL-3.0-or-later | Static archive into the flat `.bin` (see LGPL note below) |
+| `libffi` (`libCffi.a` from the GHC RTS dir) | GHC-bundled, Debian `libffi-dev` headers | MIT | Static archive into the flat `.bin` |
+| `libncurses` | Debian `libncurses-dev` in `house-port` (build-time only) | MIT/X11 | Build-time only, not linked into the guest image |
+| `libgcc` (`$(CC) -print-libgcc-file-name`) | GCC 14 in `house-port` | GPL-3.0 with GCC Runtime Exception | Static archive into the flat `.bin` (exception covers the link) |
+
+LGPL position on `libgmp.a`: the guest image statically links the Debian `libgmp.a` (LGPL-3.0-or-later). The image is a research artifact, not distributed as a product; anyone redistributing the built `.bin`/`.elf` must comply with the LGPL for that archive (provide the corresponding `libgmp` source and relinking ability). The Haskell/Rust sources themselves remain MIT.
+
+### Host prerequisites
+
+`make check` also requires host `socat` (virtio-console socket harness), `qemu-img` (virtio-blk image creation), and a SHA-256 checker (`sha256sum`, or macOS `shasum` — `sha256sum` is not stock macOS). `make doctor` verifies all three.

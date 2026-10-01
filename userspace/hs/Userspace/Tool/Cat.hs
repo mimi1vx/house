@@ -27,7 +27,7 @@ catInstrs =
       svcClose = mustSvc 0x07
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 cat for /bin/cat (pid1 slice, plans/pid1-init-shell.md step 4)."
+   in [ Comment "EL0 cat for /bin/cat (pid1 slice)."
       , Comment "Streams a file to stdout via the fd ring: OPEN 0x04, READ 0x05 loop,"
       , Comment "CLOSE 0x07. Path is argv[1], defaulting to /probe.txt so the legacy"
       , Comment "`run /bin/cat` probe (qemu-fd-el0.exp) keeps working. Prints `cat ok`"

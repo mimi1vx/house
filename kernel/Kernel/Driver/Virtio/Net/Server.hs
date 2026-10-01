@@ -1,6 +1,5 @@
 {-# LANGUAGE GHC2024 #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-local-binds -Wno-type-defaults -Wno-overlapping-patterns -Wno-unused-top-binds #-}
 
 {- | Virtio-net server — Endpoint + Grant, rx0+tx1, ARP/IPv4/UDP, IRQ->Endpoint.
 Lock order: netSem distinct from virtioSem/drvSem/nsSem/epSem; never hold netSem across nsRegister.
@@ -22,7 +21,7 @@ module Kernel.Driver.Virtio.Net.Server (
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_)
 import Data.Bits (shiftL, (.&.), (.|.))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -32,7 +31,7 @@ import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Interrupts (spi)
-import H.Monad (H, liftIO, runH)
+import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Pages qualified as P
 import H.Unsafe (unsafePerformH)
@@ -42,14 +41,14 @@ import Kernel.Driver.IRQ qualified as DIRQ
 import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Net.Device (netInvalidate, netPollUsed, netProbeMac, netSaveQueues, netSubmitRx, netSubmitTx)
-import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), UdpPacket (..), decodeArp, decodeDhcp, decodeDnsResponse, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeDnsQuery, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
+import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), UdpPacket (..), decodeArp, decodeDhcp, decodeDnsResponse, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), macBroadcast, showIpv4, showMac, virtioNetHdrSize)
 import Kernel.Driver.Virtio.Queue (allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Nameservice qualified as NS
-import Kernel.IPC.Types (Grant (..), Message (..))
+import Kernel.IPC.Types (Grant (..))
 
 foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int
 
@@ -131,12 +130,6 @@ wantedMask = (1 `shiftL` 32) + (1 `shiftL` 29)
 
 slotValid :: Int -> Bool
 slotValid n = n >= 0 && n < 8
-
-fillGrantBytes :: Grant -> [Word8] -> H ()
-fillGrantBytes (Grant p _) bytes = liftIO $ do
-  let n = min (length bytes) 4096
-  mapM_ (\(i, b) -> poke (p `plusPtr` i) b) (zip [0 ..] (take n bytes))
-  mapM_ (\i -> poke (p `plusPtr` i) (0 :: Word8)) [n .. 4095]
 
 -- | Init net server for slot.
 netServerInit :: Int -> H (Either NetError NetDevice)
@@ -601,7 +594,7 @@ arpResolve slot dev target = go (0 :: Int)
       | n >= 3 = lookupArp target
       | otherwise = do
           _ <- sendArpRequest slot dev target
-          found <- waitArp target 350
+          found <- waitArp target (350 :: Int)
           case found of
             Just m -> return (Just m)
             Nothing -> go (n + 1)

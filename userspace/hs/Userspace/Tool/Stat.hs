@@ -24,7 +24,7 @@ statInstrs =
       svcStat = mustSvc 0x0E
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 stat for /bin/stat (pid1 slice, plans/pid1-init-shell.md steps 3-4)."
+   in [ Comment "EL0 stat for /bin/stat (pid1 slice)."
       , Comment "Stats a path via STAT 0x0E (x0 = path VA, x1 = buf VA, x2 = buflen):"
       , Comment "the kernel renders one text line (`dir ...` / `file ...`), resumes its"
       , Comment "length, and this echoes it. Needs argv[1]; exits 0, else `stat fail` + 1."

@@ -1,4 +1,9 @@
-#![allow(clippy::all)]
+#![allow(clippy::missing_safety_doc, reason = "memory ops mirror C headers")]
+#![allow(
+    clippy::manual_range_contains,
+    reason = "range checks mirror C comparisons"
+)]
+#![allow(clippy::ptr_eq, reason = "pointer identity mirrors C comparisons")]
 //! mem.rs — tinylibc/mem.c transliteration (167 SLoC).
 
 use core::ptr;

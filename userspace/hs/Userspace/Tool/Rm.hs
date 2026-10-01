@@ -23,7 +23,7 @@ rmInstrs =
       svcUnlink = mustSvc 0x0D
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 rm for /bin/rm (pid1 slice, plans/pid1-init-shell.md steps 3-4)."
+   in [ Comment "EL0 rm for /bin/rm (pid1 slice)."
       , Comment "Removes a file or empty dir via UNLINK 0x0D (x0 = path VA, resumes 0)."
       , Comment "Needs argv[1]; prints `rm ok` + exit 0, else `rm fail` + exit 1."
       , Arch "armv8-a"

@@ -18,13 +18,12 @@ module H.Interrupts (
 )
 where
 
-import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, catch)
 import Control.Monad (when)
 import Data.Array.IO (IOArray, newArray, readArray, writeArray)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Ix (Ix)
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 import Foreign.StablePtr (StablePtr, deRefStablePtr, newStablePtr)
 import H.Concurrency (forkSupervisedIO)
 import H.Monad (H, liftIO, runH)
@@ -57,6 +56,8 @@ foreign import ccall unsafe "house_irq_pipe_drain" c_irqPipeDrain :: IO ()
 foreign import ccall unsafe "house_irq_pipe_fd" c_irqPipeFd :: IO Int
 
 foreign import ccall unsafe "house_irq_pipe_readable" c_irqPipeReadable :: Int -> IO Int
+
+foreign import ccall unsafe "house_pipe_wait" c_pipeWait :: Int -> Word64 -> IO Int
 
 enableInt :: IntId -> H ()
 enableInt (IntId n) = liftIO $ c_enableInt n
@@ -112,8 +113,8 @@ installHandler (IntId n) handler = liftIO $ do
   return ()
 
 -- Dispatcher: drains the SPSC ring the ISR fills and runs the matching handler.
--- Waits on the pipe readable predicate so bursts wake immediately; a bounded
--- fallback delay keeps progress if a pipe byte is ever missed. Drains to the
+-- Waits on the pipe via a bounded blocking wait so bursts wake immediately; a bounded
+-- fallback timeout keeps progress if a pipe byte is ever missed. Drains to the
 -- ring depth (256) so a burst larger than 64 is not split across windows.
 dispatcherLoop :: IO ()
 dispatcherLoop = loop
@@ -127,7 +128,7 @@ dispatcherLoop = loop
           drainBounded (256 :: Int)
           loop
         else do
-          threadDelay 5000
+          _ <- if fd < 0 then return 0 else c_pipeWait fd 5000
           c_irqPipeDrain
           drainBounded (256 :: Int)
           loop

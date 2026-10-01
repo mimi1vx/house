@@ -3,7 +3,18 @@
     reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
 #![allow(static_mut_refs)]
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "virtio transport exposes raw queue entry points"
+)]
+#![allow(
+    clippy::manual_range_contains,
+    reason = "range checks mirror C comparisons"
+)]
+#![allow(
+    clippy::too_many_arguments,
+    reason = "queue setup mirrors C multi-register ABI"
+)]
 //! Virtio console (ID 3) — `virtio_con.c` transliteration.
 //! Port queues rx0/tx1 (WRITE/RX + READ/TX) plus serial control q2/q3
 //! (DEVICE_READY/PORT_ADD discovery, PORT_READY/PORT_OPEN). Mirrors

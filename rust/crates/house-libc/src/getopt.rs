@@ -1,4 +1,7 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "getopt exposes raw entry points mirroring C headers"
+)]
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub static mut optind: i32 = 1;
 #[cfg_attr(not(test), unsafe(no_mangle))]

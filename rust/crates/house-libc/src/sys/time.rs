@@ -1,4 +1,7 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "timer entry point mirrors C provenance"
+)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_uptime_ns() -> u64 {
     let c: u64;

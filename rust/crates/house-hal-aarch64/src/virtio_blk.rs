@@ -3,7 +3,14 @@
     reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
 #![allow(static_mut_refs)]
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "virtio transport exposes raw queue entry points"
+)]
+#![allow(
+    clippy::manual_range_contains,
+    reason = "range checks mirror C comparisons"
+)]
 //! Virtio blk — `virtio_blk.c` transliteration.
 
 use crate::mmio::{dc_cvac_range, dc_ivac_range, mmio_r32, mmio_w32};

@@ -1,4 +1,16 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "compat exposes raw entry points mirroring C headers"
+)]
+#![allow(
+    clippy::manual_c_str_literals,
+    reason = "C-string literals mirror C initializers"
+)]
+#![allow(
+    clippy::manual_dangling_ptr,
+    reason = "dangling-pointer shape mirrors C provenance"
+)]
+#![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
 #![allow(unused_variables)]
 use core::ffi::c_void;
 

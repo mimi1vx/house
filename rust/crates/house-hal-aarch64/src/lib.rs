@@ -6,9 +6,55 @@
 #![allow(static_mut_refs)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
-#![allow(clippy::all)]
-#![allow(clippy::pedantic)]
-#![allow(clippy::nursery)]
+// Transliteration mirrors C provenance; style lints below fire on that shape.
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "HAL exposes raw entry points mirroring C headers"
+)]
+#![allow(
+    clippy::manual_c_str_literals,
+    reason = "C-string literals mirror C initializers"
+)]
+#![allow(
+    clippy::manual_range_contains,
+    reason = "range checks mirror C comparisons"
+)]
+#![allow(
+    clippy::manual_saturating_arithmetic,
+    reason = "saturating arithmetic mirrors C guards"
+)]
+#![allow(clippy::manual_clamp, reason = "clamp shape mirrors C min/max")]
+#![allow(clippy::collapsible_if, reason = "nested guards mirror C control flow")]
+#![allow(
+    clippy::implicit_saturating_sub,
+    reason = "saturating subtraction mirrors C guards"
+)]
+#![allow(
+    clippy::needless_range_loop,
+    reason = "index loops mirror C array walks"
+)]
+#![allow(
+    clippy::needless_return,
+    reason = "explicit returns mirror C control flow"
+)]
+#![allow(
+    clippy::needless_late_init,
+    reason = "late init mirrors C declaration order"
+)]
+#![allow(clippy::needless_ifs, reason = "guard shape mirrors C control flow")]
+#![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
+#![allow(
+    clippy::identity_op,
+    reason = "identity arithmetic mirrors C address math"
+)]
+#![allow(
+    clippy::new_without_default,
+    reason = "spinlock has no meaningful default"
+)]
+#![allow(
+    clippy::too_many_arguments,
+    reason = "queue setup mirrors C multi-register ABI"
+)]
 
 //! Phase 5: aarch64 HAL — transliteration of `platform/aarch64/*.c`.
 //! Single panic handler owner is `house-libc` (this crate declares `extern` guard).

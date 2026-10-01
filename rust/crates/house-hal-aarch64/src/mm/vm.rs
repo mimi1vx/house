@@ -4,7 +4,28 @@
 )]
 #![allow(static_mut_refs)]
 #![allow(unused_unsafe)]
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "VM exposes raw map/unmap entry points mirroring C headers"
+)]
+#![allow(clippy::collapsible_if, reason = "nested guards mirror C control flow")]
+#![allow(
+    clippy::implicit_saturating_sub,
+    reason = "saturating subtraction mirrors C guards"
+)]
+#![allow(
+    clippy::needless_range_loop,
+    reason = "index loops mirror C array walks"
+)]
+#![allow(
+    clippy::needless_return,
+    reason = "explicit returns mirror C control flow"
+)]
+#![allow(
+    clippy::needless_late_init,
+    reason = "late init mirrors C declaration order"
+)]
+#![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
 
 //! VM mmap — `mm/vm.c` transliteration (demand-lazy, 4K).
 

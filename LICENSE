@@ -26,5 +26,5 @@ Inspired by House/hOp originally by Sébastien Carlier and Jérémy Bobbio and
 contributors including the Programatica project (2004-2005). This aarch64 port
 targets GHC 9.14 (BSD-3-Clause) / RTS and QEMU virt; MIT is compatible with
 GHC's BSD-3-Clause license. No verbatim code from the original House 0.8.93
-distribution is retained — all platform, tinylibc, and Haskell code in this
+distribution is retained — all platform, Rust HAL/libc, and Haskell code in this
 branch has been rewritten for aarch64 and GHC 9.14.

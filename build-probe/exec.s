@@ -1,4 +1,4 @@
-// EL0 exec probe (plans/multiprocess.md step 9). Execs /bin/hello via
+// EL0 exec probe. Execs /bin/hello via
 // `svc #0x0B` (x0 = path VA); on success the image is replaced and this
 // code never runs again (hello prints + exits 0). A return means failure:
 // print `exec fail` and exit 1.

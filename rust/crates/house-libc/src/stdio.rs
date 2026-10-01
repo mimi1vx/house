@@ -1,4 +1,7 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "stdio exposes raw entry points mirroring C headers"
+)]
 use core::ffi::c_void;
 #[unsafe(no_mangle)]
 pub static mut stdin: *mut c_void = core::ptr::null_mut();

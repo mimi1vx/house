@@ -1,4 +1,4 @@
-// EL0 cat for /bin/cat (pid1 slice, plans/pid1-init-shell.md step 4).
+// EL0 cat for /bin/cat (pid1 slice).
 // Streams a file to stdout via the fd ring: OPEN 0x04, READ 0x05 loop,
 // CLOSE 0x07. Path is argv[1], defaulting to /probe.txt so the legacy
 // `run /bin/cat` probe (qemu-fd-el0.exp) keeps working. Prints `cat ok`

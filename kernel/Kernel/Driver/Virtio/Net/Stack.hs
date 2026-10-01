@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -Wno-unused-imports #-}
-
 {- | Pure packet encode/decode — ARP, IPv4, UDP, DHCP, ICMP checksum.
 No FFI, total parsers returning Either NetError. Tested via ghci round-trip.
 -}
@@ -34,9 +32,8 @@ where
 
 import Data.Bits (shiftL, shiftR, xor, (.&.), (.|.))
 import Data.Char (isAsciiLower, isAsciiUpper)
-import Data.List (foldl')
 import Data.Word (Word16, Word32, Word8)
-import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetError (..), macBroadcast, showIpv4, showMac)
+import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetError (..), macBroadcast)
 
 -- | Total index into hostile bytes; Nothing on out-of-range.
 safeIndex :: [Word8] -> Int -> Maybe Word8

@@ -1,4 +1,4 @@
-// EL0 cat probe for the fd delegation ring (plans/multiprocess.md step 7).
+// EL0 cat probe for the fd delegation ring.
 // Opens /probe.txt read-only, reads up to 64 bytes, echoes via svc WRITE,
 // closes, prints `cat ok` and exits 0. Any mismatch prints `cat fail` and
 // exits 1. Syscalls: OPEN 0x04 (x0=path, x1=flags), READ 0x05 (x0=fd,

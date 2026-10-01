@@ -1,4 +1,4 @@
-// EL0 brk probe for the brk delegation ring (plans/multiprocess.md step 7).
+// EL0 brk probe for the brk delegation ring.
 // Queries brk(0), grows by 8192 (2 pages), touches each new page, prints
 // `brk ok` and exits 0. Any mismatch prints `brk fail` and exits 1.
 // Syscall: BRK 0x03 (x0=newBrk -> x0=break).

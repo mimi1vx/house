@@ -23,7 +23,7 @@ mkdirInstrs =
       svcMkdir = mustSvc 0x0C
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 mkdir for /bin/mkdir (pid1 slice, plans/pid1-init-shell.md steps 3-4)."
+   in [ Comment "EL0 mkdir for /bin/mkdir (pid1 slice)."
       , Comment "Creates one directory via MKDIR 0x0C (x0 = path VA, resumes 0)."
       , Comment "Needs argv[1]; prints `mkdir ok` + exit 0, else `mkdir fail` + exit 1."
       , Arch "armv8-a"

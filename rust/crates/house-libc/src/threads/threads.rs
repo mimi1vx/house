@@ -1,4 +1,20 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "scheduler exposes raw entry points mirroring C headers"
+)]
+#![allow(
+    clippy::needless_range_loop,
+    reason = "index loops mirror C array walks"
+)]
+#![allow(
+    clippy::never_loop,
+    reason = "loop shape mirrors C scheduler control flow"
+)]
+#![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
+#![allow(
+    clippy::while_immutable_condition,
+    reason = "condition shape mirrors C scheduler control flow"
+)]
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
@@ -1730,6 +1746,33 @@ pub unsafe extern "C" fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32 {
         }
     }
     ready2
+}
+// SAFETY: fd is a pipe read end owned by the caller; timeout is bounded.
+// Single-fd wfe wait extracted from poll so Haskell can block instead of polling.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_pipe_wait(fd: i32, timeout_us: u64) -> i32 {
+    unsafe {
+        if fd < 0 {
+            return 0;
+        }
+        if house_fd_pipe_readable(fd) != 0 {
+            return 1;
+        }
+        if timeout_us == 0 {
+            return 0;
+        }
+        let start = house_uptime_ns();
+        let timeout_ns = timeout_us.saturating_mul(1000);
+        loop {
+            core::arch::asm!("wfe", options(nostack, preserves_flags));
+            if house_fd_pipe_readable(fd) != 0 {
+                return 1;
+            }
+            if house_uptime_ns().wrapping_sub(start) >= timeout_ns {
+                return 0;
+            }
+        }
+    }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn select(

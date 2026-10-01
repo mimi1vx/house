@@ -42,6 +42,26 @@ jobs:
           docker run --rm -v house-cargo:/dest -v /tmp/house-volcache/cargo-registry:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-target:/dest -v /tmp/house-volcache/cargo-target:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-cabal:/dest -v /tmp/house-volcache/cabal:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+      - name: Filesystem and driver gates
+        run: |
+          make house-fs-check TCG_ONLY=1
+          make house-ipc-check TCG_ONLY=1
+          make house-driver-check TCG_ONLY=1
+          make house-virtio-transport-check TCG_ONLY=1
+          make house-virtio-blk-check TCG_ONLY=1
+          make house-virtio-net-check TCG_ONLY=1
+          make house-virtio-con-check TCG_ONLY=1
+      - name: EL0 execution gates
+        # house-proc-check covers the COW-reap livelock path; slow but a hang is worse than a wrong value.
+        run: |
+          make house-userspace-check TCG_ONLY=1
+          make house-fd-el0-check TCG_ONLY=1
+          make house-fork-check TCG_ONLY=1
+          make house-proc-check TCG_ONLY=1
+      - name: SMP gates
+        run: |
+          make smp-check TCG_ONLY=1
+          make smp-hotplug-check TCG_ONLY=1
       - name: Scaling gate
         run: make smp-check-8 TCG_ONLY=1
       - name: Memory matrix

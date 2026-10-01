@@ -41,7 +41,7 @@ echoInstrs =
       u2048 = mustU12 2048
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 echo for /bin/echo (pid1 slice, plans/pid1-init-shell.md step 4)."
+   in [ Comment "EL0 echo for /bin/echo (pid1 slice)."
       , Comment "Prints argv[1..] joined with single spaces plus a trailing newline via"
       , Comment "svc WRITE (one call per word), exits 0. Bare `echo` prints just `\\n`."
       , Comment "String scans are capped at 2048 (kernel argv strings are <=1024 by the"

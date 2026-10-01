@@ -59,7 +59,7 @@ import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf,
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Sched qualified as Sched
 import Kernel.Userspace.Trampoline qualified as Tramp
-import Kernel.Userspace.Types (Pid (..), Process (..), SharedObject (..), StopAck, pidNext, procExitMap, procMap, procStopMap, processExitVar, userSem)
+import Kernel.Userspace.Types (Pid (..), Process (..), SharedObject (..), StopAck, pidNext, procExitMap, procMap, procStopMap, userSem)
 import Numeric (showHex)
 import System.Timeout qualified as T
 
@@ -98,6 +98,12 @@ foreign import ccall unsafe "house_el0_set_entry" c_el0_set_entry :: Ptr Word64 
 foreign import ccall unsafe "house_el0_fault_addr" c_el0_fault_addr :: Ptr Word64 -> IO Word64
 
 foreign import ccall unsafe "house_resume_el0" c_resume_el0 :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
+
+foreign import ccall unsafe "house_pipe_wait" c_pipeWait :: CInt -> Word64 -> IO CInt
+
+foreign import ccall unsafe "house_el0_park_pipe_fd" c_parkPipeFd :: IO CInt
+
+foreign import ccall unsafe "house_el0_park_pipe_drain" c_parkPipeDrain :: IO ()
 
 foreign import ccall unsafe "house_user_read" c_user_read :: Ptr Word64 -> Word64 -> Ptr Word64 -> Word64 -> IO CInt
 
@@ -1214,9 +1220,9 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
               Sched.schedUnregister pid
               putMVar exitVar c
             Nothing -> do
-              mReq <- tryTakeParkedOnce pdir
+              mReq <- takeParkedDrained pdir
               case mReq of
-                Nothing -> do threadDelay 1000; loop
+                Nothing -> do liftIO (c_parkPipeFd >>= \fd -> void (c_pipeWait fd 5000)); loop
                 Just ReqYield -> do resumeWith 0; loop
                 Just (ReqBrk nb) -> do handleBrk nb; loop
                 Just (ReqOpen va fl) -> do handleOpen va fl; loop
@@ -1463,7 +1469,6 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
         Sched.schedUnregister pid
         Sched.schedWakeAll
         void (liftIO (tryPutMVar exitVar 1))
-      return ()
     handlePreempt x0 = do
       qs <- Sched.schedRunQueue
       let (pre, post) = break (== pid) qs
@@ -1740,6 +1745,12 @@ tryTakeParkedOnce pdir = do
     classify 0x13 ep va nw tag = ReqIpcReply ep va nw tag
     classify w _ _ _ _ = ReqUnknown w
 
+takeParkedDrained :: Ptr Word64 -> H (Maybe ParkRequest)
+takeParkedDrained pdir = do
+  m <- tryTakeParkedOnce pdir
+  when (isJust m) (liftIO c_parkPipeDrain)
+  return m
+
 pollExit :: H Int
 pollExit = loop
   where
@@ -1748,15 +1759,10 @@ pollExit = loop
       if exited /= 0
         then do
           c <- liftIO c_get_exit
-          _ <- liftIO (void (tryTakeMVar processExitVar))
           return (fromIntegral c)
         else do
-          m <- liftIO (tryTakeMVar processExitVar)
-          case m of
-            Just v -> return v
-            Nothing -> do
-              threadDelay 1000
-              loop
+          liftIO (c_parkPipeFd >>= \fd -> void (c_pipeWait fd 5000))
+          loop
 
 {- | Grow a process break within the user window. Maps zero pages for
 [oldBrk, newBrk); over-window yields OutOfWindow, OOM yields NoSpace.

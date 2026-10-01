@@ -1,5 +1,5 @@
 #!/bin/sh
-# nm audit for rust/crates/house-el0-tiny (plans/userspace-edsl-tinylibc.md gates).
+# nm audit for rust/crates/house-el0-tiny.
 # Runs INSIDE the linux/arm64 container (needs the cross archive + GNU nm).
 # Asserts the crate's own object exports exactly the helper set plus the
 # EXIT(1) panic handler, with no undefined symbols: EL0 binaries then stay

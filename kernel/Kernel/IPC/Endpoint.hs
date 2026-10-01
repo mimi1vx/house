@@ -29,7 +29,6 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word64)
 import H.Concurrency (QSem, newQSem, withQSem)
-import H.Concurrency qualified as HC
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import H.Pages qualified as P
@@ -56,9 +55,10 @@ data Rendezvous = Rendezvous {
   , rvReplyVar :: MVar (Either IpcError Message)
   }
 
--- | Per-endpoint state: FIFO queue of pending rendezvous.
+-- | Per-endpoint state: FIFO queue plus a wake signal filled on enqueue.
 data EndpointState = EndpointState {
   esQueue :: [Rendezvous]
+  , esWake :: C.MVar ()
   }
 
 -- Global table ---------------------------------------------------------------
@@ -117,7 +117,8 @@ newEndpoint = withQSem endpointSem $ do
   n <- readRef nextEpId
   writeRef nextEpId (n + 1)
   let eid = EndpointId n
-  st <- newRef (EndpointState [])
+  wake <- liftIO C.newEmptyMVar
+  st <- newRef (EndpointState [] wake)
   modifyRef endpointTable (Map.insert eid st)
   sec <- readRef capSecret
   sec' <-
@@ -152,7 +153,9 @@ freeEndpoint (Endpoint eid) = do
       qs <- readRef st
       let q = esQueue qs
       mapM_ wakeNoSuch q
-      writeRef st (EndpointState [])
+      writeRef st (EndpointState [] (esWake qs))
+      _ <- liftIO $ C.tryPutMVar (esWake qs) ()
+      return ()
   where
     wakeNoSuch rv = do
       case msgGrant (rvMsg rv) of
@@ -194,6 +197,7 @@ send ep msg = do
           then return (Left QueueFull)
           else do
             writeRef st (qs {esQueue = esQueue qs ++ [rv]})
+            _ <- liftIO $ C.tryPutMVar (esWake qs) ()
             return (Right ())
   case enqRes of
     Left NoSuchEndpoint -> do logCap ("send to freed ep=" ++ show (epId ep)); return (Left NoSuchEndpoint)
@@ -229,6 +233,7 @@ trySend ep msg = do
           then return (Left QueueFull)
           else do
             writeRef st (qs {esQueue = esQueue qs ++ [rv]})
+            _ <- liftIO $ C.tryPutMVar (esWake qs) ()
             return (Right ())
   case r of
     Left NoSuchEndpoint -> do logCap ("trySend to freed ep=" ++ show (epId ep)); return r
@@ -248,19 +253,19 @@ recv ep = loop
           Just st -> do
             qs <- readRef st
             case esQueue qs of
-              [] -> return (Right Nothing)
+              [] -> return (Right (Nothing, esWake qs))
               (rv : rest) -> do
                 writeRef st (qs {esQueue = rest})
-                return (Right (Just rv))
+                return (Right (Just rv, esWake qs))
       case mRv of
         Left _ -> do
           v <- liftIO C.newEmptyMVar
           _ <- liftIO $ C.putMVar v (Left NoSuchEndpoint)
           return (Message 0 [] Nothing, v)
-        Right Nothing -> do
-          HC.threadDelay 1000
+        Right (Nothing, wake) -> do
+          _ <- liftIO $ T.timeout 5000 (C.takeMVar wake)
           loop
-        Right (Just rv) -> return (rvMsg rv, rvReplyVar rv)
+        Right (Just rv, _) -> return (rvMsg rv, rvReplyVar rv)
 
 -- | Reply to a rendezvous (unblocks sender).
 reply :: MVar (Either IpcError Message) -> Either IpcError Message -> H ()

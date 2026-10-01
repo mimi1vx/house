@@ -1,6 +1,6 @@
 #!/bin/sh
 # Assemble EL0 userspace into initramfs-staging/ (pid1 slice, step 1;
-# EDSL pivot slice: plans/userspace-edsl-tinylibc.md step 4).
+# EDSL pivot slice.
 # Runs INSIDE the linux/arm64 container where CC is native aarch64
 # (same convention as platform/aarch64/Makefile: CC := gcc, LD := ld.lld);
 # CC/LD/PYTHON3 are overridable for a cross host toolchain, e.g.

@@ -1,5 +1,5 @@
-// EL0 yield probe for the park/resume delegation ring (plans/multiprocess.md
-// step 4). Parks 3x via `svc #0` (YIELD); the counter lives in x19, which the
+// EL0 yield probe for the park/resume delegation ring
+// Parks 3x via `svc #0` (YIELD); the counter lives in x19, which the
 // kernel preserves across the EL0 session, so a correct resume keeps it.
 // After 3 parks it emits one `svc #1` write and exits with the counter as the
 // exit code: `run /bin/yield` must print `yield ok` + `ok exit 3`.

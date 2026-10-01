@@ -1,4 +1,8 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "allocator exposes raw entry points mirroring C headers"
+)]
+#![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
 //! alloc.rs — tinylibc/alloc.c transliteration (172 SLoC).
 
 use core::ptr;

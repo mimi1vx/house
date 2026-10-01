@@ -1,4 +1,4 @@
-// EL0 echo for /bin/echo (pid1 slice, plans/pid1-init-shell.md step 4).
+// EL0 echo for /bin/echo (pid1 slice).
 // Prints argv[1..] joined with single spaces plus a trailing newline via
 // svc WRITE (one call per word), exits 0. Bare `echo` prints just `\n`.
 // String scans are capped at 2048 (kernel argv strings are <=1024 by the

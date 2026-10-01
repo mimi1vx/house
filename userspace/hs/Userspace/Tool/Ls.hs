@@ -25,7 +25,7 @@ lsInstrs =
       svcGetdents = mustSvc 0x0F
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 ls for /bin/ls (pid1 slice, plans/pid1-init-shell.md steps 3-4)."
+   in [ Comment "EL0 ls for /bin/ls (pid1 slice)."
       , Comment "Lists a directory via GETDENTS 0x0C..0x0F slice: svc #0x0F"
       , Comment "(x0 = path VA, x1 = buf VA, x2 = buflen) resumes the newline-separated"
       , Comment "listing length, which is echoed with one WRITE. Path is argv[1],"

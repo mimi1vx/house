@@ -1,4 +1,24 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "syscall surface mirrors C headers"
+)]
+#![allow(
+    clippy::manual_c_str_literals,
+    reason = "C-string literals mirror C initializers"
+)]
+#![allow(
+    clippy::manual_range_contains,
+    reason = "range checks mirror C comparisons"
+)]
+#![allow(
+    clippy::needless_range_loop,
+    reason = "index loops mirror C array walks"
+)]
+#![allow(
+    clippy::needless_return,
+    reason = "explicit returns mirror C control flow"
+)]
+#![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
 #![allow(unused_variables)]
 #![allow(unexpected_cfgs)]
 #![allow(

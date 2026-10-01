@@ -120,7 +120,7 @@ irq-check:
 	$(MAKE) irq-build
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
 	  'vm-ok' 120 hvf $(SPIKE_MEM) $(SMP_N)
-	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
+	expect scripts/qemu-irq.exp $(SPIKE_DIR)/build/irq.bin \
 	  'vm-ok' 120 tcg $(SPIKE_MEM) $(SMP_N)
 
 # --- aarch64 house kernel ---
@@ -187,7 +187,7 @@ house-check:
 	$(MAKE) house-build
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
 	  'Welcome to the House shell' 30 hvf $(SPIKE_MEM) $(SMP_N)
-	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
+	expect scripts/qemu-house.exp $(SPIKE_DIR)/build/house.bin \
 	  'Welcome to the House shell' 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Interactive shell (phase 5): prompt → help/lambda/wastemem via PL011 RX
@@ -414,7 +414,7 @@ haskell-check:
 	cabal build all --enable-tests
 	cabal test all
 
-# Tiny EL0 libc audit (plans/userspace-edsl-tinylibc.md gates): the crate
+# Tiny EL0 libc audit: the crate
 # object exports exactly strlen/strncmp/memcpy/memset + the EXIT(1) unwind
 # with no U symbols, so --gc-sections keeps EL0 binaries at asm scale.
 el0tiny-check: volumes
@@ -436,6 +436,7 @@ doctor:
 	@command -v socat >/dev/null || { echo "doctor: missing socat" >&2; exit 1; }
 	@command -v qemu-img >/dev/null || { echo "doctor: missing qemu-img" >&2; exit 1; }
 	@command -v jq >/dev/null || { echo "doctor: missing jq" >&2; exit 1; }
+	@command -v sha256sum >/dev/null || command -v shasum >/dev/null || { echo "doctor: missing sha256sum (or shasum on macOS)" >&2; exit 1; }
 	@command -v $(RUNNER) >/dev/null || { echo "doctor: missing $(RUNNER)" >&2; exit 1; }
 	@ghc --version && cabal --version && fourmolu --version && hlint --version
 	@qemu-system-aarch64 --version | head -1 && expect -v 2>&1 | head -1; socat -V 2>&1 | head -1; qemu-img --version | head -1; jq --version; $(RUNNER) --version
@@ -446,6 +447,9 @@ else
 endif
 	@printf 'module T where\nf :: forall a. proxy a -> Int\nf = \\p -> p @Int\n' | hlint - 2>&1 | grep -qi "parse error" && { echo "doctor: host hlint too old for GHC2024 (needs TypeAbstractions)" >&2; exit 1; } || true
 	@echo "doctor: ok"
+
+gate-coverage:
+	sh scripts/gate-coverage.sh
 
 # TCG-only gate for Linux CI: the check legs under TCG, except the hvf
 # halves (TCG_ONLY=1 skips them; hosted runners have no nested virt) and
@@ -463,14 +467,19 @@ check-tcg:
 	$(MAKE) house-initrd-check TCG_ONLY=1
 	$(MAKE) house-pid1-check TCG_ONLY=1
 	$(MAKE) house-dynamic-userspace-check TCG_ONLY=1
+	$(MAKE) house-fault-budget-check TCG_ONLY=1
+	$(MAKE) house-fault-kill-check TCG_ONLY=1
+	$(MAKE) house-ipc-el0-check TCG_ONLY=1
+	$(MAKE) house-tls-el0-check TCG_ONLY=1
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
 	$(MAKE) el0tiny-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check-tcg: all aarch64 TCG gates passed (doctor, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, rust, haskell, el0tiny, dynamic ELF) =="
+	@echo "== make check-tcg: all aarch64 TCG gates passed (doctor, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, rust, haskell, el0tiny, dynamic ELF) =="
 
 check:
 	$(MAKE) doctor
+	$(MAKE) gate-coverage
 	$(MAKE) spike-check
 	$(MAKE) irq-check
 	$(MAKE) house-check
@@ -479,14 +488,17 @@ check:
 	$(MAKE) house-initrd-check
 	$(MAKE) house-pid1-check
 	$(MAKE) house-dynamic-userspace-check
+	$(MAKE) house-fault-budget-check
+	$(MAKE) house-fault-kill-check
+	$(MAKE) house-ipc-el0-check
 	$(MAKE) house-tls-el0-check
 	$(MAKE) house-dynamic-root-check
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
 	$(MAKE) el0tiny-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check: all aarch64 gates passed (doctor, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, mounted-root dynamic, rust, haskell, el0tiny, dynamic ELF) =="
+	@echo "== make check: all aarch64 gates passed (doctor, gate-coverage, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic, rust, haskell, el0tiny, dynamic ELF) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
-        irq-build irq-run irq-check \
+        irq-build irq-run irq-check gate-coverage \
         house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg

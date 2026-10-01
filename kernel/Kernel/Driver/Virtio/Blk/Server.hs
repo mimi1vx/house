@@ -1,5 +1,4 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -Wno-unused-top-binds -Wno-unused-imports #-}
 
 {- | Virtio-blk server — Endpoint + Grant, 4K blocks (wire 512 sectors), IRQ->Endpoint.
 Lock order: blkSem distinct from virtioSem/drvSem/nsSem/epSem; never hold blkSem across nsRegister.

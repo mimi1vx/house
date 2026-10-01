@@ -1,4 +1,4 @@
-// EL0 stat for /bin/stat (pid1 slice, plans/pid1-init-shell.md steps 3-4).
+// EL0 stat for /bin/stat (pid1 slice).
 // Stats a path via STAT 0x0E (x0 = path VA, x1 = buf VA, x2 = buflen):
 // the kernel renders one text line (`dir ...` / `file ...`), resumes its
 // length, and this echoes it. Needs argv[1]; exits 0, else `stat fail` + 1.

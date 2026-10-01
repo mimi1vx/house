@@ -1,4 +1,4 @@
-// EL0 hello for /bin/hello (pid1 slice, plans/pid1-init-shell.md step 4).
+// EL0 hello for /bin/hello (pid1 slice).
 // Source twin of the historic helloBytes blob: prints `Hello from EL0`
 // via svc WRITE and exits 0. /sbin/init execs this as its v1 child, and
 // qemu-userspace/qemu-fork (exec leg) assert this exact line.

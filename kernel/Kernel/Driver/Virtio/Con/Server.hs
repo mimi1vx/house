@@ -1,5 +1,4 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -Wno-unused-imports -Wno-unused-matches -Wno-unused-local-binds -Wno-type-defaults -Wno-overlapping-patterns -Wno-unused-top-binds #-}
 
 {- | Virtio-console server — Endpoint + Grant, rx0+tx1, IRQ->Endpoint.
 Lock order: conSem distinct from virtioSem/drvSem/nsSem/epSem; never hold conSem across nsRegister.
@@ -15,8 +14,8 @@ module Kernel.Driver.Virtio.Con.Server (
 )
 where
 
-import Control.Monad (forM_, when)
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Control.Monad (forM_)
+import Data.Bits (shiftL, shiftR, (.|.))
 import Data.Char (chr)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -40,7 +39,7 @@ import Kernel.Driver.Virtio.Queue (VirtQueue (..), allocQueue, freeQueue, queueA
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Nameservice qualified as NS
-import Kernel.IPC.Types (Grant (..), Message (..))
+import Kernel.IPC.Types (Grant (..))
 
 foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int
 

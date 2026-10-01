@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! switch.S transliteration — house_thread_switch
 
 core::arch::global_asm!(

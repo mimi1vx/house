@@ -1,4 +1,7 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "errno entry point mirrors C provenance"
+)]
 //! errno dispatch per tinylibc/sys.c __errno_location
 
 use core::ptr;

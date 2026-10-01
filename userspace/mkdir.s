@@ -1,4 +1,4 @@
-// EL0 mkdir for /bin/mkdir (pid1 slice, plans/pid1-init-shell.md steps 3-4).
+// EL0 mkdir for /bin/mkdir (pid1 slice).
 // Creates one directory via MKDIR 0x0C (x0 = path VA, resumes 0).
 // Needs argv[1]; prints `mkdir ok` + exit 0, else `mkdir fail` + exit 1.
 .arch armv8-a

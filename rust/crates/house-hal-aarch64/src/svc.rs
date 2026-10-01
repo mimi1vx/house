@@ -104,6 +104,9 @@ const EL0_FREE: El0Slot = El0Slot {
 
 static mut EL0_TABLE: [El0Slot; 64] = [EL0_FREE; 64];
 
+static mut PARK_PIPE_R: i32 = -1;
+static mut PARK_PIPE_W: i32 = -1;
+
 unsafe extern "C" {
     fn uart_puts(s: *const u8);
     fn uart_putc(c: u8);
@@ -111,6 +114,85 @@ unsafe extern "C" {
     fn current_pdir() -> *mut u8;
     fn house_set_recorded_pdir(pdir: *mut u8);
     fn house_resume_asm(save: *const u64, elr: u64, sp_el0: u64, pdir: *mut u8, asid: u64);
+    fn pipe(fds: *mut i32) -> i32;
+    fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+    fn read(fd: i32, buf: *mut u8, n: usize) -> isize;
+    #[cfg(not(test))]
+    fn house_fd_pipe_readable(fd: i32) -> i32;
+}
+
+#[cfg(test)]
+unsafe fn house_fd_pipe_readable(fd: i32) -> i32 {
+    unsafe extern "C" {
+        fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32;
+    }
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    if fd < 0 {
+        return 0;
+    }
+    let mut pfd = PollFd {
+        fd,
+        events: 0x0001,
+        revents: 0,
+    };
+    let r = unsafe { poll(&mut pfd as *mut PollFd as *mut u8, 1, 0) };
+    if r > 0 && pfd.revents & 0x0001 != 0 {
+        1
+    } else {
+        0
+    }
+}
+
+unsafe fn poke_park() {
+    unsafe {
+        if PARK_PIPE_W < 0 {
+            let mut fds = [0i32; 2];
+            if pipe(fds.as_mut_ptr()) == 0 {
+                PARK_PIPE_R = fds[0];
+                PARK_PIPE_W = fds[1];
+            } else {
+                return;
+            }
+        }
+        let c = 1u8;
+        let _ = write(PARK_PIPE_W, &c as *const u8, 1);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_park_pipe_fd() -> i32 {
+    unsafe {
+        if PARK_PIPE_R < 0 {
+            let mut fds = [0i32; 2];
+            if pipe(fds.as_mut_ptr()) == 0 {
+                PARK_PIPE_R = fds[0];
+                PARK_PIPE_W = fds[1];
+            }
+        }
+        PARK_PIPE_R
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_park_pipe_readable(fd: i32) -> i32 {
+    // SAFETY: pipe readability probe, no state change.
+    unsafe { house_fd_pipe_readable(fd) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_el0_park_pipe_drain() {
+    unsafe {
+        if PARK_PIPE_R < 0 {
+            return;
+        }
+        let mut buf = [0u8; 64];
+        while read(PARK_PIPE_R, buf.as_mut_ptr(), buf.len()) > 0 {}
+    }
 }
 
 unsafe fn translate_va(va: u64) -> usize {
@@ -582,7 +664,9 @@ pub unsafe extern "C" fn house_set_exit(code: i32) {
             HOUSE_USER_EXIT_CODE = code;
             HOUSE_USER_EXITED = 1;
         }
-        core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        poke_park();
+        core::arch::asm!("sev", options(nostack, preserves_flags));
     }
 }
 
@@ -690,7 +774,9 @@ pub unsafe extern "C" fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *c
                 EL0_TABLE[i].sp_el0 = sp_el0;
                 EL0_TABLE[i].req = imm;
                 EL0_TABLE[i].parked = 1;
-                core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                poke_park();
+                core::arch::asm!("sev", options(nostack, preserves_flags));
                 return 1;
             }
         }
@@ -730,7 +816,9 @@ pub unsafe extern "C" fn house_el0_park_fault(
                 EL0_TABLE[i].req = EL0_REQ_FAULT;
                 EL0_TABLE[i].fault_va = far & !4095;
                 EL0_TABLE[i].parked = 1;
-                core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                poke_park();
+                core::arch::asm!("sev", options(nostack, preserves_flags));
                 return 1;
             }
         }
@@ -768,7 +856,9 @@ pub unsafe extern "C" fn house_el0_park_kill(
                 EL0_TABLE[i].req = EL0_REQ_FAULT_KILL;
                 EL0_TABLE[i].fault_va = far & !4095;
                 EL0_TABLE[i].parked = 1;
-                core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                poke_park();
+                core::arch::asm!("sev", options(nostack, preserves_flags));
                 return 1;
             }
         }
@@ -889,6 +979,8 @@ pub unsafe extern "C" fn house_el0_clone_slot(parent: *mut u8, child: *mut u8) -
                 EL0_TABLE[c].exit_code = 0;
                 EL0_TABLE[c].exited = 0;
                 core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                poke_park();
+                core::arch::asm!("sev", options(nostack, preserves_flags));
                 0
             }
             _ => -22,
@@ -1057,7 +1149,9 @@ pub unsafe extern "C" fn house_sched_tick_preempt(
                 EL0_TABLE[i].req = EL0_REQ_PREEMPT;
                 EL0_TABLE[i].fault_va = 0;
                 EL0_TABLE[i].parked = 1;
-                core::arch::asm!("dsb sy; sev", options(nostack, preserves_flags));
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                poke_park();
+                core::arch::asm!("sev", options(nostack, preserves_flags));
                 return 1;
             }
         }
@@ -1312,6 +1406,22 @@ mod tests {
             assert_eq!(validate_fd(HOUSE_SVC_READ, 0, 0x01000000, 65537), -22);
             assert_eq!(validate_fd(HOUSE_SVC_READ, 0, 0x01000000, 8), -14);
             assert_eq!(validate_fd(HOUSE_SVC_CLOSE, 0, 0, 0), 1);
+        }
+    }
+
+    #[test]
+    fn park_pipe_readable_transitions_on_write() {
+        unsafe {
+            let mut fds = [0i32; 2];
+            assert_eq!(pipe(fds.as_mut_ptr()), 0);
+            let (r, w) = (fds[0], fds[1]);
+            assert_eq!(house_fd_pipe_readable(r), 0);
+            let c = 1u8;
+            assert_eq!(write(w, &c as *const u8, 1), 1);
+            assert_eq!(house_fd_pipe_readable(r), 1);
+            let mut buf = [0u8; 8];
+            assert!(read(r, buf.as_mut_ptr(), buf.len()) > 0);
+            assert_eq!(house_fd_pipe_readable(r), 0);
         }
     }
 

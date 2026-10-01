@@ -1,5 +1,4 @@
 {-# LANGUAGE GHC2024 #-}
-{-# OPTIONS_GHC -Wno-unused-imports #-}
 
 {- |
 Module      : Kernel.Shell.Loop
@@ -18,9 +17,9 @@ where
 
 import Control.Concurrent (killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, bracket, catch)
-import Control.Monad (forM_, void, when)
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Control.Exception (bracket)
+import Control.Monad (forM_, when)
+import Data.Bits (shiftL, shiftR, (.&.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.List (isPrefixOf)

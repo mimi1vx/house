@@ -1,4 +1,4 @@
-// EL0 preemption probe (plans/multiprocess.md step 11): argv[1][0] is the
+// EL0 preemption probe: argv[1][0] is the
 // dot char, argv[2] the decimal iteration total. Burns the total in a tight
 // register loop (no yield svc anywhere), printing ".<char>" every total/20
 // iterations, then `spin done` + exit 0. Two concurrent spins must

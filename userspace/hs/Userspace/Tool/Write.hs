@@ -35,7 +35,7 @@ writeInstrs =
       svcClose = mustSvc 0x07
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 write for /bin/write (pid1 slice, plans/pid1-init-shell.md step 4)."
+   in [ Comment "EL0 write for /bin/write (pid1 slice)."
       , Comment "Writes argv[2..] joined with spaces to the file at argv[1] via the fd"
       , Comment "ring: OPEN 0x04 (O_WRONLY|O_CREAT|O_TRUNC), WRITE_FD 0x06, CLOSE 0x07."
       , Comment "Needs prog + path + text; payload capped at 1024 (one WRITE_FD, under"

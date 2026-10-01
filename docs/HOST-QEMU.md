@@ -7,7 +7,7 @@ via `make check-tcg`; hosted macOS runners cannot boot VMs.)
 ## Prerequisites
 
 ```sh
-brew install qemu expect                        # QEMU 11.1.1, expect 5.45
+brew install qemu expect socat                      # QEMU 11.1.1, expect 5.45, socat for virtio-con
 qemu-system-aarch64 -accel help                 # want: hvf + tcg
 ```
 
@@ -30,9 +30,9 @@ make container-image && make check
 ```
 
 `make check` obtains clean firmware builds through its spike, IRQ, and House
-legs, then runs the host gates: spike `ticks-ok`, irq `vm-ok` (hvf+tcg), house banner `Welcome to
-the House shell` (hvf+tcg), interactive shell, POSIX shell, plus the
-rust and haskell gates. Scaling legs stay out of the default gate:
+legs, then runs the 19 gates named by the banner (shell, POSIX, initrd,
+pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0,
+mounted-root dynamic, plus the rust and haskell gates). Scaling legs stay out of the default gate:
 `smp-check-8` (N=8 at 4G) and `vm-check` run on demand. The VM matrix uses
 HVF+TCG at 512M/2, 4G/4, and 6G/4, then HVF at 8G/4 and 16G/4.
 

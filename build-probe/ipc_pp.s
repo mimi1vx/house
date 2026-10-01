@@ -1,5 +1,5 @@
 // EL0 IPC ping-pong probe for the park/resume delegation ring
-// (plans/multiprocess.md step 6). One binary, role from argv[1]:
+// One binary, role from argv[1]:
 // `server` does RECV (0x11) then REPLY (0x13); `client` does CALL (0x12);
 // `guess` does SEND (0x10) to the given id and expects EPERM (-1).
 // Endpoint id (decimal) comes from argv[2]. Payload is verified both ways:

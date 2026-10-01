@@ -25,7 +25,7 @@ golden test instead of a runtime partial.
 helloInstrs :: [Instr]
 helloInstrs = case (mkX 0, mkX 1, mkX 2, mkSvc 0x01, mkSvc 0x02) of
   (Just x0, Just x1, Just x2, Just svcWrite, Just svcExit) ->
-    [ Comment "EL0 hello for /bin/hello (pid1 slice, plans/pid1-init-shell.md step 4)."
+    [ Comment "EL0 hello for /bin/hello (pid1 slice)."
     , Comment "Source twin of the historic helloBytes blob: prints `Hello from EL0`"
     , Comment "via svc WRITE and exits 0. /sbin/init execs this as its v1 child, and"
     , Comment "qemu-userspace/qemu-fork (exec leg) assert this exact line."

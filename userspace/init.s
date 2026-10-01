@@ -1,4 +1,4 @@
-// EL0 pid1 for /sbin/init (pid1 slice, plans/pid1-init-shell.md step 5).
+// EL0 pid1 for /sbin/init (pid1 slice).
 // v2: runs no children. Announces, exits 0; the kernel logs
 // `init pid N` at spawn and `init exit CODE` at reap
 // (Kernel.Init), which qemu-initramfs/qemu-pid1 assert. Spawning demo

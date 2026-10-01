@@ -27,6 +27,7 @@ any FFI (foreign symbols are stubbed at link time, never called):
 -}
 module Main (main) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (foldM, forM, unless)
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
@@ -36,6 +37,7 @@ import Data.Either (fromRight, isLeft)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Ix qualified as Ix
+import Data.List (sort)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isNothing)
 import Data.Set qualified as Set
@@ -51,6 +53,7 @@ import Kernel.FileSystem.BlkPersist qualified as BP
 import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as Endpoint
+import Kernel.IPC.Types qualified as IT
 import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
 import Kernel.Userspace.Linker qualified as Linker
@@ -62,6 +65,7 @@ import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 import System.Process (readProcessWithExitCode)
+import System.Timeout qualified as Timeout
 import Test.QuickCheck (Arbitrary (..), Property, choose, counterexample, property, quickCheckResult, vectorOf, (===))
 import Test.QuickCheck qualified as QC
 import Util.Word12 (Word12)
@@ -861,6 +865,7 @@ main = do
       , assertLoadLeft "elf bad arch" elfBadArch Ldr.BadArch
       , assertLoadLeft "elf phoff trunc" elfPhoffTrunc Ldr.Truncated
       , check "showHex64 via OutOfWindow" (Ldr.loadErrorToString (Ldr.OutOfWindow 0x01000000) == "OutOfWindow: 0x1000000")
+      , check "NoSpace renders caps" (Ldr.loadErrorToString Ldr.NoSpace == "NoSpace: total pages >64 or memsz >262144")
       , -- BlkPersist golden truncations
         assertLeft "blk empty" (BP.decodeImage [])
       , assertLeft "blk short header" (BP.decodeImage [0, 1, 2])
@@ -1413,6 +1418,7 @@ main = do
       , checkIO "lib version pin format" libVersionPinGolden
       , checkIO "lib version skew lines" libVersionSkewGolden
       , checkIO "cap deny anonymous" capCheckGolden
+      , checkIO "ipc two receivers one wakeup each" ipcWakeGolden
       , assertLinkError
           "link missing dependency"
           (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
@@ -1800,6 +1806,32 @@ blkTruncGolden :: IO Bool
 blkTruncGolden = case BP.encodeImage [("/a", [1, 2, 3])] of
   Left _ -> check "blk trunc body" False
   Right img -> assertLeft "blk trunc body" (BP.decodeImage (trunc img))
+
+-- | Two blocked receivers each receive exactly one wakeup (no lost, no double).
+ipcWakeGolden :: IO Bool
+ipcWakeGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    ep <- HM.runH Endpoint.newEndpoint
+    r1 <- newEmptyMVar
+    r2 <- newEmptyMVar
+    _ <- forkIO $ do
+      (msg, replyVar) <- HM.runH (Endpoint.recv ep)
+      _ <- HM.runH (Endpoint.reply replyVar (Right msg))
+      putMVar r1 (IT.msgTag msg)
+    _ <- forkIO $ do
+      (msg, replyVar) <- HM.runH (Endpoint.recv ep)
+      _ <- HM.runH (Endpoint.reply replyVar (Right msg))
+      putMVar r2 (IT.msgTag msg)
+    threadDelay 50000
+    let Right mA = IT.mkMessage 11 [] Nothing
+        Right mB = IT.mkMessage 22 [] Nothing
+    _ <- HM.runH (Endpoint.trySend ep mA)
+    _ <- HM.runH (Endpoint.trySend ep mB)
+    t1 <- takeMVar r1
+    t2 <- takeMVar r2
+    _ <- HM.runH (Endpoint.freeEndpoint ep)
+    return (sort [t1, t2] == [11, 22])
+  return (r == Just True)
 
 -- | Capability gate: anonymous denies, wrong token denies, owner allows.
 capCheckGolden :: IO Bool

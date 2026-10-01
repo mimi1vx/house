@@ -17,8 +17,7 @@ built by a toolchain House pins. The caps are therefore a resource budget
 for our own build output rather than untrusted-input hardening, and a DT_*
 tag we have reason to ignore may be ignored. Bounded input stays bounded:
 every cap and every checked bound still holds, and an unrecognised tag is
-still a Left. Only the closed, reasoned set in skipDynTag is tolerated;
-see plans/dynamic-linking-plan.md for the dated decision.
+still a Left. Only the closed, reasoned set in skipDynTag is tolerated.
 -}
 module Kernel.Userspace.Loader (
   LoadError (..),
@@ -565,7 +564,7 @@ loadErrorToString e = case e of
   TooManySegments -> "TooManySegments: >" ++ show maxSegments ++ " size-bearing segments"
   BadSegment s -> "BadSegment: " ++ s
   OverlapSize -> "OverlapSize: p_offset+p_filesz overflow or > file"
-  NoSpace -> "NoSpace: total pages >64 or memsz >256K"
+  NoSpace -> "NoSpace: total pages >" ++ show maxTotalPages ++ " or memsz >" ++ show maxSegMemSz
   Misaligned -> "Misaligned: bad p_align or p_offset"
   OutOfWindow v -> "OutOfWindow: 0x" ++ showHex64 v
   Truncated -> "Truncated"
