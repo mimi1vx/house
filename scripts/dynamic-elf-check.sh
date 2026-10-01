@@ -322,7 +322,7 @@ EOF
 		echo "dynamic-elf-check: the stock GHC closure linked, expected a named refusal" >&2
 		exit 1
 	fi
-	grep -q 'NoSpace: total pages >64 or memsz >256K' "$WORK/house-link.err" || {
+	grep -q 'NoSpace: total pages >64 or memsz >262144' "$WORK/house-link.err" || {
 		echo "dynamic-elf-check: the House closure no longer stops at the first segment-size bound" >&2
 		cat "$WORK/house-link.err" >&2
 		exit 1
