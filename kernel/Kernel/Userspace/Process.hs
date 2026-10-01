@@ -41,7 +41,7 @@ import Foreign.C.Types (CInt (..))
 import Foreign.Marshal qualified as IO
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import H.AdHocMem (allocaArray, bytesEqual, peek, peekElemOff, poke, pokeBytes, pokeElemOff)
-import H.Concurrency (MVar, forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem)
+import H.Concurrency (MVar, forkH, newEmptyMVar, putMVar, takeMVar, threadDelay, withQSem, yield)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import H.Pages qualified as HPages
@@ -1222,7 +1222,11 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
             Nothing -> do
               mReq <- takeParkedDrained pdir
               case mReq of
-                Nothing -> do liftIO (c_parkPipeFd >>= \fd -> void (c_pipeWait fd 5000)); loop
+                Nothing -> do
+                  liftIO c_parkPipeDrain
+                  _ <- liftIO (c_parkPipeFd >>= \fd -> c_pipeWait fd 5000)
+                  yield
+                  loop
                 Just ReqYield -> do resumeWith 0; loop
                 Just (ReqBrk nb) -> do handleBrk nb; loop
                 Just (ReqOpen va fl) -> do handleOpen va fl; loop
@@ -1761,7 +1765,9 @@ pollExit = loop
           c <- liftIO c_get_exit
           return (fromIntegral c)
         else do
-          liftIO (c_parkPipeFd >>= \fd -> void (c_pipeWait fd 5000))
+          liftIO c_parkPipeDrain
+          _ <- liftIO (c_parkPipeFd >>= \fd -> c_pipeWait fd 5000)
+          yield
           loop
 
 {- | Grow a process break within the user window. Maps zero pages for
