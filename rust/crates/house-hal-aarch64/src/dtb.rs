@@ -1,4 +1,7 @@
-#![allow(unused_assignments)]
+#![allow(
+    unused_assignments,
+    reason = "transliteration mirrors C assignment shape"
+)]
 //! DTB parser — `house_dtb.c` transliteration (bounds-checked, 8M cap).
 
 const FDT_MAGIC: u32 = 0xd00dfeed;

@@ -1,4 +1,7 @@
-#![allow(clippy::missing_safety_doc)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "raw entry points mirror C headers"
+)]
 //! MMIO helpers — volatile access abstraction.
 //!
 //! `aarch64` impl owns volatile `*mut u32` + `dmb sy`/`dc cvac` ordering.

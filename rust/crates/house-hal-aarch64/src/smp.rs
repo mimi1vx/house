@@ -7,7 +7,10 @@
 //! house-boot `c_start` from detected cores (Max(DTB,PSCI,GICR)<=32);
 //! affinity follows the live mask (offline target -> first online).
 
-#![allow(static_mut_refs)]
+#![allow(
+    static_mut_refs,
+    reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
+)]
 
 use core::sync::atomic::Ordering;
 

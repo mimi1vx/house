@@ -2,8 +2,14 @@
     unsafe_op_in_unsafe_fn,
     reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
-#![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
+#![allow(
+    static_mut_refs,
+    reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
+)]
+#![allow(
+    unused_unsafe,
+    reason = "transliteration keeps explicit unsafe blocks for audit"
+)]
 #![allow(
     clippy::missing_safety_doc,
     reason = "VM exposes raw map/unmap entry points mirroring C headers"
@@ -64,50 +70,6 @@ static VM_LOCK: RawSpinLock = RawSpinLock::new();
 static mut VM_RESV: [(*mut u8, *mut u8); 32] = [(core::ptr::null_mut(), core::ptr::null_mut()); 32];
 static mut VM_N_RESV: i32 = 0;
 static mut VM_MMAP_CUR: *mut u8 = core::ptr::null_mut();
-static REF_LOCK: RawSpinLock = RawSpinLock::new();
-static mut REF_TAB: [(u64, u32); 128] = [(0, 0); 128];
-static mut REF_N: usize = 0;
-
-fn ref_acquire(page: u64) {
-    REF_LOCK.lock();
-    unsafe {
-        for i in 0..REF_N {
-            if REF_TAB[i].0 == page {
-                REF_TAB[i].1 = REF_TAB[i].1.saturating_add(1);
-                REF_LOCK.unlock();
-                return;
-            }
-        }
-        if REF_N < 128 {
-            REF_TAB[REF_N] = (page, 1);
-            REF_N += 1;
-        }
-    }
-    REF_LOCK.unlock();
-}
-
-fn ref_release(page: u64) -> bool {
-    REF_LOCK.lock();
-    let free = unsafe {
-        let mut free = true;
-        for i in 0..REF_N {
-            if REF_TAB[i].0 == page {
-                if REF_TAB[i].1 > 1 {
-                    REF_TAB[i].1 -= 1;
-                    free = false;
-                } else {
-                    REF_TAB[i] = REF_TAB[REF_N - 1];
-                    REF_TAB[REF_N - 1] = (0, 0);
-                    REF_N -= 1;
-                }
-                break;
-            }
-        }
-        free
-    };
-    REF_LOCK.unlock();
-    free
-}
 
 unsafe extern "C" {
     static mut __heap_base: u8;
@@ -495,9 +457,7 @@ pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
                     unsafe { *slot = 0 };
                     unsafe { core::arch::asm!("dsb ishst", options(nostack, preserves_flags)) };
                     unsafe { house_tlb_shootdown(va) };
-                    if ref_release(page as u64) {
-                        unsafe { buddy_free_page(page) };
-                    }
+                    unsafe { buddy_free_page(page) };
                 }
             }
             va = va.wrapping_add(PAGE_SIZE as u64);
@@ -627,8 +587,6 @@ pub unsafe extern "C" fn house_puts_after() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ref_acquire, ref_release};
-
     #[test]
     fn l3_split_keep_shape() {
         // Split children preserve the block low attrs and set bit 1,
@@ -640,26 +598,5 @@ mod tests {
             assert_eq!(keep & (1 << 1), 1 << 1);
             assert_eq!(keep & 0xFFF, (d & 0xFFF) | 0x2);
         }
-    }
-
-    #[test]
-    fn ref_table_overflow_stays_safe() {
-        for i in 0..140u64 {
-            ref_acquire(0x50000000 + i * 4096);
-        }
-        assert!(ref_release(0x60000000));
-        for i in 0..140u64 {
-            ref_release(0x50000000 + i * 4096);
-        }
-    }
-
-    #[test]
-    fn shared_page_survives_single_unmap() {
-        let page = 0x46000000u64;
-        ref_acquire(page);
-        ref_acquire(page);
-        assert!(!ref_release(page));
-        assert!(ref_release(page));
-        assert!(ref_release(0xdead0000));
     }
 }

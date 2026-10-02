@@ -2,15 +2,36 @@
     unsafe_op_in_unsafe_fn,
     reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
-#![allow(static_mut_refs)]
-#![allow(clippy::manual_c_str_literals)]
-#![allow(clippy::missing_safety_doc)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::unnecessary_cast)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::manual_saturating_arithmetic)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
+#![allow(
+    static_mut_refs,
+    reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
+)]
+#![allow(
+    clippy::manual_c_str_literals,
+    reason = "C-string literals mirror C initializers"
+)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "raw entry points mirror C headers"
+)]
+#![allow(clippy::collapsible_if, reason = "nested guards mirror C control flow")]
+#![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
+#![allow(
+    clippy::too_many_lines,
+    reason = "transliterated dispatch mirrors C switch length"
+)]
+#![allow(
+    clippy::manual_saturating_arithmetic,
+    reason = "saturating arithmetic mirrors C guards"
+)]
+#![allow(
+    unused_variables,
+    reason = "transliteration keeps C parameter names for ABI parity"
+)]
+#![allow(
+    dead_code,
+    reason = "transliterated C surface keeps entries for ABI parity"
+)]
 
 //! `c_start` + exception ownership — `platform/aarch64/c_start.c:50-357` transliteration.
 //!

@@ -3,8 +3,14 @@
     unsafe_op_in_unsafe_fn,
     reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
-#![allow(static_mut_refs)]
-#![allow(unused_variables)]
+#![allow(
+    static_mut_refs,
+    reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
+)]
+#![allow(
+    unused_variables,
+    reason = "transliteration keeps C parameter names for ABI parity"
+)]
 
 //! Phase 1: tinylibc replacement crate — single owner of `panic handler`
 //! and `__stack_chk_guard`/`__stack_chk_fail` (SOTA Rust 03). Also future

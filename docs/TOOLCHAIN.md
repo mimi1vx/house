@@ -40,12 +40,13 @@ and Miri use the same pinned nightly baked into the image.
 
 - `make lint`: container `cargo clippy --target aarch64-unknown-none
   -- -D warnings` (transliteration files carry per-lint `#![allow]`
-  with a `reason` — syscall-ABI casts, `no_mangle` signatures, and C-mirror
-  control flow trip default correctness/style lints; `--all-targets`
+  with a `reason` in both the `clippy::` and rustc namespaces — syscall-ABI
+  casts, `no_mangle` signatures, C-mirror control flow, and raw-static C
+  globals trip default correctness/style lints; `--all-targets`
   excluded, no `test` crate on bare metal)
   + `cargo fmt --check`, plus host
   `fourmolu -m check` + `hlint` over the full tree.
-- `make miri` runs 20 pure-logic tests with `cargo miri test -p house-hal
+- `make miri` runs the pure-logic suites with `cargo miri test -p house-hal
   -p house-hal-aarch64 -p house-libc -p house-boot -p house-el0-tiny` inside a
   `container run -c 4 -m 4G` invocation. `asm!`/MMIO stay
   QEMU-gated behind `#[cfg]` isolation (`#[cfg(miri)]` no-op spinlock

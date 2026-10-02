@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "transliterated C surface keeps entries for ABI parity"
+)]
 
 //! Volatile MMIO helpers — `// SAFETY:` per access.
 //!
