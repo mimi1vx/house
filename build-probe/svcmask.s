@@ -1,26 +1,28 @@
 // EL0 svcmask probe: wait until WRITE is revoked, then prove ENOSYS.
 // The shell narrows this pid via `svcmask <pid> 1` after spawn. This probe
-// loops attempting WRITE(1, "x", 1): success returns 1, revoked returns
-// -38 (ENOSYS). On ENOSYS it prints `svcmask ok` and exits 0; after 500
-// yields without ENOSYS it prints `svcmask fail` and exits 1.
+// loops attempting WRITE(1, "x", 0): success returns 0, revoked returns
+// -38 (ENOSYS). Len 0 probes the mask without UART spam; YIELD every
+// iteration lets Haskell schedule the shell revoke promptly.
+// On ENOSYS it prints `svcmask ok` and exits 0; after 60000
+// iterations without ENOSYS it prints `svcmask fail` and exits 1.
 .arch armv8-a
 .text
 .global _start
 .type _start, %function
 _start:
     mov     x19, #0                 // attempt count
+    movz    x20, #60000             // retry budget
 try_loop:
     adrp    x1, xmsg
     add     x1, x1, :lo12:xmsg
-    mov     x2, #1
+    mov     x2, #0
     mov     x0, #1
-    svc     #1                      // WRITE
+    svc     #1                      // WRITE len 0: no UART, mask still enforced
     cmn     x0, #38                 // x0 == -38 ?
     b.eq    denied
-    // success: yield and retry
-    svc     #0                      // YIELD
+    svc     #0                      // YIELD: enter Haskell so shell runs
     add     x19, x19, #1
-    cmp     x19, #500
+    cmp     x19, x20
     b.lt    try_loop
     b       fail
 denied:
