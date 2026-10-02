@@ -22,7 +22,7 @@ import H.Pages qualified as P
 maxMsgWords :: Int
 maxMsgWords = 8
 
--- | Maximum registry name length (matches H.FileSystem.splitPath 255).
+-- | Maximum registry name length (matches Kernel.FileSystem.Vfs.splitPath 255).
 maxNameLen :: Int
 maxNameLen = 255
 

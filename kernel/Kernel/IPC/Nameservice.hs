@@ -1,5 +1,5 @@
 {- | Well-known name registry (String -> Endpoint) + delegatable caps.
-Names ≤255, no empty or '/' per H.FileSystem.splitPath style.
+Names ≤255, no empty or '/' per Kernel.FileSystem.Vfs.splitPath style.
 Lock order: nsSem -> epSem (never hold epSem across nsRegister).
 Capability enforcement: 'nsLookupChecked' runs 'checkCap'
 (denies with NotOwner on mismatch).

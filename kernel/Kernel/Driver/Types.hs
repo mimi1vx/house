@@ -8,6 +8,7 @@ module Kernel.Driver.Types (
 )
 where
 
+import Control.Concurrent (ThreadId)
 import H.Interrupts (IntId)
 import Kernel.IPC.Types (Endpoint, IpcError)
 import Kernel.IPC.Types qualified as IPC
@@ -23,7 +24,11 @@ data DriverKind
 {- | Metadata kept per registered driver. Invariants: @diName@ non-empty,
 no '/', @<=255@ chars; @diEndpoint@ is a valid 'Endpoint' minted via
 'Kernel.IPC.Endpoint.newEndpoint'; @diIntId@ is @Just (spi n)@ iff
-@diKind == VirtioMMIO@.
+@diKind == VirtioMMIO@. @diService@ is the supervised service thread from
+the endpoint slice (if any); @diEndpoints@ lists every endpoint the
+teardown must drop. A service thread blocked in @recv@ on a freed endpoint
+returns @NoSuchEndpoint@ and exits, so freeing before joining keeps the
+join bounded.
 -}
 data DriverInfo = DriverInfo {
   diName :: String
@@ -31,6 +36,8 @@ data DriverInfo = DriverInfo {
   , diKind :: DriverKind
   , diIntId :: Maybe IntId
   , diSlot :: Maybe Int
+  , diService :: Maybe ThreadId
+  , diEndpoints :: [Endpoint]
   }
   deriving (Eq, Show)
 

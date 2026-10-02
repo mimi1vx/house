@@ -521,6 +521,111 @@ pub unsafe extern "C" fn house_page_budget_try_acquire(pdir: *mut u8, n: u32) ->
     if allowed { 1 } else { 0 }
 }
 
+// Per-pdir syscall mask: 22 bits cover 0x00..0x14. Same shape and lock
+// discipline as BUDGET_TAB, so one place knows things owned by a pdir.
+// Full mask (all 21 used bits) is the boot default; narrowing is explicit
+// via the shell verb. Unknown imm (>0x14) denies.
+static SVC_MASK_LOCK: RawSpinLock = RawSpinLock::new();
+static mut SVC_MASK_TAB: [(u64, u32); 64] = [(0, 0); 64];
+static mut SVC_MASK_N: usize = 0;
+
+const SVC_MASK_FULL: u32 = 0x1FFFFF;
+
+fn svc_mask_get_locked(pdir: u64) -> u32 {
+    unsafe {
+        for i in 0..SVC_MASK_N {
+            if SVC_MASK_TAB[i].0 == pdir {
+                return SVC_MASK_TAB[i].1;
+            }
+        }
+        SVC_MASK_FULL
+    }
+}
+
+fn svc_mask_set_locked(pdir: u64, mask: u32) {
+    unsafe {
+        for i in 0..SVC_MASK_N {
+            if SVC_MASK_TAB[i].0 == pdir {
+                SVC_MASK_TAB[i].1 = mask;
+                return;
+            }
+        }
+        if SVC_MASK_N < 64 {
+            SVC_MASK_TAB[SVC_MASK_N] = (pdir, mask);
+            SVC_MASK_N += 1;
+        }
+    }
+}
+
+/// Reset a root mask to full (spawn, pid0/init).
+///
+/// # Safety
+///
+/// Caller must own `pdir`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_svc_mask_reset(pdir: *mut u8) {
+    if pdir.is_null() {
+        return;
+    }
+    let key = pdir as u64;
+    SVC_MASK_LOCK.lock();
+    svc_mask_set_locked(key, SVC_MASK_FULL);
+    SVC_MASK_LOCK.unlock();
+}
+
+/// Narrow a live root mask (shell verb). Bits beyond 0x14 are ignored.
+///
+/// # Safety
+///
+/// Caller must own `pdir`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_svc_mask_set(pdir: *mut u8, mask: u32) {
+    if pdir.is_null() {
+        return;
+    }
+    let key = pdir as u64;
+    SVC_MASK_LOCK.lock();
+    svc_mask_set_locked(key, mask & SVC_MASK_FULL);
+    SVC_MASK_LOCK.unlock();
+}
+
+/// Read a root mask (full when never set).
+///
+/// # Safety
+///
+/// Caller must own `pdir`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_svc_mask_get(pdir: *mut u8) -> u32 {
+    if pdir.is_null() {
+        return 0;
+    }
+    let key = pdir as u64;
+    SVC_MASK_LOCK.lock();
+    let mask = svc_mask_get_locked(key);
+    SVC_MASK_LOCK.unlock();
+    mask
+}
+
+/// Query whether `imm` is allowed for `pdir`: 1 allowed, 0 denied.
+///
+/// # Safety
+///
+/// `pdir` may be null (denies).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_svc_allowed(pdir: *mut u8, imm: u32) -> i32 {
+    if pdir.is_null() {
+        return 0;
+    }
+    if imm > 0x14 {
+        return 0;
+    }
+    let key = pdir as u64;
+    SVC_MASK_LOCK.lock();
+    let mask = svc_mask_get_locked(key);
+    SVC_MASK_LOCK.unlock();
+    if (mask & (1u32 << imm)) != 0 { 1 } else { 0 }
+}
+
 // TLB shootdown acknowledgements: `house_tlb_shootdown` stamps a generation,
 // sends SGI 1 to every peer, and waits for each peer's ack to reach it.
 static TLB_SD_SEQ: AtomicU32 = AtomicU32::new(0);

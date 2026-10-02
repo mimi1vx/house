@@ -505,11 +505,11 @@ attachDevice slot kind vqRx vqTx mCtrl = do
   _ <- DIRQ.registerIrqForwarding (spi (fromIntegral (16 + slot))) ep
   let intid = spi (fromIntegral (16 + slot))
   let dev = ConDevice slot intid ep vqRx vqTx mCtrl
-  rReg <- DrvReg.registerDriver ("virtio-con" ++ show slot) ep (Just intid) VirtioMMIO
+  tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep conEndpointHandler)
+  rReg <- DrvReg.registerDriver ("virtio-con" ++ show slot) ep (Just intid) VirtioMMIO (Just tid) [ep]
   case rReg of
     Left _ -> do freeQueue vqRx; freeQueue vqTx; freeCtrl mCtrl; return (Left (ConInvalidArg "register failed"))
     Right () -> do
-      _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep conEndpointHandler)
       withQSem conSem $ do m <- readRef conMap; writeRef conMap (Map.insert slot dev m)
       withQSem conSem $ do gmap <- readRef conRxGrants; writeRef conRxGrants (Map.insert slot Map.empty gmap)
       forM_ ([1 .. 4] :: [Int]) $ \_ -> do

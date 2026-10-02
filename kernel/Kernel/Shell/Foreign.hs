@@ -2,10 +2,14 @@
 
 {- | Raw foreign surface for shell dispatch (UART, PSCI, RAM/DTB refs,
 buddy stats, TTBR, mmap/mprotect, demand paging). See rust/c-abi.md.
+`c_uart_puts` is re-exported from `H.Console` so existing callers are
+unchanged; the virtio-console mirror installer is the single site that
+knows the console driver.
 -}
 module Kernel.Shell.Foreign (
   c_uart_puts,
-  conMirror,
+  installConMirror,
+  clearConMirror,
   c_uptime,
   c_off,
   c_reset,
@@ -34,47 +38,34 @@ module Kernel.Shell.Foreign (
 where
 
 import Control.Exception (SomeException, catch)
-import Control.Monad (when)
 import Data.Word (Word64)
 import Foreign.C.String (peekCString)
 import Foreign.C.Types (CChar (..), CInt (..), CLong (..), CSize (..))
 import Foreign.Ptr (Ptr)
-import H.Monad (runH)
-import H.Mutable (Ref, newRef, readRef)
-import H.Unsafe (unsafePerformH)
+import H.Console (c_uart_puts)
+import H.Console qualified as HC
+import H.Monad (H, runH)
 import Kernel.Driver.Virtio.Con qualified as Con
 
-foreign import ccall unsafe "uart_puts" c_uart_puts_raw :: Ptr CChar -> IO ()
-
-{- | All shell output flows through here. Console-mirror interposition point:
-when 'con mirror on', every UART line is best-effort duplicated to the
-virtio-console TX queue (dropped when not inited, never blocks the shell).
+{- | Install the virtio-console mirror for one slot. Best-effort duplicate
+of every UART line to the console TX queue; drops when not inited, never
+blocks the shell.
 -}
-c_uart_puts :: Ptr CChar -> IO ()
-c_uart_puts p = c_uart_puts_raw p >> mirrorOut p
+installConMirror :: Int -> H ()
+installConMirror slot = HC.setConsoleMirror hook
+  where
+    hook :: Ptr CChar -> IO ()
+    hook p =
+      ( do
+          s <- peekCString p
+          _ <- runH (Con.conWriteBytes slot (map (fromIntegral . fromEnum) (take 4096 s)))
+          return ()
+      )
+        `catch` (\(_ :: SomeException) -> return ())
 
-{- | Best-effort mirror of one UART string to the console slot. Swallows all
-exceptions; drops silently unless mirror is on and the server is inited.
--}
-mirrorOut :: Ptr CChar -> IO ()
-mirrorOut p = do
-  on <- runH (readRef conMirror)
-  when on $
-    ( do
-        s <- peekCString p
-        slot <- runH (readRef conMirrorSlot)
-        _ <- runH (Con.conWriteBytes slot (map (fromIntegral . fromEnum) (take 4096 s)))
-        return ()
-    )
-      `catch` (\(_ :: SomeException) -> return ())
-
-{-# NOINLINE conMirror #-}
-conMirror :: Ref Bool
-conMirror = unsafePerformH $ newRef False
-
-{-# NOINLINE conMirrorSlot #-}
-conMirrorSlot :: Ref Int
-conMirrorSlot = unsafePerformH $ newRef 7
+-- | Remove the console mirror hook.
+clearConMirror :: H ()
+clearConMirror = HC.clearConsoleMirror
 
 foreign import ccall unsafe "house_uptime_secs" c_uptime :: IO Word64
 

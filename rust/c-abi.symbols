@@ -234,7 +234,11 @@ house_spin_init
 house_spin_lock
 house_spin_trylock
 house_spin_unlock
+house_svc_allowed
 house_svc_dispatch
+house_svc_mask_get
+house_svc_mask_reset
+house_svc_mask_set
 house_thr_mode
 house_thread_current
 house_thread_init_main

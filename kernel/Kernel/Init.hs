@@ -17,10 +17,10 @@ where
 import Data.ByteString qualified as BS
 import Foreign.C.String (withCString)
 import H.Concurrency (forkSupervisedIO)
+import H.Console (c_uart_puts)
 import H.Monad (runH)
 import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.FileSystem.Vfs qualified as FS
-import Kernel.Shell.Foreign (c_uart_puts)
 import Kernel.Shell.Format (toExecError)
 import Kernel.Userspace qualified as U
 import Kernel.Userspace.Loader qualified as ULdr

@@ -209,11 +209,11 @@ netServerInit slot
                                                           _ <- DIRQ.registerIrqForwarding (spi (fromIntegral (16 + slot))) ep
                                                           let intid = spi (fromIntegral (16 + slot))
                                                           let dev = NetDevice slot mac (Just (Ipv4 10 0 2 15)) (Ipv4 10 0 2 2) (Ipv4 255 255 255 0) intid ep vqRx vqTx
-                                                          rReg <- DrvReg.registerDriver ("virtio-net" ++ show slot) ep (Just intid) VirtioMMIO
+                                                          tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep netEndpointHandler)
+                                                          rReg <- DrvReg.registerDriver ("virtio-net" ++ show slot) ep (Just intid) VirtioMMIO (Just tid) [ep]
                                                           case rReg of
                                                             Left _ -> do freeQueue vqRx; freeQueue vqTx; return (Left (NetInvalidArg "register failed"))
                                                             Right () -> do
-                                                              _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep netEndpointHandler)
                                                               withQSem netSem $ do m <- readRef netMap; writeRef netMap (Map.insert slot dev m)
                                                               withQSem netSem $ do gmap <- readRef netRxGrants; writeRef netRxGrants (Map.insert slot Map.empty gmap)
                                                               forM_ ([1 .. 4] :: [Int]) $ \_ -> do

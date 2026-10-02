@@ -37,6 +37,10 @@ module Kernel.Userspace (
   Kernel.Userspace.Process.grantEndpoint,
   Kernel.Userspace.Process.hasGrant,
   Kernel.Userspace.Process.ParkRequest (..),
+  Kernel.Userspace.Process.svcFullMask,
+  Kernel.Userspace.Process.svcAllowed,
+  Kernel.Userspace.Process.svcNarrow,
+  Kernel.Userspace.Process.svcMaskRevoke,
 
   -- * Scheduler (multiprocess preemption: global run queue, timer quantum)
   Kernel.Userspace.Sched.schedSetQuantum,

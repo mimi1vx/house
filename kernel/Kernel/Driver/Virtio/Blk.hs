@@ -11,8 +11,9 @@ module Kernel.Driver.Virtio.Blk (
   blkReadBlocks,
   blkWriteBlocks,
   blkGetCapacity,
+  blkBlockDev,
 )
 where
 
-import Kernel.Driver.Virtio.Blk.Server (BlkDevice (..), blkGetCapacity, blkReadBlocks, blkServerInit, blkServerTeardown, blkWriteBlocks)
+import Kernel.Driver.Virtio.Blk.Server (BlkDevice (..), blkBlockDev, blkGetCapacity, blkReadBlocks, blkServerInit, blkServerTeardown, blkWriteBlocks)
 import Kernel.Driver.Virtio.Blk.Types (BlkError (..), blkErrorToString, blockBytes, sectorBytes, sectorsPerBlock)
