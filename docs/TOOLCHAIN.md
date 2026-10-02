@@ -67,6 +67,19 @@ and Miri use the same pinned nightly baked into the image.
   gates run in nightly (`house-fs/ipc/driver/virtio-*/userspace/fd-el0/
   fork/proc`, `smp-check`, `smp-hotplug-check` plus the scaling/memory/Miri legs).
 
+## Design notes
+
+Tracked invariants that cost real debugging time:
+
+- `docs/design/shared-page-ownership.md` — `cowRefs` is the sole shared-page
+  registry; `house_vm_munmap` is the one EL1-only exception.
+- `docs/design/tlb-shootdown-protocol.md` — single-initiator shootdown with
+  wrapping-aware acks over SGI 1.
+- `docs/design/park-resume-capability-pinning.md` — parking must return from
+  `house_enter_el0` to free the pinned RTS capability.
+- `docs/design/dso-got-slot-aapcs.md` — a refuted GOT-mapping premise and the
+  register discriminator that settled it.
+
 ## Linker
 
 Bare-metal links use `ld.lld`, not GNU `ld`
