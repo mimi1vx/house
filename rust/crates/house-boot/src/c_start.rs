@@ -438,6 +438,21 @@ pub unsafe extern "C" fn c_handle_sync(
                 }
             }
             // SAFETY: gpr valid 32*8, house_svc_dispatch reads x0..x3 and may write gpr[0].
+            // Inline syscalls (WRITE 0x01, EXIT 0x02) never enter the park gate
+            // above, so enforce the per-pdir mask here. Denied takes inline
+            // ENOSYS without dispatch; denied EXIT must not take the exit
+            // trampoline below (the process stays live with -38 in x0).
+            if svc_imm == 0x01 || svc_imm == 0x02 {
+                let allowed = unsafe { house_svc_allowed(current_pdir(), svc_imm) };
+                if allowed == 0 {
+                    unsafe {
+                        if !gpr.is_null() {
+                            *gpr.add(0) = (-38i64) as u64;
+                        }
+                    }
+                    return elr;
+                }
+            }
             let _r = unsafe {
                 let x0 = if gpr.is_null() { 0 } else { *gpr.add(0) };
                 let x1 = if gpr.is_null() { 0 } else { *gpr.add(1) };
