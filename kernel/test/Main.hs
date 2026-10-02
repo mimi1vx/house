@@ -45,6 +45,7 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Ptr (plusPtr)
 import H.AdHocMem (H, allocaArray, bytesEqual, peek, poke, pokeBytes)
 import H.FileSystem qualified as FS
+import H.Interrupts (IntId (..))
 import H.Monad qualified as HM
 import Kernel.Driver.Virtio.Net.Server qualified as NetServer
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
@@ -53,6 +54,7 @@ import Kernel.FileSystem.BlkPersist qualified as BP
 import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as Endpoint
+import Kernel.IPC.IRQ qualified as IRQ
 import Kernel.IPC.Types qualified as IT
 import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
@@ -1419,6 +1421,9 @@ main = do
       , checkIO "lib version skew lines" libVersionSkewGolden
       , checkIO "cap deny anonymous" capCheckGolden
       , checkIO "ipc two receivers one wakeup each" ipcWakeGolden
+      , checkIO "irq drops counted on full queue" irqDropsGolden
+      , checkIO "serveEndpoint dispatches and exits on free" serveEndpointGolden
+      , checkIO "wedged server yields WouldBlock" wedgedGolden
       , assertLinkError
           "link missing dependency"
           (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
@@ -1831,6 +1836,55 @@ ipcWakeGolden = do
     t2 <- takeMVar r2
     _ <- HM.runH (Endpoint.freeEndpoint ep)
     return (sort [t1, t2] == [11, 22])
+  return (r == Just True)
+
+{- | IRQ drop counter: filling the 32-deep queue then forwarding one more
+IRQ counts exactly one drop, readable via drain and visible via depth.
+-}
+irqDropsGolden :: IO Bool
+irqDropsGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    ep <- HM.runH Endpoint.newEndpoint
+    _ <- HM.runH IRQ.drainIrqDrops
+    let Right m = IT.mkMessage 99 [] Nothing
+    _ <- HM.runH (mapM_ (\_ -> Endpoint.trySend ep m) [1 .. 32 :: Int])
+    qd <- HM.runH (Endpoint.endpointQueueDepth ep)
+    _ <- HM.runH (IRQ.forwardIrq (IntId 99) ep)
+    drops <- HM.runH IRQ.drainIrqDrops
+    drops2 <- HM.runH IRQ.drainIrqDrops
+    _ <- HM.runH (Endpoint.freeEndpoint ep)
+    return (qd == Right 32 && drops == 1 && drops2 == 0)
+  return (r == Just True)
+
+-- | Generic server loop: tag dispatch replies, freed endpoint exits.
+serveEndpointGolden :: IO Bool
+serveEndpointGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    ep <- HM.runH Endpoint.newEndpoint
+    _ <- forkIO $ HM.runH (Endpoint.serveEndpoint ep handler)
+    threadDelay 50000
+    let Right m0 = IT.mkMessage 0 [1, 2] Nothing
+        Right m9 = IT.mkMessage 9 [] Nothing
+    r0 <- HM.runH (Endpoint.call ep m0)
+    r9 <- HM.runH (Endpoint.call ep m9)
+    _ <- HM.runH (Endpoint.freeEndpoint ep)
+    threadDelay 50000
+    return (r0 == Right (IT.Message 0 [1, 2] Nothing) && r9 == Right (IT.Message 0xFFFFFFFF [] Nothing))
+  return (r == Just True)
+  where
+    handler msg = case IT.msgTag msg of
+      0 -> return (Right msg)
+      _ -> return (Right (IT.Message 0xFFFFFFFF [] Nothing))
+
+-- | Wedged server degrades: no server replying yields WouldBlock, not a hang.
+wedgedGolden :: IO Bool
+wedgedGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    ep <- HM.runH Endpoint.newEndpoint
+    let Right m = IT.mkMessage 0 [] Nothing
+    res <- HM.runH (Endpoint.callTimeout 50000 ep m)
+    _ <- HM.runH (Endpoint.freeEndpoint ep)
+    return (res == Left IT.WouldBlock)
   return (r == Just True)
 
 -- | Capability gate: anonymous denies, wrong token denies, owner allows.

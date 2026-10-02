@@ -28,7 +28,7 @@ import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Concurrency qualified as HC
 import H.Interrupts (IntId)
-import H.Monad (H, liftIO)
+import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Dmesg qualified as Dmesg
@@ -37,8 +37,9 @@ import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Blk.Device (blkPollUsed, blkProbeCapacity, blkSubmitRead, blkSubmitWrite)
 import Kernel.Driver.Virtio.Blk.Types (BlkError (..), validateLba)
 import Kernel.Driver.Virtio.Transport qualified as VTrans
+import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
-import Kernel.IPC.Types (Endpoint, Grant (..))
+import Kernel.IPC.Types (Endpoint, Grant (..), IpcError, Message (..))
 
 -- | Blk device record (mirrors VirtioDevice but block-specific).
 data BlkDevice = BlkDevice {
@@ -149,12 +150,24 @@ blkServerInit slot
                       case rReg of
                         Left _ -> return (Left (BlkInvalidArg "register failed"))
                         Right () -> do
+                          _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep blkEndpointHandler)
                           withQSem blkSem $ do
                             m2 <- readRef blkMap
                             writeRef blkMap (Map.insert slot blkDev m2)
                           Dmesg.dmesgLog ("blk slot " ++ show slot ++ ": init ok capacity=" ++ show cap ++ " sectors (" ++ show (cap `div` 8) ++ " blocks)")
                           return (Right blkDev)
                     _ -> return (Left BlkNotReady)
+
+{- | Endpoint service handler: drains IRQ notifications and any early
+endpoint traffic with an error reply so the 32-deep queue cannot fill
+and spill into `irqDrops`. Direct Grant calls stay in place; a later
+slice re-routes filesystem traffic onto tags 0/1.
+-}
+blkEndpointHandler :: Message -> H (Either IpcError Message)
+blkEndpointHandler msg = case msgTag msg of
+  0 -> return (Right (Message 0xFFFFFFFF [] Nothing))
+  1 -> return (Right (Message 0xFFFFFFFF [] Nothing))
+  _ -> return (Right (Message 0xFFFFFFFF [] Nothing))
 
 -- | Teardown blk server.
 blkServerTeardown :: Int -> H (Either BlkError ())

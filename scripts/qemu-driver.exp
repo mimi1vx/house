@@ -33,11 +33,15 @@ expect {
     -re "> " {}
     timeout { puts "\nFAIL: prompt after dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
-# lsdev should run without hang (empty at boot)
+# lsdev should run without hang (empty at boot) and name the IRQ counter
 send "lsdev\r"
 expect {
-    -re "> " { puts "\nPASS: lsdev empty ok" }
+    -re "irq drops=" { puts "\nPASS: lsdev names irq drops" }
     timeout { puts "\nFAIL: lsdev timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: lsdev empty ok" }
+    timeout { puts "\nFAIL: lsdev prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 # virtio scan should print slot 0 (empty on vanilla virt)
 send "virtio scan\r"
@@ -69,8 +73,12 @@ expect {
 }
 send "lsdev\r"
 expect {
-    -re "> " { puts "\nPASS: lsdev after ns reg" }
+    -re "irq drops=" { puts "\nPASS: lsdev names irq drops after reg" }
     timeout { puts "\nFAIL: lsdev after reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: lsdev after ns reg" }
+    timeout { puts "\nFAIL: lsdev prompt after reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 # dmesg should have virtio slot logs
 send "dmesg\r"

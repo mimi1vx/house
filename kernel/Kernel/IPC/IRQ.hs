@@ -4,6 +4,10 @@ Push honors the `maxQueueDepth` Endpoint bound: overflow drops + dmesg-logs.
 -}
 module Kernel.IPC.IRQ (
   irqForward,
+  irqDrops,
+  readIrqDrops,
+  drainIrqDrops,
+  forwardIrq,
 )
 where
 
@@ -36,15 +40,30 @@ irqForward (IntId n) ep = do
   _ <- installHandler (IntId n) handler
   return ()
   where
-    handler = do
-      let msg = Message (fromIntegral n) [] Nothing
-      r <- trySend ep msg
-      case r of
-        Right () -> return ()
-        Left e -> do
-          c <- withQSem irqSem $ do
-            n0 <- readRef irqDrops
-            let n1 = n0 + 1
-            writeRef irqDrops n1
-            return n1
-          Dmesg.dmesgLog ("irq drop intid=" ++ show n ++ " " ++ show e ++ " drops=" ++ show c)
+    handler = forwardIrq (IntId n) ep
+
+-- | Single forward attempt, countable from host tests without GIC wiring.
+forwardIrq :: IntId -> Endpoint -> H ()
+forwardIrq (IntId n) ep = do
+  let msg = Message (fromIntegral n) [] Nothing
+  r <- trySend ep msg
+  case r of
+    Right () -> return ()
+    Left e -> do
+      c <- withQSem irqSem $ do
+        n0 <- readRef irqDrops
+        let n1 = n0 + 1
+        writeRef irqDrops n1
+        return n1
+      Dmesg.dmesgLog ("irq drop intid=" ++ show n ++ " " ++ show e ++ " drops=" ++ show c)
+
+-- | Read the drop counter without resetting (monotonic for `lsdev`).
+readIrqDrops :: H Word64
+readIrqDrops = withQSem irqSem (readRef irqDrops)
+
+-- | Read and reset the drop counter (shell verbs report *new* drops).
+drainIrqDrops :: H Word64
+drainIrqDrops = withQSem irqSem $ do
+  n <- readRef irqDrops
+  writeRef irqDrops 0
+  return n
