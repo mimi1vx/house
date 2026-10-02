@@ -9,7 +9,7 @@ It had not. The routine was `bl callee; ret` without saving `x30`, so the
 trailing `ret` returned to the `bl`'s own return address and re-entered
 itself with `x30 == pc` forever. The mapping was verified page-by-page
 through the gdb stub (`TTBR0` walk to the data page, `xp` read-back equals
-the link-plan resolved value); no flush was added anywhere.
+the link resolved value); no flush was added anywhere.
 
 Discriminator: `info registers` during the wedge shows `pc` at the routine's
 own `ret` with `x30 == pc` and the PLT leftovers (`x16` = GOT slot address,
