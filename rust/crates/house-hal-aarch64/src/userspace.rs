@@ -203,6 +203,9 @@ pub unsafe extern "C" fn house_release_pdir(pdir: *mut u8) -> i32 {
         }
         let _ = evict_asid(pdir);
         budget_remove(pdir as u64);
+        SVC_MASK_LOCK.lock();
+        svc_mask_remove(pdir as u64);
+        SVC_MASK_LOCK.unlock();
         // Unconditional, unlike `house_asid_forget_pdir`: this is the point of
         // no return for the root, so whatever the map held, a recycled root
         // must not inherit the old image's translations.
@@ -553,6 +556,22 @@ fn svc_mask_set_locked(pdir: u64, mask: u32) {
         if SVC_MASK_N < 64 {
             SVC_MASK_TAB[SVC_MASK_N] = (pdir, mask);
             SVC_MASK_N += 1;
+        }
+    }
+}
+
+fn svc_mask_remove(pdir: u64) {
+    unsafe {
+        let mut i = 0;
+        while i < SVC_MASK_N {
+            if SVC_MASK_TAB[i].0 == pdir {
+                let last = SVC_MASK_N - 1;
+                SVC_MASK_TAB[i] = SVC_MASK_TAB[last];
+                SVC_MASK_TAB[last] = (0, 0);
+                SVC_MASK_N = last;
+                break;
+            }
+            i += 1;
         }
     }
 }
