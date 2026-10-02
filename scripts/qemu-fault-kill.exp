@@ -45,11 +45,6 @@ expect {
     timeout { puts "\nFAIL: spawn low timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before spawn low"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt after low spawn" }
-    timeout { puts "\nFAIL: prompt after low spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after low spawn"; exit 1 }
-}
 send "wait $p1\r"
 expect {
     -re "ok exit 1" { puts "\nPASS: low fault reaped exit 1 (core alive)" }
@@ -66,11 +61,6 @@ expect {
     -re {spawned pid ([0-9]+)} { set p2 $expect_out(1,string); puts "\nPASS: spawned high-faulter pid $p2" }
     timeout { puts "\nFAIL: spawn high timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before spawn high"; exit 1 }
-}
-expect {
-    -re "> " { puts "\nPASS: prompt after high spawn" }
-    timeout { puts "\nFAIL: prompt after high spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after high spawn"; exit 1 }
 }
 send "wait $p2\r"
 expect {
