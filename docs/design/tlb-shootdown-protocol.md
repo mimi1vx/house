@@ -18,3 +18,7 @@ Both the requester loop (`0..32`) and the ack store derive the slot from
 A core that goes offline cannot ack; the requester drops it from the pending
 set rather than hanging. Peers signal `sev` after acking so the requester
 sleeps in `wfe` instead of spinning.
+
+Ownership of the pages being invalidated lives in
+`docs/design/shared-page-ownership.md`: `cowRefs` is authoritative, and
+`house_vm_munmap` is the one path that frees without consulting it.

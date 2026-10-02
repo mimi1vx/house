@@ -1,4 +1,7 @@
-#![allow(unused_assignments)]
+#![allow(
+    unused_assignments,
+    reason = "transliteration mirrors C assignment shape"
+)]
 //! Fault-trapped RAM probe — `house_probe.c` transliteration.
 //!
 //! Open-ended: double from 128M until the first fault, bounded only by TCR

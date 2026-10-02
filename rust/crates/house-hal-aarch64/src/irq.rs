@@ -1,6 +1,9 @@
 //! SPSC ring 256+pipe — `irq.c` transliteration.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "transliterated C surface keeps entries for ABI parity"
+)]
 
 use crate::virtio_transport::{virtio_transport_ack, virtio_transport_interrupt_status};
 

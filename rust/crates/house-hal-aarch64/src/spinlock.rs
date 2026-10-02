@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "transliterated C surface keeps entries for ABI parity"
+)]
 
 //! SpinLock — `spinlock.h` transliteration via LDAXR/STXR + DMB SY.
 //! Avoids `core::sync::atomic` to not pull `panic_fmt` for ordering checks.

@@ -1,4 +1,7 @@
-#![allow(clippy::new_without_default)]
+#![allow(
+    clippy::new_without_default,
+    reason = "spinlock has no meaningful default"
+)]
 //! SpinLock — `spinlock.h` transliteration.
 //!
 //! `house-hal-aarch64::spinlock` owns the `LDAXR/STXR` + `dmb sy` loop.

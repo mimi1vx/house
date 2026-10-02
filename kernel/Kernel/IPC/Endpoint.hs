@@ -240,7 +240,8 @@ trySend ep msg = do
     _ -> return r
 
 {- | Blocking recv: dequeue next rendezvous, returning message + reply handle.
-Blocks (polls) until a sender arrives.
+Blocks on the per-endpoint wake `MVar` with a 5 s bounded timeout until a
+sender arrives.
 -}
 recv :: Endpoint -> H (Message, MVar (Either IpcError Message))
 recv ep = loop

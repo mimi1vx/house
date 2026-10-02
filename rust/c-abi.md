@@ -205,7 +205,10 @@ demand pager + `mprotect` RO perm faults + `munmap` translation faults,
 
 VM self-test surface used by the `vm` shell command (`vm-ok` gate):
 demand-100 pages, `mprotect` RO perm fault, `munmap` translation fault,
-`house_puts_after` ordering marker.
+`house_puts_after` ordering marker. Shared-page ownership is documented in
+`docs/design/shared-page-ownership.md`: `cowRefs` is the sole registry and
+`house_vm_munmap` is the one path that frees without consulting it,
+reachable only from EL1 diagnostics.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|

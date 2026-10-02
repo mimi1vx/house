@@ -1,5 +1,11 @@
-#![allow(dead_code)]
-#![allow(clippy::missing_safety_doc)]
+#![allow(
+    dead_code,
+    reason = "transliterated C surface keeps entries for ABI parity"
+)]
+#![allow(
+    clippy::missing_safety_doc,
+    reason = "raw entry points mirror C headers"
+)]
 
 //! Arch-agnostic HAL traits — extension point for `house-hal-riscv64`.
 //!

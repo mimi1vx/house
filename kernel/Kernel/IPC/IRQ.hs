@@ -1,6 +1,6 @@
 {- | IRQ forwarding via H.Interrupts -> Endpoint (non-blocking trySend).
-Dispatcher remains bounded (drainBounded 64); handler never blocks.
-Push honors the 32-deep Endpoint bound: overflow drops + dmesg-logs.
+Dispatcher drains to 256 behind a bounded `c_pipeWait`; handler never blocks.
+Push honors the `maxQueueDepth` Endpoint bound: overflow drops + dmesg-logs.
 -}
 module Kernel.IPC.IRQ (
   irqForward,
@@ -26,7 +26,8 @@ irqDrops :: Ref Word64
 irqDrops = unsafePerformH $ newRef 0
 
 {- | Forward GIC INTID as message tag to endpoint. Non-blocking.
-Uses trySend so ISR dispatcher (threadDelay 20ms + drainBounded 64) never blocks on full queue.
+Uses trySend so the handler never blocks on a full queue; the dispatcher
+drains to 256 behind a bounded `c_pipeWait`.
 Tag encodes IntId (Word32 -> Word64). Drops (QueueFull/freed endpoint)
 are counted + dmesg-logged so IRQ storms stay visible.
 -}

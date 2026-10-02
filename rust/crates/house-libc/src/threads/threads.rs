@@ -15,18 +15,36 @@
     clippy::while_immutable_condition,
     reason = "condition shape mirrors C scheduler control flow"
 )]
-#![allow(dead_code)]
-#![allow(unused_variables)]
-#![allow(unused_unsafe)]
+#![allow(
+    dead_code,
+    reason = "transliterated C surface keeps entries for ABI parity"
+)]
+#![allow(
+    unused_variables,
+    reason = "transliteration keeps C parameter names for ABI parity"
+)]
+#![allow(
+    unused_unsafe,
+    reason = "transliteration keeps explicit unsafe blocks for audit"
+)]
 #![allow(
     unsafe_op_in_unsafe_fn,
     reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
-#![allow(static_mut_refs)]
-#![allow(suspicious_runtime_symbol_definitions)]
-#![allow(unused_assignments)]
-#![allow(unused_mut)]
-#![allow(function_casts_as_integer)]
+#![allow(
+    static_mut_refs,
+    reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
+)]
+#![allow(
+    suspicious_runtime_symbol_definitions,
+    reason = "EL1 entry symbols mirror C runtime names"
+)]
+#![allow(
+    unused_assignments,
+    reason = "transliteration mirrors C assignment shape"
+)]
+#![allow(unused_mut, reason = "transliteration mirrors C mutable locals")]
+#![allow(function_casts_as_integer, reason = "ABI casts mirror C widths")]
 
 #[derive(Copy, Clone)]
 #[repr(C)]

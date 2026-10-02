@@ -19,14 +19,23 @@
     reason = "explicit returns mirror C control flow"
 )]
 #![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
-#![allow(unused_variables)]
-#![allow(unexpected_cfgs)]
+#![allow(
+    unused_variables,
+    reason = "transliteration keeps C parameter names for ABI parity"
+)]
+#![allow(unexpected_cfgs, reason = "bare-metal cfg gates have host test stubs")]
 #![allow(
     unsafe_op_in_unsafe_fn,
     reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
-#![allow(static_mut_refs)]
-#![allow(clashing_extern_declarations)]
+#![allow(
+    static_mut_refs,
+    reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
+)]
+#![allow(
+    clashing_extern_declarations,
+    reason = "C header redeclares across transliteration units"
+)]
 pub mod errno;
 pub mod fd;
 pub mod signal;

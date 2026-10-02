@@ -11,7 +11,10 @@
     reason = "dangling-pointer shape mirrors C provenance"
 )]
 #![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
-#![allow(unused_variables)]
+#![allow(
+    unused_variables,
+    reason = "transliteration keeps C parameter names for ABI parity"
+)]
 use core::ffi::c_void;
 
 #[unsafe(no_mangle)]

@@ -17,7 +17,6 @@ module Kernel.Userspace.Types (
   procExitMap,
   procStopMap,
   userSem,
-  processExitVar,
 )
 where
 
@@ -25,7 +24,6 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word64)
 import H.Concurrency (MVar, QSem, newQSem)
-import H.Concurrency qualified as HC
 import H.Mutable (Ref, newRef)
 import H.PhysicalMemory (PhysPage)
 import H.Unsafe (unsafePerformH)
@@ -80,7 +78,3 @@ userSem = unsafePerformH (newQSem 1)
 {-# NOINLINE procStopMap #-}
 procStopMap :: Ref (Map Pid StopAck)
 procStopMap = unsafePerformH (newRef Map.empty)
-
-{-# NOINLINE processExitVar #-}
-processExitVar :: MVar Int
-processExitVar = unsafePerformH HC.newEmptyMVar

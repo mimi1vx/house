@@ -11,7 +11,8 @@ import Kernel.IPC.IRQ (irqForward)
 import Kernel.IPC.Types (Endpoint)
 
 {- | Forward GIC INTID to endpoint via 'irqForward' (non-blocking trySend).
-Bounded 32 queue; dispatcher stays bounded 64. Tag encodes INTID.
+Bounded `maxQueueDepth` queue; dispatcher drains to 256 behind a bounded
+`c_pipeWait`. Tag encodes INTID.
 -}
 registerIrqForwarding :: IntId -> Endpoint -> H (Either DriverError ())
 registerIrqForwarding intid ep = do
