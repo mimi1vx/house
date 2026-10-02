@@ -34,6 +34,8 @@ library
   build-depends:
     base >= 4.22 && < 5
 
+-- Host-side codegen stubs: each prints a stub line on the host; only
+-- exe:house-gen emits real EL0 assembly (see scripts/mk-userspace.sh).
 executable house-hello
   import: warnings
   main-is: Hello.hs
