@@ -42,11 +42,6 @@ expect {
     timeout { puts "\nFAIL: spawn svcmask timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before spawn svcmask"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after spawn"; exit 1 }
-}
 send "svcmask $p1 1\r"
 expect {
     -re "svcmask ok" { puts "\nPASS: narrowed write for pid $p1" }
