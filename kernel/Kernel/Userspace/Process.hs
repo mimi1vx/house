@@ -145,11 +145,19 @@ svcNarrow mask imm
   | imm > 0x14 = mask
   | otherwise = mask .&. complement (1 `shiftL` fromIntegral imm)
 
+-- | Write a mask and read it back: False when the Rust table dropped it.
+setSvcMaskVerified :: VM.PageMap -> Word32 -> H Bool
+setSvcMaskVerified pdir mask = do
+  let ptr = VM.fromPageMap pdir
+  liftIO (c_svc_mask_set ptr mask)
+  back <- liftIO (c_svc_mask_get ptr)
+  return (back == mask)
+
 -- | Copy the syscall mask from one root to another (fork inherit).
-inheritSvcMask :: VM.PageMap -> VM.PageMap -> H ()
+inheritSvcMask :: VM.PageMap -> VM.PageMap -> H Bool
 inheritSvcMask src dst = do
   m <- liftIO (c_svc_mask_get (VM.fromPageMap src))
-  liftIO (c_svc_mask_set (VM.fromPageMap dst) m)
+  setSvcMaskVerified dst m
 
 -- | Revoke one syscall for a live pid (shell verb). Returns the new mask.
 svcMaskRevoke :: Pid -> Word32 -> H (Either String Word32)
@@ -163,8 +171,8 @@ svcMaskRevoke pid imm
           let ptr = VM.fromPageMap (procPdir pr)
           cur <- liftIO (c_svc_mask_get ptr)
           let narrowed = svcNarrow cur imm
-          liftIO (c_svc_mask_set ptr narrowed)
-          return (Right narrowed)
+          ok <- setSvcMaskVerified (procPdir pr) narrowed
+          if ok then return (Right narrowed) else return (Left "mask table full")
 
 stackTop :: Word64
 stackTop = stackPageStart + 4096
@@ -756,10 +764,19 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
               modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
               grants <- readRef procGrants
               writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants) grants)
-              inheritSvcMask (procPdir parent) childPdir
-              Vfs.vfsForkPid parentInt pidInt
-              Fd.fdFork parentPid child
-              return (Right child)
+              maskOk <- inheritSvcMask (procPdir parent) childPdir
+              if not maskOk
+                then do
+                  modifyRef procMap (Map.delete child)
+                  grants1 <- readRef procGrants
+                  writeRef procGrants (Map.delete child grants1)
+                  writeRef pidNext pidInt
+                  freePDir childPdir
+                  return (Left NoSpace)
+                else do
+                  Vfs.vfsForkPid parentInt pidInt
+                  Fd.fdFork parentPid child
+                  return (Right child)
 
 {- | Share [minVAddr, hi) page by page (capped at 8192 pages), descending
 only into user tables: the fresh 'allocPageMap' L1 carries cloned kernel
@@ -910,38 +927,44 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                 then do freePDir childPdir; return (Left NoSpace)
                 else do
                   liftIO (c_budget_reset childPtr)
-                  inheritSvcMask (procPdir parent) childPdir
-                  exitVar <- newEmptyMVar
-                  stopVar <- newEmptyMVar
-                  modifyRef procExitMap (Map.insert child exitVar)
-                  modifyRef procStopMap (Map.insert child stopVar)
-                  modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
-                  grants0 <- readRef procGrants
-                  writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants0) grants0)
-                  Sched.schedRegister child
-                  Vfs.vfsForkPid parentInt pidInt
-                  Fd.fdFork parentPid child
-                  asid <- liftIO (c_asid_for childPtr)
-                  cloned <- liftIO (c_el0_clone parentPtr childPtr)
-                  if cloned /= 0
+                  maskOk <- inheritSvcMask (procPdir parent) childPdir
+                  if not maskOk
                     then do
-                      modifyRef procMap (Map.delete child)
-                      modifyRef procExitMap (Map.delete child)
-                      modifyRef procStopMap (Map.delete child)
-                      grants1 <- readRef procGrants
-                      writeRef procGrants (Map.delete child grants1)
-                      Vfs.vfsReleasePid pidInt
-                      Fd.fdRelease child
                       liftIO (c_el0_unregister childPtr)
                       freePDir childPdir
-                      return (Left (BadSegment "clone slot"))
+                      return (Left NoSpace)
                     else do
-                      _ <- forkH $ do
-                        liftIO (c_set_pdir childPtr)
-                        _ <- liftIO (c_resume_el0 childPtr asid 0)
-                        parkLoop childPdir [] child childPtr asid exitVar stopVar 0 []
-                        return ()
-                      return (Right child)
+                      exitVar <- newEmptyMVar
+                      stopVar <- newEmptyMVar
+                      modifyRef procExitMap (Map.insert child exitVar)
+                      modifyRef procStopMap (Map.insert child stopVar)
+                      modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
+                      grants0 <- readRef procGrants
+                      writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants0) grants0)
+                      Sched.schedRegister child
+                      Vfs.vfsForkPid parentInt pidInt
+                      Fd.fdFork parentPid child
+                      asid <- liftIO (c_asid_for childPtr)
+                      cloned <- liftIO (c_el0_clone parentPtr childPtr)
+                      if cloned /= 0
+                        then do
+                          modifyRef procMap (Map.delete child)
+                          modifyRef procExitMap (Map.delete child)
+                          modifyRef procStopMap (Map.delete child)
+                          grants1 <- readRef procGrants
+                          writeRef procGrants (Map.delete child grants1)
+                          Vfs.vfsReleasePid pidInt
+                          Fd.fdRelease child
+                          liftIO (c_el0_unregister childPtr)
+                          freePDir childPdir
+                          return (Left (BadSegment "clone slot"))
+                        else do
+                          _ <- forkH $ do
+                            liftIO (c_set_pdir childPtr)
+                            _ <- liftIO (c_resume_el0 childPtr asid 0)
+                            parkLoop childPdir [] child childPtr asid exitVar stopVar 0 []
+                            return ()
+                          return (Right child)
 
 {- | Unmap every user page in [minVAddr, hi), releasing the backing host
 pages. Shared pages only drop their 'cowRefs' count (the host page frees
