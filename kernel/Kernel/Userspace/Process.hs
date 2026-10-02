@@ -1298,7 +1298,7 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                   _ <- liftIO (c_parkPipeFd >>= \fd -> c_pipeWait fd 5000)
                   yield
                   loop
-                Just ReqYield -> do resumeWith 0; loop
+                Just ReqYield -> do resumeWith 0; threadDelay 100; loop
                 Just (ReqBrk nb) -> do handleBrk nb; loop
                 Just (ReqOpen va fl) -> do handleOpen va fl; loop
                 Just (ReqRead fd va ln) -> do handleRead fd va ln; loop
