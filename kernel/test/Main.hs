@@ -21,7 +21,7 @@ any FFI (foreign symbols are stubbed at link time, never called):
   bad-magic/truncation/traversal/oversize rejects, unpack via the fake
   backends, manifest line validation, RamFS quota math + over-quota
   refusal.
-* H.FileSystem.splitPath: normalization goldens.
+* Kernel.FileSystem.Vfs.splitPath: normalization goldens.
 * Util.Word12: Enum/Ix contract errors fire (HasCallStack-annotated),
   guarded paths stay pure.
 -}
@@ -42,15 +42,18 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isNothing)
 import Data.Set qualified as Set
 import Data.Word (Word16, Word32, Word64, Word8)
+import Foreign.C.String (withCString)
 import Foreign.Ptr (plusPtr)
 import H.AdHocMem (H, allocaArray, bytesEqual, peek, poke, pokeBytes)
-import H.FileSystem qualified as FS
+import H.Console qualified as Console
 import H.Interrupts (IntId (..))
 import H.Monad qualified as HM
 import Kernel.Driver.Virtio.Net.Server qualified as NetServer
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types qualified as NT
+import Kernel.FileSystem.BlkFs qualified as BlkFs
 import Kernel.FileSystem.BlkPersist qualified as BP
+import Kernel.FileSystem.BlockDev (BlockDev (..))
 import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as Endpoint
@@ -933,13 +936,13 @@ main = do
       , check "blk bytes NUL+high round-trip" (case BP.encodeImage [("/b", [0, 128, 255, 0, 1])] of Left _ -> False; Right img -> BP.decodeImage img == Right [("/b", [0, 128, 255, 0, 1])])
       , check "latin1 edge round-trip" (let enc s = [fromIntegral (ord c `mod` 256) :: Word8 | c <- s]; dec bs = [chr (fromIntegral b) | b <- bs]; s = dec [0 .. 255] in dec (enc s) == s)
       , -- splitPath goldens
-        check "splitPath a/b" (FS.splitPath "/a/b" == Right ["a", "b"])
-      , check "splitPath collapse" (FS.splitPath "/a//b" == Right ["a", "b"])
-      , check "splitPath dot" (FS.splitPath "/a/./b" == Right ["a", "b"])
-      , check "splitPath dotdot" (FS.splitPath "/a/../b" == Right ["b"])
-      , check "splitPath root" (FS.splitPath "/" == Right [])
-      , check "splitPath confined" (FS.splitPath "/.." == Right [])
-      , assertLeft "splitPath empty" (FS.splitPath "")
+        check "splitPath a/b" (Vfs.splitPath "/a/b" == Right ["a", "b"])
+      , check "splitPath collapse" (Vfs.splitPath "/a//b" == Right ["a", "b"])
+      , check "splitPath dot" (Vfs.splitPath "/a/./b" == Right ["a", "b"])
+      , check "splitPath dotdot" (Vfs.splitPath "/a/../b" == Right ["b"])
+      , check "splitPath root" (Vfs.splitPath "/" == Right [])
+      , check "splitPath confined" (Vfs.splitPath "/.." == Right [])
+      , assertLeft "splitPath empty" (Vfs.splitPath "")
       , -- Word12 guarded paths stay pure
         check "word12 wrap" ((4096 :: Word12) == (0 :: Word12))
       , check "word12 maxBound" (fromEnum (maxBound :: Word12) == 4095)
@@ -1424,6 +1427,11 @@ main = do
       , checkIO "irq drops counted on full queue" irqDropsGolden
       , checkIO "serveEndpoint dispatches and exits on free" serveEndpointGolden
       , checkIO "wedged server yields WouldBlock" wedgedGolden
+      , check "svc mask full allows all" svcMaskFullGolden
+      , check "svc mask narrow revokes one" svcMaskNarrowGolden
+      , check "svc mask fork inherit exec retain" svcMaskInheritGolden
+      , checkIO "blockdev fake maps to FsError" blockDevGolden
+      , checkIO "console hook set clear" consoleHookGolden
       , assertLinkError
           "link missing dependency"
           (linkWith elfLinkMain (Right . setMainRelocations [] . setMainNeeded ["missing.so.0"]) [])
@@ -1886,6 +1894,73 @@ wedgedGolden = do
     _ <- HM.runH (Endpoint.freeEndpoint ep)
     return (res == Left IT.WouldBlock)
   return (r == Just True)
+
+-- | Full mask allows every defined imm and denies beyond 0x14.
+svcMaskFullGolden :: Bool
+svcMaskFullGolden =
+  all (Proc.svcAllowed Proc.svcFullMask) [0 .. 0x14]
+    && not (Proc.svcAllowed Proc.svcFullMask 0x15)
+    && Proc.svcFullMask == 0x1FFFFF
+
+-- | Narrowing revokes exactly one imm.
+svcMaskNarrowGolden :: Bool
+svcMaskNarrowGolden =
+  let narrowed = Proc.svcNarrow Proc.svcFullMask 0x01
+   in not (Proc.svcAllowed narrowed 0x01)
+        && Proc.svcAllowed narrowed 0x00
+        && Proc.svcAllowed narrowed 0x02
+        && Proc.svcNarrow Proc.svcFullMask 0x99 == Proc.svcFullMask
+
+-- | Fork inherits the narrowed mask; exec retains it (same value).
+svcMaskInheritGolden :: Bool
+svcMaskInheritGolden =
+  let parent = Proc.svcNarrow Proc.svcFullMask 0x01
+      child = Proc.svcNarrow parent 0x01
+      retained = child
+   in not (Proc.svcAllowed child 0x01)
+        && Proc.svcAllowed child 0x00
+        && retained == child
+        && Proc.svcAllowed Proc.svcFullMask 0x01
+
+{- | BlockDev mapping: a fake device with all-zero block 0 reads as empty,
+and an error return surfaces as FsError (not a throw).
+-}
+blockDevGolden :: IO Bool
+blockDevGolden = do
+  let fake =
+        BlockDev {
+          bdCapacity = \_ -> return (Right 128)
+          , bdRead = \_ _ -> return (Right (replicate 4096 0))
+          , bdWrite = \_ _ _ -> return (Right ())
+          }
+      failing =
+        BlockDev {
+          bdCapacity = \_ -> return (Left (Vfs.EINVAL "blk I/O error"))
+          , bdRead = \_ _ -> return (Left (Vfs.EINVAL "blk I/O error"))
+          , bdWrite = \_ _ _ -> return (Left (Vfs.EINVAL "blk I/O error"))
+          }
+  rEmpty <- HM.runH (BlkFs.blkfsCheck fake 0)
+  rFail <- HM.runH (BlkFs.blkfsCheck failing 0)
+  return (rEmpty == Right () && isLeft rFail)
+  where
+    isLeft (Left _) = True
+    isLeft _ = False
+
+-- | Console hook: set fires on print, clear silences, no hook is exactly raw.
+consoleHookGolden :: IO Bool
+consoleHookGolden = do
+  ref <- newIORef (0 :: Int)
+  _ <- HM.runH Console.clearConsoleMirror
+  withCString "hi" Console.c_uart_puts
+  n0 <- readIORef ref
+  _ <- HM.runH (Console.setConsoleMirror (\_ -> writeIORef ref 1))
+  withCString "hi" Console.c_uart_puts
+  n1 <- readIORef ref
+  _ <- HM.runH Console.clearConsoleMirror
+  writeIORef ref 0
+  withCString "hi" Console.c_uart_puts
+  n2 <- readIORef ref
+  return (n0 == 0 && n1 == 1 && n2 == 0)
 
 -- | Capability gate: anonymous denies, wrong token denies, owner allows.
 capCheckGolden :: IO Bool

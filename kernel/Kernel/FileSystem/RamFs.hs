@@ -6,8 +6,8 @@
 
 Pure 'H.Pages' backing, no host I/O. Single global root protected by
 one 'QSem' (matches 'H.Pages.pageSem' pattern). Exposed as 'ramfsOps'
-for the VFS switch; 'H.FileSystem' is a thin shim over the default
-namespace.
+for the VFS switch; see 'Kernel.FileSystem.Vfs.splitPath' for path
+rules.
 
 Quota (defense-in-depth against hostile initrd starving the pager):
 used pages are capped at 'quotaBytes' (10% of RAM, 16 MiB floor);

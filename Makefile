@@ -293,6 +293,10 @@ house-fault-kill-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-fault-kill.exp $(SPIKE_DIR)/build/house.bin 'fault-kill-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-fault-kill.exp $(SPIKE_DIR)/build/house.bin 'fault-kill-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
+house-svcmask-check: house-build initrd
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-svcmask.exp $(SPIKE_DIR)/build/house.bin 'svcmask-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
+	expect scripts/qemu-svcmask.exp $(SPIKE_DIR)/build/house.bin 'svcmask-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
+
 # EL0 fork/wait/exec via park ring (multiprocess step 9): fork probe
 # parent/child distinct + wait reaps; exec probe replaces image w/ hello
 house-fork-check: house-build initrd
@@ -471,6 +475,7 @@ check-tcg:
 	$(MAKE) house-dynamic-userspace-check TCG_ONLY=1
 	$(MAKE) house-fault-budget-check TCG_ONLY=1
 	$(MAKE) house-fault-kill-check TCG_ONLY=1
+	$(MAKE) house-svcmask-check TCG_ONLY=1
 	$(MAKE) house-ipc-el0-check TCG_ONLY=1
 	$(MAKE) house-tls-el0-check TCG_ONLY=1
 	$(MAKE) rust-check

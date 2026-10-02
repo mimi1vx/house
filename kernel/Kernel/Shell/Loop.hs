@@ -36,7 +36,6 @@ import GHC.Conc (
  )
 import H.Concurrency (forkSupervisedIO)
 import H.Monad (liftIO, runH)
-import H.Mutable (writeRef)
 import H.VirtualMemory qualified as VM
 import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.PL011 qualified as PL011
@@ -63,7 +62,7 @@ import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (EndpointId (..), Message (..))
 import Kernel.LineEditor qualified as LE
 import Kernel.SMP qualified as SMP
-import Kernel.Shell.Foreign (c_asid_map_len, c_uart_puts, conMirror)
+import Kernel.Shell.Foreign (c_asid_map_len, c_uart_puts, clearConMirror, installConMirror)
 import Kernel.Shell.Format (hexDigit, showFsError, showHex, toExecError)
 import Kernel.Shell.Mem (handleDetect, handleFree, handleMem, handlePalloc)
 import Kernel.Shell.Parse (parseIpv4)
@@ -201,6 +200,8 @@ loop = do
       ["wait", s] -> handleWaitOne s
       ["quantum"] -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
       ["quantum", s] -> handleQuantum s
+      ["svcmask"] -> withCString "usage: svcmask <pid> <imm> (0x00..0x14 revoked)\n" c_uart_puts
+      ["svcmask", spid, simm] -> handleSvcMask spid simm
       _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     -- Echo stays a shell builtin (not a /bin/echo wrapper): output
     -- flows through c_uart_puts, the console-mirror interposition point.
@@ -473,13 +474,17 @@ loop = do
       if slot < 0
         then withCString "usage: blk sync [slot]|mount <slot>\n" c_uart_puts
         else do
-          r <- runH (BlkPersist.persistSave slot)
+          r <- runH $ do
+            bd <- Blk.blkBlockDev slot
+            BlkPersist.persistSave bd slot
           case r of
             Left e -> withCString (BlkPersist.persistErrorToString e ++ "\n") c_uart_puts
             Right () -> withCString "sync ok\n" c_uart_puts
     handleBlkMount s = case reads s of
       [(n, "")] -> do
-        r <- runH (BlkPersist.persistRestore n)
+        r <- runH $ do
+          bd <- Blk.blkBlockDev n
+          BlkPersist.persistRestore bd n
         case r of
           Left e -> withCString (BlkPersist.persistErrorToString e ++ "\n") c_uart_puts
           Right () -> withCString "mount ok\n" c_uart_puts
@@ -487,15 +492,16 @@ loop = do
     handleBlkRoot s = case reads s of
       [(n, "")] -> do
         r <- runH $ do
+          bd <- Blk.blkBlockDev n
           layers <- FS.vfsLayerCount FS.defaultNamespace "/"
           if layers > 1
             then return (Left "root blocked: already mounted")
             else do
-              valid <- BlkFs.blkfsCheck n
+              valid <- BlkFs.blkfsCheck bd n
               case valid of
                 Left e -> return (Left (showFsError e))
                 Right () -> do
-                  mounted <- FS.vfsMountLayer FS.defaultNamespace "/" (BlkFs.blkfsOps n)
+                  mounted <- FS.vfsMountLayer FS.defaultNamespace "/" (BlkFs.blkfsOps bd n)
                   return $ case mounted of
                     Left e -> Left (showFsError e)
                     Right () -> Right ()
@@ -603,7 +609,7 @@ loop = do
           Right () -> withCString "teardown ok\n" c_uart_puts
       _ -> withCString "usage: con teardown <slot>\n" c_uart_puts
     handleConMirror on = do
-      _ <- runH (writeRef conMirror on)
+      _ <- runH (if on then installConMirror 7 else clearConMirror)
       withCString (if on then "mirror on\n" else "mirror off\n") c_uart_puts
     findConSlot xs = case filter ("virtio-con" `isPrefixOf`) xs of
       (x : _) -> case reads (drop (length "virtio-con") x) of [(n, "")] -> n; _ -> 0
@@ -863,6 +869,13 @@ loop = do
         _ <- runH (U.schedSetQuantum (fromIntegral n))
         withCString ("quantum ok " ++ show n ++ "\n") c_uart_puts
       _ -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
+    handleSvcMask spid simm = case (reads spid :: [(Int, String)], reads simm :: [(Int, String)]) of
+      ([(pid, "")], [(imm, "")]) | imm >= 0 && imm <= 0x14 -> do
+        r <- runH (U.svcMaskRevoke (U.Pid pid) (fromIntegral imm))
+        case r of
+          Left e -> withCString ("svcmask failed: " ++ e ++ "\n") c_uart_puts
+          Right m -> withCString ("svcmask ok pid=" ++ show pid ++ " mask=" ++ show m ++ "\n") c_uart_puts
+      _ -> withCString "usage: svcmask <pid> <imm> (0x00..0x14 revoked)\n" c_uart_puts
     usage =
       unlines
         [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname [-asnrvmio] | uptime | shutdown [-h|-r] -- halt or reboot the machine"
@@ -900,6 +913,7 @@ loop = do
         , "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/fd/ipc, EL0 eret (TTBR0/ASID/pager)"
         , "       spawn </path> [args...] -- run without waiting (prints pid) | jobs -- list live pids | wait [pid] -- reap (all when bare)"
         , "       quantum <ticks> -- preempt quantum in timer ticks (0..1000000, 0 means 1; default 10)"
+        , "       svcmask <pid> <imm> -- revoke one syscall for a live pid (0x00..0x14)"
         , "       fdtest -- per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)"
         , "       forktest -- EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)"
         , "       loaderrefs [path] -- launch two dynamic images (default /bin/hello-dyn), verify finalized DSO page sharing, then drain refs"

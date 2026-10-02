@@ -32,9 +32,8 @@ import H.Concurrency (QSem, newQSem, withQSem)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import Kernel.Driver.Virtio.Blk.Server qualified as Blk
-import Kernel.Driver.Virtio.Blk.Types (BlkError)
 import Kernel.FileSystem.BlkPersist qualified as BP
+import Kernel.FileSystem.BlockDev (BlockDev (..))
 import Kernel.FileSystem.Vfs (
   FsError (..),
   FsOps (..),
@@ -76,9 +75,6 @@ cachedDirs slot = withQSem blkDirSem $ do
 
 -- Image I/O ---------------------------------------------------------------------
 
-blkError :: BlkError -> FsError
-blkError _ = EINVAL "blk I/O error"
-
 isZeroBlock :: [Word8] -> Bool
 isZeroBlock = all (== 0)
 
@@ -87,19 +83,19 @@ Header (magic + version + caps + total) is validated from block 0
 and total is checked against device capacity before any further
 block is read, so hostile lengths cannot drive unbounded reads.
 -}
-loadFiles :: Int -> H (Either FsError [(FilePath, [Word8])])
-loadFiles slot = do
-  r0 <- Blk.blkReadBlockBytes slot 0
+loadFiles :: BlockDev -> Int -> H (Either FsError [(FilePath, [Word8])])
+loadFiles bd slot = do
+  r0 <- bdRead bd slot 0
   case r0 of
-    Left e -> return (Left (blkError e))
+    Left e -> return (Left e)
     Right b0
       | isZeroBlock (take 4096 b0) -> return (Right [])
       | otherwise -> case BP.headerTotal b0 of
           Left s -> return (Left (EINVAL ("bad image: " ++ s)))
           Right total -> do
-            eCap <- Blk.blkGetCapacity slot
+            eCap <- bdCapacity bd slot
             case eCap of
-              Left e -> return (Left (blkError e))
+              Left e -> return (Left e)
               Right capSectors -> do
                 let blkBlocks = fromIntegral (capSectors `div` 8) :: Int
                     need = (total + 4095) `div` 4096
@@ -108,17 +104,17 @@ loadFiles slot = do
                   else do
                     eRest <- readBlocks slot 1 (need - 1)
                     case eRest of
-                      Left e -> return (Left (blkError e))
+                      Left e -> return (Left e)
                       Right rest ->
                         let img = take total (b0 ++ concat rest)
                          in case BP.decodeImage img of
                               Left s -> return (Left (EINVAL ("bad image: " ++ s)))
                               Right files -> return (Right files)
   where
-    readBlocks :: Int -> Int -> Int -> H (Either BlkError [[Word8]])
+    readBlocks :: Int -> Int -> Int -> H (Either FsError [[Word8]])
     readBlocks _ _ 0 = return (Right [])
     readBlocks s lba n = do
-      r <- Blk.blkReadBlockBytes s (fromIntegral lba)
+      r <- bdRead bd s (fromIntegral lba)
       case r of
         Left e -> return (Left e)
         Right b -> do
@@ -128,13 +124,13 @@ loadFiles slot = do
             Right bs -> return (Right (b : bs))
 
 -- | Encode and store, data blocks first and superblock last.
-storeFiles :: Int -> [(FilePath, [Word8])] -> H (Either FsError ())
-storeFiles slot files = case BP.encodeImage files of
+storeFiles :: BlockDev -> Int -> [(FilePath, [Word8])] -> H (Either FsError ())
+storeFiles bd slot files = case BP.encodeImage files of
   Left s -> return (Left (EINVAL s))
   Right img -> do
-    eCap <- Blk.blkGetCapacity slot
+    eCap <- bdCapacity bd slot
     case eCap of
-      Left e -> return (Left (blkError e))
+      Left e -> return (Left e)
       Right capSectors -> do
         let blkBlocks = fromIntegral (capSectors `div` 8) :: Int
             need = (length img + 4095) `div` 4096
@@ -144,22 +140,22 @@ storeFiles slot files = case BP.encodeImage files of
             let chunks = chunk4096 img
             r1 <- writeBlocks slot 1 (drop 1 chunks)
             case r1 of
-              Left e -> return (Left (blkError e))
+              Left e -> return (Left e)
               Right () -> case chunks of
                 [] -> return (Left (EINVAL "empty"))
                 (b0 : _) -> do
-                  r0 <- Blk.blkWriteBlockBytes slot 0 b0
+                  r0 <- bdWrite bd slot 0 b0
                   case r0 of
-                    Left e -> return (Left (blkError e))
+                    Left e -> return (Left e)
                     Right () -> return (Right ())
   where
     chunk4096 bs
       | null bs = []
       | otherwise = take 4096 (bs ++ repeat 0) : chunk4096 (drop 4096 bs)
-    writeBlocks :: Int -> Int -> [[Word8]] -> H (Either BlkError ())
+    writeBlocks :: Int -> Int -> [[Word8]] -> H (Either FsError ())
     writeBlocks _ _ [] = return (Right ())
     writeBlocks s lba (b : rest) = do
-      r <- Blk.blkWriteBlockBytes s (fromIntegral lba) b
+      r <- bdWrite bd s (fromIntegral lba) b
       case r of
         Left e -> return (Left e)
         Right () -> writeBlocks s (lba + 1) rest
@@ -196,13 +192,13 @@ parentComps cs = init cs
 -- VFS-aware persist (default namespace) --------------------------------------------
 
 -- | Save the default-namespace RamFS into a blk slot (superblock last).
-blkfsSave :: Int -> H (Either FsError ())
-blkfsSave slot = do
+blkfsSave :: BlockDev -> Int -> H (Either FsError ())
+blkfsSave bd slot = do
   eFiles <- collectVfs ["/"] []
   case eFiles of
     Left e -> return (Left e)
     Right files -> do
-      r <- storeFiles slot files
+      r <- storeFiles bd slot files
       case r of
         Left (EINVAL "capacity") -> return (Left (EINVAL "capacity"))
         other -> return other
@@ -243,9 +239,9 @@ blkfsSave slot = do
 {- | Restore a blk slot into the default namespace. Validates fully
 before clearing, so rejected images leave ramfs intact.
 -}
-blkfsRestore :: Int -> H (Either FsError ())
-blkfsRestore slot = do
-  eFiles <- loadFiles slot
+blkfsRestore :: BlockDev -> Int -> H (Either FsError ())
+blkfsRestore bd slot = do
+  eFiles <- loadFiles bd slot
   case eFiles of
     Left e -> return (Left e)
     Right files -> do
@@ -278,29 +274,29 @@ blkfsRestore slot = do
 -- Backend record --------------------------------------------------------------------
 
 -- | Validate and decode a slot before publishing it as a mounted root.
-blkfsCheck :: Int -> H (Either FsError ())
-blkfsCheck slot = either Left (const (Right ())) <$> loadFiles slot
+blkfsCheck :: BlockDev -> Int -> H (Either FsError ())
+blkfsCheck bd slot = either Left (const (Right ())) <$> loadFiles bd slot
 
 -- | Block-backed 'FsOps' for one slot.
-blkfsOps :: Int -> FsOps
-blkfsOps slot =
+blkfsOps :: BlockDev -> Int -> FsOps
+blkfsOps bd slot =
   FsOps {
     opsInit = return ()
-    , opsCreate = blkCreate slot
-    , opsMkdir = blkMkdir slot
-    , opsWrite = blkWrite slot
-    , opsRead = blkRead slot
-    , opsLs = blkLs slot
-    , opsRm = blkRm slot
-    , opsStat = blkStat slot
+    , opsCreate = blkCreate bd slot
+    , opsMkdir = blkMkdir bd slot
+    , opsWrite = blkWrite bd slot
+    , opsRead = blkRead bd slot
+    , opsLs = blkLs bd slot
+    , opsRm = blkRm bd slot
+    , opsStat = blkStat bd slot
     }
 
-blkCreate :: Int -> FilePath -> H (Either FsError ())
-blkCreate slot path = case pathComps path of
+blkCreate :: BlockDev -> Int -> FilePath -> H (Either FsError ())
+blkCreate bd slot path = case pathComps path of
   Left e -> return (Left e)
   Right [] -> return (Left (EINVAL "cannot create root"))
   Right cs -> do
-    eFiles <- loadFiles slot
+    eFiles <- loadFiles bd slot
     case eFiles of
       Left e -> return (Left e)
       Right files -> do
@@ -311,7 +307,7 @@ blkCreate slot path = case pathComps path of
           Nothing
             | not (dirExists files cached parent) -> return (Left ENOENT)
             | isJust (fileAt files cs) || cs `elem` cached -> return (Left EEXIST)
-            | otherwise -> storeFiles slot ((render cs, []) : files)
+            | otherwise -> storeFiles bd slot ((render cs, []) : files)
   where
     render [] = "/"
     render xs = "/" ++ joinWith "/" xs
@@ -319,12 +315,12 @@ blkCreate slot path = case pathComps path of
     joinWith _ [x] = x
     joinWith s (x : xs) = x ++ s ++ joinWith s xs
 
-blkMkdir :: Int -> FilePath -> H (Either FsError ())
-blkMkdir slot path = case pathComps path of
+blkMkdir :: BlockDev -> Int -> FilePath -> H (Either FsError ())
+blkMkdir bd slot path = case pathComps path of
   Left e -> return (Left e)
   Right [] -> return (Left EEXIST)
   Right cs -> do
-    eFiles <- loadFiles slot
+    eFiles <- loadFiles bd slot
     case eFiles of
       Left e -> return (Left e)
       Right files -> do
@@ -339,12 +335,12 @@ blkMkdir slot path = case pathComps path of
                 rememberDir slot cs
                 return (Right ())
 
-blkWrite :: Int -> FilePath -> [Word8] -> H (Either FsError ())
-blkWrite slot path content = case pathComps path of
+blkWrite :: BlockDev -> Int -> FilePath -> [Word8] -> H (Either FsError ())
+blkWrite bd slot path content = case pathComps path of
   Left e -> return (Left e)
   Right [] -> return (Left EISDIR)
   Right cs -> do
-    eFiles <- loadFiles slot
+    eFiles <- loadFiles bd slot
     case eFiles of
       Left e -> return (Left e)
       Right files -> do
@@ -358,7 +354,7 @@ blkWrite slot path content = case pathComps path of
                 Just _ | cs `elem` cached -> return (Left EISDIR)
                 _ ->
                   let without = filter (\(p, _) -> p /= render cs) files
-                   in storeFiles slot ((render cs, content) : without)
+                   in storeFiles bd slot ((render cs, content) : without)
   where
     render [] = "/"
     render xs = "/" ++ joinWith "/" xs
@@ -366,11 +362,11 @@ blkWrite slot path content = case pathComps path of
     joinWith _ [x] = x
     joinWith s (x : xs) = x ++ s ++ joinWith s xs
 
-blkRead :: Int -> FilePath -> H (Either FsError [Word8])
-blkRead slot path = case pathComps path of
+blkRead :: BlockDev -> Int -> FilePath -> H (Either FsError [Word8])
+blkRead bd slot path = case pathComps path of
   Left e -> return (Left e)
   Right cs -> do
-    eFiles <- loadFiles slot
+    eFiles <- loadFiles bd slot
     case eFiles of
       Left e -> return (Left e)
       Right files -> do
@@ -386,11 +382,11 @@ blkRead slot path = case pathComps path of
     isPrefixOf _ [] = False
     isPrefixOf (x : xs) (y : ys) = x == y && isPrefixOf xs ys
 
-blkLs :: Int -> FilePath -> H (Either FsError [String])
-blkLs slot path = case pathComps path of
+blkLs :: BlockDev -> Int -> FilePath -> H (Either FsError [String])
+blkLs bd slot path = case pathComps path of
   Left e -> return (Left e)
   Right cs -> do
-    eFiles <- loadFiles slot
+    eFiles <- loadFiles bd slot
     case eFiles of
       Left e -> return (Left e)
       Right files -> do
@@ -414,12 +410,12 @@ blkLs slot path = case pathComps path of
     dedup [] = []
     dedup (x : xs) = x : dedup (filter (/= x) xs)
 
-blkRm :: Int -> FilePath -> H (Either FsError ())
-blkRm slot path = case pathComps path of
+blkRm :: BlockDev -> Int -> FilePath -> H (Either FsError ())
+blkRm bd slot path = case pathComps path of
   Left e -> return (Left e)
   Right [] -> return (Left (EINVAL "cannot remove root"))
   Right cs -> do
-    eFiles <- loadFiles slot
+    eFiles <- loadFiles bd slot
     case eFiles of
       Left e -> return (Left e)
       Right files -> do
@@ -427,7 +423,7 @@ blkRm slot path = case pathComps path of
         case fileAt files cs of
           Just _ ->
             let without = filter (\(p, _) -> p /= render cs) files
-             in storeFiles slot without
+             in storeFiles bd slot without
           Nothing
             | cs `elem` cached || any ((cs `isStrictPrefixOf`) . fst) (filesComps files) ->
                 let hasKids = any ((cs `isStrictPrefixOf`) . fst) (filesComps files)
@@ -451,11 +447,11 @@ blkRm slot path = case pathComps path of
     isStrictPrefixOf [] (_ : _) = True
     isStrictPrefixOf _ _ = False
 
-blkStat :: Int -> FilePath -> H (Either FsError FsStat)
-blkStat slot path = case pathComps path of
+blkStat :: BlockDev -> Int -> FilePath -> H (Either FsError FsStat)
+blkStat bd slot path = case pathComps path of
   Left e -> return (Left e)
   Right cs -> do
-    eFiles <- loadFiles slot
+    eFiles <- loadFiles bd slot
     case eFiles of
       Left e -> return (Left e)
       Right files -> do

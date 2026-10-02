@@ -12,6 +12,7 @@ module Kernel.Driver.Virtio.Blk.Server (
   blkGetCapacity,
   blkReadBlockBytes,
   blkWriteBlockBytes,
+  blkBlockDev,
 )
 where
 
@@ -37,6 +38,8 @@ import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Blk.Device (blkPollUsed, blkProbeCapacity, blkSubmitRead, blkSubmitWrite)
 import Kernel.Driver.Virtio.Blk.Types (BlkError (..), validateLba)
 import Kernel.Driver.Virtio.Transport qualified as VTrans
+import Kernel.FileSystem.BlockDev qualified as BlockDev
+import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Types (Endpoint, Grant (..), IpcError, Message (..))
@@ -146,11 +149,11 @@ blkServerInit slot
                       let qsz = 64
                           intid = VTrans.vdIntId vdev
                           blkDev = BlkDevice slot cap intid ep qsz
-                      rReg <- DrvReg.registerDriver ("virtio-blk" ++ show slot) ep (Just intid) VirtioMMIO
+                      tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep blkEndpointHandler)
+                      rReg <- DrvReg.registerDriver ("virtio-blk" ++ show slot) ep (Just intid) VirtioMMIO (Just tid) [ep]
                       case rReg of
                         Left _ -> return (Left (BlkInvalidArg "register failed"))
                         Right () -> do
-                          _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep blkEndpointHandler)
                           withQSem blkSem $ do
                             m2 <- readRef blkMap
                             writeRef blkMap (Map.insert slot blkDev m2)
@@ -308,3 +311,15 @@ blkWriteBlockBytes slot lba bytes = do
                     case res of
                       Left e -> return (Left e)
                       Right () -> return (Right ())
+
+{- | Build the filesystem-facing block interface. The driver depends on
+the filesystem's record, not the reverse. `BlkError` maps to `FsError`
+here, the single conversion point.
+-}
+blkBlockDev :: Int -> H BlockDev.BlockDev
+blkBlockDev _ = return (BlockDev.BlockDev mapCap mapRead mapWrite)
+  where
+    mapCap slot = either (Left . cvt) Right <$> blkGetCapacity slot
+    mapRead slot lba = either (Left . cvt) Right <$> blkReadBlockBytes slot lba
+    mapWrite slot lba bs = either (Left . cvt) Right <$> blkWriteBlockBytes slot lba bs
+    cvt _ = Vfs.EINVAL "blk I/O error"

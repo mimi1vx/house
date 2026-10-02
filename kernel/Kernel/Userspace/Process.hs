@@ -22,12 +22,16 @@ module Kernel.Userspace.Process (
   grantEndpoint,
   hasGrant,
   ParkRequest (..),
+  svcFullMask,
+  svcAllowed,
+  svcNarrow,
+  svcMaskRevoke,
 )
 where
 
 import Control.Concurrent (tryPutMVar, tryTakeMVar)
 import Control.Monad (foldM, forM_, unless, void, when)
-import Data.Bits (complement, shiftR, (.&.))
+import Data.Bits (complement, shiftL, shiftR, (.&.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.IORef (atomicModifyIORef')
@@ -120,6 +124,47 @@ foreign import ccall unsafe "house_set_recorded_pdir" c_set_pdir :: Ptr Word64 -
 foreign import ccall unsafe "house_page_budget_reset" c_budget_reset :: Ptr Word64 -> IO ()
 
 foreign import ccall unsafe "house_page_budget_try_acquire" c_budget_acquire :: Ptr Word64 -> Word32 -> IO CInt
+
+foreign import ccall unsafe "house_svc_mask_reset" c_svc_mask_reset :: Ptr Word64 -> IO ()
+
+foreign import ccall unsafe "house_svc_mask_set" c_svc_mask_set :: Ptr Word64 -> Word32 -> IO ()
+
+foreign import ccall unsafe "house_svc_mask_get" c_svc_mask_get :: Ptr Word64 -> IO Word32
+
+-- | Full syscall mask: 0x00..0x14 allowed.
+svcFullMask :: Word32
+svcFullMask = 0x1FFFFF
+
+-- | Pure mask check: allowed iff imm <= 0x14 and the bit is set.
+svcAllowed :: Word32 -> Word32 -> Bool
+svcAllowed mask imm = imm <= 0x14 && (mask .&. (1 `shiftL` fromIntegral imm)) /= 0
+
+-- | Pure narrow: clear one imm bit (revoke).
+svcNarrow :: Word32 -> Word32 -> Word32
+svcNarrow mask imm
+  | imm > 0x14 = mask
+  | otherwise = mask .&. complement (1 `shiftL` fromIntegral imm)
+
+-- | Copy the syscall mask from one root to another (fork inherit).
+inheritSvcMask :: VM.PageMap -> VM.PageMap -> H ()
+inheritSvcMask src dst = do
+  m <- liftIO (c_svc_mask_get (VM.fromPageMap src))
+  liftIO (c_svc_mask_set (VM.fromPageMap dst) m)
+
+-- | Revoke one syscall for a live pid (shell verb). Returns the new mask.
+svcMaskRevoke :: Pid -> Word32 -> H (Either String Word32)
+svcMaskRevoke pid imm
+  | imm > 0x14 = return (Left "imm out of range 0x00..0x14")
+  | otherwise = withQSem userSem $ do
+      mp <- readRef procMap
+      case Map.lookup pid mp of
+        Nothing -> return (Left "no such pid")
+        Just pr -> do
+          let ptr = VM.fromPageMap (procPdir pr)
+          cur <- liftIO (c_svc_mask_get ptr)
+          let narrowed = svcNarrow cur imm
+          liftIO (c_svc_mask_set ptr narrowed)
+          return (Right narrowed)
 
 stackTop :: Word64
 stackTop = stackPageStart + 4096
@@ -647,6 +692,7 @@ runPreparedBound pidInt image argv envp = do
                           abort NoSpace
                         else do
                           liftIO (c_budget_reset pdirPtr)
+                          liftIO (c_svc_mask_reset pdirPtr)
                           -- The constructor phase is prepared before the process
                           -- is published: a refusal here is a failed load, and
                           -- the caller sees the reason instead of a live
@@ -710,6 +756,7 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
               modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
               grants <- readRef procGrants
               writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants) grants)
+              inheritSvcMask (procPdir parent) childPdir
               Vfs.vfsForkPid parentInt pidInt
               Fd.fdFork parentPid child
               return (Right child)
@@ -863,6 +910,7 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                 then do freePDir childPdir; return (Left NoSpace)
                 else do
                   liftIO (c_budget_reset childPtr)
+                  inheritSvcMask (procPdir parent) childPdir
                   exitVar <- newEmptyMVar
                   stopVar <- newEmptyMVar
                   modifyRef procExitMap (Map.insert child exitVar)

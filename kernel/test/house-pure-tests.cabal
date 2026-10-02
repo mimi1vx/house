@@ -5,7 +5,7 @@ synopsis: Pure regression tests for Track H (no QEMU, no FFI execution)
 description:
   QuickCheck round-trips and golden truncated vectors for the hostile-input
   decoders hardened in Track H: Net.Stack, Loader, BlkPersist.encode/decode,
-  H.FileSystem.splitPath, plus Util.Word12 contract errors.
+  Kernel.FileSystem.Vfs.splitPath, plus Util.Word12 contract errors.
 license: MIT
 license-file: ../../LICENSE
 author: house
@@ -20,7 +20,7 @@ test-suite house-pure
   other-modules:
     H.AdHocMem
     H.Concurrency
-    H.FileSystem
+    H.Console
     H.Interrupts
     H.Monad
     H.Mutable
@@ -45,6 +45,7 @@ test-suite house-pure
     Kernel.Driver.VirtioProbe
     Kernel.FileSystem.BlkPersist
     Kernel.FileSystem.BlkFs
+    Kernel.FileSystem.BlockDev
     Kernel.FileSystem.RamFs
     Kernel.FileSystem.Vfs
     Kernel.Initramfs.Cpio

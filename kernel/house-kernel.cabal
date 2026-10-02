@@ -23,7 +23,7 @@ library
   exposed-modules:
     H.AdHocMem
     H.Concurrency
-    H.FileSystem
+    H.Console
     H.Interrupts
     H.Monad
     H.Mutable
@@ -65,6 +65,7 @@ library
     Kernel.Driver.VirtioProbe
     Kernel.FileSystem.BlkFs
     Kernel.FileSystem.BlkPersist
+    Kernel.FileSystem.BlockDev
     Kernel.FileSystem.RamFs
     Kernel.FileSystem.Vfs
     Kernel.Init

@@ -16,12 +16,11 @@ import Data.Bits (complement, shiftL, shiftR, (.&.))
 import Data.Char (chr, ord)
 import Data.Word (Word32, Word8)
 import H.Monad (H)
-import Kernel.Driver.Virtio.Blk.Server qualified as Blk
-import Kernel.Driver.Virtio.Blk.Types (BlkError)
+import Kernel.FileSystem.BlockDev (BlockDev (..))
 import Kernel.FileSystem.Vfs qualified as VFS
 
 data PersistError
-  = PersistBlk BlkError
+  = PersistBlk VFS.FsError
   | PersistFs VFS.FsError
   | PersistFormat String
   deriving (Eq, Show)
@@ -188,15 +187,15 @@ decodeImage bytes = case decodeHeader bytes of
                            in parseFiles img (off + 2 + plen + 4 + flen) (n - 1) ((path, bs) : acc)
 
 -- | Save ramfs to blk slot. Writes data blocks first, superblock last.
-persistSave :: Int -> H (Either PersistError ())
-persistSave slot = do
+persistSave :: BlockDev -> Int -> H (Either PersistError ())
+persistSave bd slot = do
   eFiles <- collectAll
   case eFiles of
     Left e -> return (Left (PersistFs e))
     Right files -> case encodeImage files of
       Left s -> return (Left (PersistFormat s))
       Right img -> do
-        eCap <- Blk.blkGetCapacity slot
+        eCap <- bdCapacity bd slot
         case eCap of
           Left e -> return (Left (PersistBlk e))
           Right capSectors -> do
@@ -212,7 +211,7 @@ persistSave slot = do
                   Right () -> case chunks of
                     [] -> return (Left (PersistFormat "empty"))
                     (b0 : _) -> do
-                      r0 <- Blk.blkWriteBlockBytes slot 0 b0
+                      r0 <- bdWrite bd slot 0 b0
                       case r0 of
                         Left e -> return (Left (PersistBlk e))
                         Right () -> return (Right ())
@@ -220,10 +219,10 @@ persistSave slot = do
     chunk4096 bs
       | null bs = []
       | otherwise = take 4096 (bs ++ repeat 0) : chunk4096 (drop 4096 bs)
-    writeBlocks :: Int -> Int -> [[Word8]] -> H (Either BlkError ())
+    writeBlocks :: Int -> Int -> [[Word8]] -> H (Either VFS.FsError ())
     writeBlocks _ _ [] = return (Right ())
     writeBlocks s lba (b : rest) = do
-      r <- Blk.blkWriteBlockBytes s (fromIntegral lba) b
+      r <- bdWrite bd s (fromIntegral lba) b
       case r of
         Left e -> return (Left e)
         Right () -> writeBlocks s (lba + 1) rest
@@ -270,15 +269,15 @@ from block 0 and total is checked against device capacity before any
 further block is read, so a hostile declared count/total cannot drive
 unbounded reads. Ramfs is only cleared after the full image decodes.
 -}
-persistRestore :: Int -> H (Either PersistError ())
-persistRestore slot = do
-  r0 <- Blk.blkReadBlockBytes slot 0
+persistRestore :: BlockDev -> Int -> H (Either PersistError ())
+persistRestore bd slot = do
+  r0 <- bdRead bd slot 0
   case r0 of
     Left e -> return (Left (PersistBlk e))
     Right b0 -> case decodeHeader b0 of
       Left s -> return (Left (PersistFormat s))
       Right (_, total, _, _) -> do
-        eCap <- Blk.blkGetCapacity slot
+        eCap <- bdCapacity bd slot
         case eCap of
           Left e -> return (Left (PersistBlk e))
           Right capSectors -> do
@@ -296,10 +295,10 @@ persistRestore slot = do
                           Left s -> return (Left (PersistFormat s))
                           Right files -> restoreFiles files
   where
-    readBlocks :: Int -> Int -> Int -> H (Either BlkError [[Word8]])
+    readBlocks :: Int -> Int -> Int -> H (Either VFS.FsError [[Word8]])
     readBlocks _ _ 0 = return (Right [])
     readBlocks s lba n = do
-      r <- Blk.blkReadBlockBytes s (fromIntegral lba)
+      r <- bdRead bd s (fromIntegral lba)
       case r of
         Left e -> return (Left e)
         Right b -> do
