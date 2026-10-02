@@ -30,8 +30,9 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
+import H.Concurrency qualified as HC
 import H.Interrupts (spi)
-import H.Monad (H, liftIO)
+import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Pages qualified as P
 import H.Unsafe (unsafePerformH)
@@ -48,7 +49,7 @@ import Kernel.Driver.Virtio.Queue (allocQueue, freeQueue, queueAvailPa, queueDes
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Nameservice qualified as NS
-import Kernel.IPC.Types (Grant (..))
+import Kernel.IPC.Types (Grant (..), IpcError, Message (..))
 
 foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int
 
@@ -212,6 +213,7 @@ netServerInit slot
                                                           case rReg of
                                                             Left _ -> do freeQueue vqRx; freeQueue vqTx; return (Left (NetInvalidArg "register failed"))
                                                             Right () -> do
+                                                              _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep netEndpointHandler)
                                                               withQSem netSem $ do m <- readRef netMap; writeRef netMap (Map.insert slot dev m)
                                                               withQSem netSem $ do gmap <- readRef netRxGrants; writeRef netRxGrants (Map.insert slot Map.empty gmap)
                                                               forM_ ([1 .. 4] :: [Int]) $ \_ -> do
@@ -225,10 +227,16 @@ netServerInit slot
                                                                       Left _ -> G.grantFree g
                                                                       Right reqId -> do
                                                                         withQSem netSem $ do gm <- readRef netRxGrants; case Map.lookup slot gm of { Just inner -> writeRef netRxGrants (Map.insert slot (Map.insert reqId g inner) gm); Nothing -> return () }
-                                                              -- Server loop not yet enabled (would need IRQ->Endpoint draining)
+                                                              -- Service thread drains IRQ notifications; direct calls stay in place.
                                                               Dmesg.dmesgLog ("net slot " ++ show slot ++ ": init ok mac=" ++ showMac mac ++ " qsize0=" ++ show qsizeRx ++ " qsize1=" ++ show qsizeTx)
                                                               return (Right dev)
                             _ -> return (Left (NetIoError 5))
+
+{- | Endpoint service handler: drains IRQ notifications with an error
+reply so the queue cannot fill. Direct calls stay in place.
+-}
+netEndpointHandler :: Message -> H (Either IpcError Message)
+netEndpointHandler _ = return (Right (Message 0xFFFFFFFF [] Nothing))
 
 -- | Teardown.
 netServerTeardown :: Int -> H (Either NetError ())

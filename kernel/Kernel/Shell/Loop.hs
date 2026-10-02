@@ -42,7 +42,7 @@ import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.PL011 qualified as PL011
 import Kernel.Driver.PL011Server qualified as PL011S
 import Kernel.Driver.Registry qualified as DrvReg
-import Kernel.Driver.Types (showDriverInfo)
+import Kernel.Driver.Types (DriverInfo (..), showDriverInfo)
 import Kernel.Driver.Virtio.Blk qualified as Blk
 import Kernel.Driver.Virtio.Blk.Types qualified as BlkTypes
 import Kernel.Driver.Virtio.Con qualified as Con
@@ -58,6 +58,7 @@ import Kernel.FileSystem.BlkPersist qualified as BlkPersist
 import Kernel.FileSystem.Vfs qualified as FS
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
+import Kernel.IPC.IRQ qualified as IRQ
 import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (EndpointId (..), Message (..))
 import Kernel.LineEditor qualified as LE
@@ -137,7 +138,8 @@ loop = do
       ["ipc", "ping"] -> withCString "usage: ipc ping <nsName>\n" c_uart_puts
       ["ipc", "grant"] -> handleIpcGrant
       ["ipc", "el0pp", name] -> handleIpcEl0pp name
-      ["ipc"] -> withCString "usage: ipc ping <nsName> | ipc grant | ipc el0pp <nsName>\n" c_uart_puts
+      ["ipc", "timeout", name] -> handleIpcTimeout name
+      ["ipc"] -> withCString "usage: ipc ping <nsName> | ipc grant | ipc el0pp <nsName> | ipc timeout <nsName>\n" c_uart_puts
       ["lsdev"] -> handleLsdev
       ["dmesg"] -> handleDmesg
       ["dmesg", "clear"] -> handleDmesgClear
@@ -274,6 +276,24 @@ loop = do
       case r of
         Left e -> withCString ("ipc ping failed: " ++ e ++ "\n") c_uart_puts
         Right _ -> withCString "ok\n" c_uart_puts
+    handleIpcTimeout name = do
+      r <- runH $ do
+        base <- NS.nsLookup name
+        mtok <- case base of
+          Nothing -> return Nothing
+          Just ep -> IPC.endpointToken ep
+        mep <- NS.nsLookupChecked name mtok
+        case mep of
+          Left _ -> return (Left (show name ++ " not found"))
+          Right ep -> do
+            let msg = Message 0 [42] Nothing
+            res <- IPC.callTimeout 0 ep msg
+            case res of
+              Left e -> return (Left (show e))
+              Right replyMsg -> return (Right replyMsg)
+      case r of
+        Left e -> withCString ("ipc timeout degraded: " ++ e ++ "\n") c_uart_puts
+        Right _ -> withCString "ipc timeout unexpected ok\n" c_uart_puts
     handleIpcGrant = do
       r <- runH $ do
         mg <- G.grantAlloc
@@ -337,9 +357,14 @@ loop = do
         Right (sv, cl) -> withCString ("ipc el0pp ok server=" ++ show sv ++ " client=" ++ show cl ++ "\n") c_uart_puts
     handleLsdev = do
       ds <- runH DrvReg.listDrivers
-      if null ds
-        then withCString "(empty)\n" c_uart_puts
-        else withCString (unlines (map showDriverInfo ds)) c_uart_puts
+      drops <- runH IRQ.readIrqDrops
+      linesOut <- runH (mapM fmtDriver ds)
+      let body = if null ds then "(empty)\n" else unlines linesOut
+      withCString (body ++ "irq drops=" ++ show drops ++ "\n") c_uart_puts
+    fmtDriver di = do
+      qd <- IPC.endpointQueueDepth (diEndpoint di)
+      return (showDriverInfo di ++ " qdepth=" ++ either (const "?") show qd)
+
     handleDmesg = do
       xs <- runH Dmesg.dmesgRead
       if null xs
@@ -864,6 +889,7 @@ loop = do
         , "       ns reg <name> -- register name (pl011 launches server)"
         , "       ipc ping <nsName> -- sync call to endpoint"
         , "       ipc grant -- alloc one page and send to pl011"
+        , "       ipc timeout <nsName> -- bounded call that degrades to WouldBlock"
         , "       ipc el0pp <nsName> -- EL0 ping-pong: server RECV+REPLY + client CALL via the park ring"
         , "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)"
         , "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)"

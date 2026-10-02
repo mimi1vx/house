@@ -24,8 +24,9 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, threadDelay, withQSem)
+import H.Concurrency qualified as HC
 import H.Interrupts (spi)
-import H.Monad (H, liftIO)
+import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Dmesg qualified as Dmesg
@@ -39,7 +40,7 @@ import Kernel.Driver.Virtio.Queue (VirtQueue (..), allocQueue, freeQueue, queueA
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Nameservice qualified as NS
-import Kernel.IPC.Types (Grant (..))
+import Kernel.IPC.Types (Grant (..), IpcError, Message (..))
 
 foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int
 
@@ -508,6 +509,7 @@ attachDevice slot kind vqRx vqTx mCtrl = do
   case rReg of
     Left _ -> do freeQueue vqRx; freeQueue vqTx; freeCtrl mCtrl; return (Left (ConInvalidArg "register failed"))
     Right () -> do
+      _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep conEndpointHandler)
       withQSem conSem $ do m <- readRef conMap; writeRef conMap (Map.insert slot dev m)
       withQSem conSem $ do gmap <- readRef conRxGrants; writeRef conRxGrants (Map.insert slot Map.empty gmap)
       forM_ ([1 .. 4] :: [Int]) $ \_ -> do
@@ -532,3 +534,7 @@ attachDevice slot kind vqRx vqTx mCtrl = do
             ++ serialNote kind
         )
       return (Right dev)
+
+-- | Endpoint service handler: drains IRQ notifications with an error reply.
+conEndpointHandler :: Message -> H (Either IpcError Message)
+conEndpointHandler _ = return (Right (Message 0xFFFFFFFF [] Nothing))

@@ -26,8 +26,9 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (peek)
 import H.Concurrency (QSem, newQSem, withQSem)
+import H.Concurrency qualified as HC
 import H.Interrupts (IntId, spi)
-import H.Monad (H, liftIO)
+import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Dmesg qualified as Dmesg
@@ -37,7 +38,7 @@ import Kernel.Driver.Virtio.Queue (VirtQueue, allocQueue, freeQueue, queueAvailP
 import Kernel.Driver.Virtio.Types (VirtioError (..), VirtioFeature (..), cErrToVirtioError, virtioFeatureMask)
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Nameservice qualified as NS
-import Kernel.IPC.Types (Endpoint)
+import Kernel.IPC.Types (Endpoint, IpcError, Message (..))
 
 -- | Device record kept in transport map.
 data VirtioDevice = VirtioDevice {
@@ -172,6 +173,7 @@ virtioInit slot
                                               ep <- IPC.newEndpoint
                                               _ <- DIRQ.registerIrqForwarding (spi (fromIntegral (16 + slot))) ep
                                               _ <- NS.nsRegister ("virtio-slot" ++ show slot) ep
+                                              _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep transportEndpointHandler)
                                               let intid = spi (fromIntegral (16 + slot))
                                               let dev = VirtioDevice slot did vid stCheck intid (Just vq) (Just ep)
                                               withQSem virtioSem $ do
@@ -179,6 +181,10 @@ virtioInit slot
                                                 writeRef virtioMap (Map.insert slot dev m)
                                               Dmesg.dmesgLog ("virtio slot " ++ show slot ++ ": init ok device_id=" ++ show did ++ " qsize=" ++ show qsize)
                                               return (Right dev)
+
+-- | Endpoint service handler: drains IRQ notifications with an error reply.
+transportEndpointHandler :: Message -> H (Either IpcError Message)
+transportEndpointHandler _ = return (Right (Message 0xFFFFFFFF [] Nothing))
 
 -- | Teardown slot.
 virtioTeardown :: Int -> H (Either VirtioError ())

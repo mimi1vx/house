@@ -13,6 +13,8 @@ module Kernel.IPC.Endpoint (
   call,
   callTimeout,
   trySend,
+  serveEndpoint,
+  endpointQueueDepth,
   endpointId,
   lookupEndpoint,
   CapToken (..),
@@ -287,6 +289,41 @@ callTimeout us ep msg = do
   case r of
     Nothing -> do logCap ("call timeout ep=" ++ show (epId ep)); return (Left WouldBlock)
     Just res -> return res
+
+-- | Current queued depth for one endpoint (QueueFull bound is `maxQueueDepth`).
+endpointQueueDepth :: Endpoint -> H (Either IpcError Int)
+endpointQueueDepth (Endpoint eid) = withQSem endpointSem $ do
+  tbl <- readRef endpointTable
+  case Map.lookup eid tbl of
+    Nothing -> return (Left NoSuchEndpoint)
+    Just st -> do
+      qs <- readRef st
+      return (Right (length (esQueue qs)))
+
+{- | Generic IPC server loop, extracted from the PL011 demo server.
+Dequeues one rendezvous, applies the handler, replies, and repeats.
+Exits quietly when the endpoint is freed (`recv` yields `NoSuchEndpoint`
+for a freed id). A handler that never replies makes callers observe
+`WouldBlock` via `callTimeout` rather than hanging the server.
+-}
+serveEndpoint :: Endpoint -> (Message -> H (Either IpcError Message)) -> H ()
+serveEndpoint ep handler = loop
+  where
+    loop = do
+      mAlive <- lookupEndpoint (let (EndpointId w) = epId ep in w)
+      case mAlive of
+        Nothing -> return ()
+        Just _ -> do
+          (msg, rv) <- recv ep
+          mAlive2 <- lookupEndpoint (let (EndpointId w) = epId ep in w)
+          case mAlive2 of
+            Nothing -> return ()
+            Just _ -> do
+              r <- handler msg
+              case r of
+                Left e -> reply rv (Left e)
+                Right out -> reply rv (Right out)
+              loop
 
 -- | Project endpoint id.
 endpointId :: Endpoint -> EndpointId

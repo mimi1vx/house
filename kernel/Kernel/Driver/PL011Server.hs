@@ -10,7 +10,7 @@ where
 import Foreign.C.Types (CChar (..))
 import H.Concurrency (forkH)
 import H.Monad (H, liftIO)
-import Kernel.IPC.Endpoint (freeEndpoint, newEndpoint, recv, reply)
+import Kernel.IPC.Endpoint (freeEndpoint, newEndpoint, serveEndpoint)
 import Kernel.IPC.Nameservice (nsRegister)
 import Kernel.IPC.Types (IpcError, Message (..))
 
@@ -27,17 +27,14 @@ launchPL011Server = do
   case r of
     Left e -> do freeEndpoint ep; return (Left e)
     Right () -> do
-      _ <- forkH (loop ep)
+      _ <- forkH (serveEndpoint ep handler)
       return (Right ())
   where
-    loop ep = do
-      (msg, rv) <- recv ep
-      case msgTag msg of
-        0 -> do
-          liftIO $ mapM_ (c_uart_putc . fromIntegral) (msgWords msg)
-          reply rv (Right (Message 0 [] Nothing))
-        1 -> do
-          -- grant echo: return grant as-is
-          reply rv (Right (Message 1 (msgWords msg) (msgGrant msg)))
-        _ -> reply rv (Right (Message 0xFFFFFFFF [] Nothing))
-      loop ep
+    handler msg = case msgTag msg of
+      0 -> do
+        liftIO $ mapM_ (c_uart_putc . fromIntegral) (msgWords msg)
+        return (Right (Message 0 [] Nothing))
+      1 ->
+        -- grant echo: return grant as-is
+        return (Right (Message 1 (msgWords msg) (msgGrant msg)))
+      _ -> return (Right (Message 0xFFFFFFFF [] Nothing))
