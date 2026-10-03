@@ -38,7 +38,7 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
   `house-fd-el0-check`, `house-ipc-el0-check`, `house-fork-check`,
   `house-preempt-check`, `house-spin-hotplug-check`,
   `house-dynamic-userspace-check`, `house-smp-fault-race-check`,
-  `house-dynamic-root-check`,
+  `house-dynamic-root-check`, `house-irq-dispatch-check`,
   `house-initrd-check`, and `house-pid1-check`.
 - SMP checks: `make smp-check` (default `SMP_N=2`),
   `SMP_N=4 make smp-check`, `make smp-hotplug-check`, and the expensive nightly

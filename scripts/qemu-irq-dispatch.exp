@@ -1,0 +1,97 @@
+#!/usr/bin/expect -f
+# IRQ-dispatcher wedge gate: `virtio init` forks the transport IRQ dispatcher,
+# whose house_pipe_wait spins in wfe inside an unsafe FFI call and so holds the
+# RTS capability it was forked with. The shell must answer every subsequent
+# round, and `virtio status` must answer after the last one. Pinned to -smp 1:
+# with more capabilities the dispatcher and the shell run apart and the wedge
+# is not observable at all.
+# Usage: expect scripts/qemu-irq-dispatch.exp <house.bin> [timeout] [accel] [mem] [smp] [-- extra qemu args]
+set kernel [lindex $argv 0]
+set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 45}]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+set qemu_extra [lrange $argv 5 end]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 1 }
+log_user 1
+# Force 8 transports so the blk device lands at slot 7 (the guest maps 0..7),
+# and force modern virtio else queue setup fails. Same command line as
+# qemu-virtio-blk.exp, which is what puts a real device in that slot.
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
+foreach a $qemu_extra {
+    if {$a eq "--"} { continue }
+    append cmd " $a"
+}
+puts "SPAWN: $cmd"
+eval spawn $cmd
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+# Unbraced on purpose: -re {"> "} searches for the literal "> " and matches
+# nothing, which looks exactly like a hang.
+expect {
+    -re "> " { puts "\nPASS: saw prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# Non-vacuity precondition: the block device really is in a guest slot, so a
+# missing device can never read as a pass.
+send "virtio scan\r"
+expect {
+    -re "device_id=2" { puts "\nPASS: virtio scan sees the blk device" }
+    timeout { puts "\nFAIL: virtio scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof during virtio scan"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after scan"; exit 1 }
+}
+# Three init/teardown rounds on one slot. Every pattern matches a command's
+# output, never the prompt: the line editor redraws the prompt during echo and
+# a prompt match reports 0 ms for everything.
+set maxms 0
+for {set i 0} {$i < 3} {incr i} {
+    set t0 [clock milliseconds]
+    send "virtio init 7\r"
+    expect {
+        -re "ok device_id=" {}
+        timeout { puts "\nFAIL: virtio init round $i never answered (dispatcher wedged the capability)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof during virtio init round $i"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    set dt [expr {[clock milliseconds] - $t0}]
+    if {$dt > $maxms} { set maxms $dt }
+    puts "\nPASS: virtio init round $i answered in ${dt}ms"
+    expect {
+        -re "> " {}
+        timeout { puts "\nFAIL: prompt after init round $i timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof after init round $i"; exit 1 }
+    }
+    send "virtio teardown 7\r"
+    expect {
+        -re "teardown ok" {}
+        timeout { puts "\nFAIL: virtio teardown round $i never answered"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof during virtio teardown round $i"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    expect {
+        -re "> " {}
+        timeout { puts "\nFAIL: prompt after teardown round $i timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        eof { puts "\nFAIL: eof after teardown round $i"; exit 1 }
+    }
+    puts "\nPASS: virtio teardown round $i ok"
+}
+# virtioStatusAll prints slots 0..7 unconditionally, so this always has output:
+# a machine that wedged quietly cannot pass by timing out the same way.
+send "virtio status\r"
+expect {
+    -re "status=0x" { puts "\nPASS: virtio status still answers" }
+    timeout { puts "\nFAIL: virtio status never answered after the init rounds"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof during virtio status"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+puts "\nPASS: irq-dispatch ok (3 rounds, ${maxms}ms init max)"
+catch {exec kill -9 [exp_pid]}
+exit 0

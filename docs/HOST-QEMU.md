@@ -30,9 +30,9 @@ make container-image && make check
 ```
 
 `make check` obtains clean firmware builds through its spike, IRQ, and House
-legs, then runs the 19 gates named by the banner (shell, POSIX, initrd,
+legs, then runs the 20 gates named by the banner (shell, POSIX, initrd,
 pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0,
-mounted-root dynamic, plus the rust and haskell gates). Scaling legs stay out of the default gate:
+mounted-root dynamic, irq dispatch, plus the rust and haskell gates). Scaling legs stay out of the default gate:
 `smp-check-8` (N=8 at 4G) and `vm-check` run on demand. The VM matrix uses
 HVF+TCG at 512M/2, 4G/4, and 6G/4, then HVF at 8G/4 and 16G/4.
 

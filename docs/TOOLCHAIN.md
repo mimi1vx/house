@@ -56,11 +56,11 @@ and Miri use the same pinned nightly baked into the image.
   pays for the sysroot build.
 - `make haskell-check`: full-tree fourmolu+hlint + `cabal build all
   --enable-tests` + `cabal test all` (test-only package needs the flag).
-- `make check`: the 19 gates named by the banner (doctor, gate-coverage,
+- `make check`: the 20 gates named by the banner (doctor, gate-coverage,
   spike, irq, house, shell, posix, initrd, pid1, dynamic userspace,
   fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic,
-  rust (clippy + fmt + deny + abi), haskell, el0tiny, dynamic ELF),
-  hvf+tcg where applicable.
+  irq dispatch, rust (clippy + fmt + deny + abi), haskell, el0tiny,
+  dynamic ELF), hvf+tcg where applicable.
 - `make check-tcg`: the check legs with `TCG_ONLY=1` (Linux CI has no nested
   virt, so the hvf halves are skipped), minus house-dynamic-root-check,
   which needs QEMU 11+ for virtio-mmio-transports. The remaining focused

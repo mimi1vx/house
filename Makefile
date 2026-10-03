@@ -241,6 +241,17 @@ house-virtio-blk-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 	expect scripts/qemu-virtio-blk.exp $(SPIKE_DIR)/build/house.bin 45 tcg $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 
+# IRQ dispatcher wedge: virtio init forks the transport IRQ dispatcher, whose
+# house_pipe_wait spin in wfe pins the RTS capability (house-1hc.1). Three
+# init/teardown rounds on one slot, then virtio status must still answer.
+# Pinned to -smp 1: the wedge needs dispatcher and shell on one capability.
+# Not in check-tcg: needs QEMU 10+ for virtio-mmio-transports, and Ubuntu
+# 24.04 CI ships 8.2 (same reason as house-dynamic-root-check).
+house-irq-dispatch-check: house-build initrd
+	qemu-img create -f raw /tmp/house-irq.img 64M
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-irq-dispatch.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) 1 -- -drive if=none,file=/tmp/house-irq.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
+	expect scripts/qemu-irq-dispatch.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) 1 -- -drive if=none,file=/tmp/house-irq.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
+
 # Virtio-net (Track 5): virtio-net server, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user netdev 10.0.2.0/24
 house-virtio-net-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
@@ -509,12 +520,13 @@ check:
 	$(MAKE) house-ipc-el0-check
 	$(MAKE) house-tls-el0-check
 	$(MAKE) house-dynamic-root-check
+	$(MAKE) house-irq-dispatch-check
 	$(MAKE) rust-check
 	$(MAKE) haskell-check
 	$(MAKE) el0tiny-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check: all aarch64 gates passed (doctor, gate-coverage, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic, rust, haskell, el0tiny, dynamic ELF) =="
+	@echo "== make check: all aarch64 gates passed (doctor, gate-coverage, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic, irq dispatch, rust, haskell, el0tiny, dynamic ELF) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check gate-coverage \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg house-yield-spin-check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-irq-dispatch-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg house-yield-spin-check
