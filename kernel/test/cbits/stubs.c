@@ -20,10 +20,6 @@ u64 min_user_addr = 0;
 /* Function refs. Signatures are link-only; bodies never run in tests. */
 #define STUB(name) long name(void) { return 0; }
 
-STUB(buddy_alloc_page)
-STUB(buddy_contains)
-STUB(buddy_free_count)
-STUB(buddy_free_page)
 STUB(buddy_total_count)
 STUB(c_print)
 STUB(current_pdir)
@@ -130,3 +126,46 @@ STUB(virtio_transport_queue_setup)
 STUB(virtio_transport_queue_setup_q)
 STUB(virtio_transport_set_features)
 STUB(virtio_transport_set_status)
+
+/* Host page pool. Unlike every other stub here these bodies run, because
+ * H.Pages.grantAlloc goes through them and a grant that returns a null page
+ * makes every grant-carrying test vacuous. Backed by aligned_alloc with an
+ * explicit live-range table, which is also what buddy_contains answers from. */
+#include <stdlib.h>
+
+#define BUDDY_LIVE_MAX 4096
+static void *buddy_live[BUDDY_LIVE_MAX];
+static long buddy_live_n = 0;
+
+void *buddy_alloc_page(void) {
+  void *p = NULL;
+  if (buddy_live_n >= BUDDY_LIVE_MAX)
+    return NULL;
+  if (posix_memalign(&p, 4096, 4096) != 0)
+    return NULL;
+  buddy_live[buddy_live_n++] = p;
+  return p;
+}
+
+void buddy_free_page(void *p) {
+  long i;
+  for (i = 0; i < buddy_live_n; i++) {
+    if (buddy_live[i] == p) {
+      buddy_live[i] = buddy_live[--buddy_live_n];
+      break;
+    }
+  }
+  free(p);
+}
+
+long buddy_contains(void *p) {
+  long i;
+  for (i = 0; i < buddy_live_n; i++)
+    if (buddy_live[i] == p)
+      return 1;
+  return 0;
+}
+
+/* Free count has no host analogue; the pool reclaims on free, so report the
+ * live range count instead of a fabricated free-list depth. */
+long buddy_free_count(void) { return buddy_live_n; }

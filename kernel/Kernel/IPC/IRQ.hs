@@ -4,6 +4,7 @@ Push honors the `maxQueueDepth` Endpoint bound: overflow drops + dmesg-logs.
 -}
 module Kernel.IPC.IRQ (
   irqForward,
+  unregisterIrqForward,
   irqDrops,
   readIrqDrops,
   drainIrqDrops,
@@ -13,7 +14,7 @@ where
 
 import Data.Word (Word64)
 import H.Concurrency (QSem, newQSem, withQSem)
-import H.Interrupts (IntId (..), installHandler)
+import H.Interrupts (IntId (..), installHandler, removeHandler)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
@@ -41,6 +42,12 @@ irqForward (IntId n) ep = do
   return ()
   where
     handler = forwardIrq (IntId n) ep
+
+{- | Stop forwarding an INTID: drop the installed handler so no later IRQ
+`trySend`s into an endpoint that is about to be freed.
+-}
+unregisterIrqForward :: IntId -> H ()
+unregisterIrqForward = removeHandler
 
 -- | Single forward attempt, countable from host tests without GIC wiring.
 forwardIrq :: IntId -> Endpoint -> H ()

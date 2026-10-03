@@ -13,18 +13,22 @@ module H.Interrupts (
   disableInt,
   eoi,
   installHandler,
+  removeHandler,
+  handlerInstalled,
   enableInterrupts,
   disableInterrupts,
 )
 where
 
+import Control.Concurrent qualified as C
 import Control.Exception (SomeException, catch)
 import Control.Monad (when)
 import Data.Array.IO (IOArray, newArray, readArray, writeArray)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Ix (Ix)
+import Data.Maybe (isJust)
 import Data.Word (Word32, Word64)
-import Foreign.StablePtr (StablePtr, deRefStablePtr, newStablePtr)
+import Foreign.StablePtr (StablePtr, deRefStablePtr, freeStablePtr, newStablePtr)
 import H.Concurrency (forkSupervisedIO)
 import H.Monad (H, liftIO, runH)
 import System.IO.Unsafe (unsafePerformIO)
@@ -97,8 +101,11 @@ installHandler :: IntId -> H () -> H ()
 installHandler (IntId n) handler = liftIO $ do
   sptr <- newStablePtr handler
   let idx = fromIntegral n
-  when (idx >= 0 && idx < 1024) $
+  when (idx >= 0 && idx < 1024) $ do
+    -- Reclaim the replaced entry: teardown/re-init cycles install repeatedly.
+    old <- readArray handlerTable idx
     writeArray handlerTable idx (Just sptr)
+    mapM_ freeStablePtr old
   -- start dispatcher once
   started <- readIORef dispatcherStarted
   if started
@@ -111,6 +118,26 @@ installHandler (IntId n) handler = liftIO $ do
       _ <- forkSupervisedIO dispatcherLoop
       return ()
   return ()
+
+{- | Remove the handler for an INTID, freeing its 'StablePtr'. Clearing the
+table before the owning endpoint is freed is what keeps a late IRQ from
+`trySend`ing into a dead endpoint.
+-}
+removeHandler :: IntId -> H ()
+removeHandler (IntId n) = liftIO $ do
+  let idx = fromIntegral n
+  when (idx >= 0 && idx < 1024) $ do
+    old <- readArray handlerTable idx
+    writeArray handlerTable idx Nothing
+    mapM_ freeStablePtr old
+
+{- | Whether an INTID currently has a handler. Exported so a host test can
+observe the table without a GIC.
+-}
+handlerInstalled :: IntId -> IO Bool
+handlerInstalled (IntId n) = do
+  let idx = fromIntegral n
+  if idx < 0 || idx >= 1024 then return False else isJust <$> readArray handlerTable idx
 
 -- Dispatcher: drains the SPSC ring the ISR fills and runs the matching handler.
 -- Waits on the pipe via a bounded blocking wait so bursts wake immediately; a bounded
@@ -126,6 +153,7 @@ dispatcherLoop = loop
         then do
           c_irqPipeDrain
           drainBounded (256 :: Int)
+          C.yield
           loop
         else do
           _ <- if fd < 0 then return 0 else c_pipeWait fd 5000

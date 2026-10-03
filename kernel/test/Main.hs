@@ -47,7 +47,10 @@ import Foreign.Ptr (plusPtr)
 import H.AdHocMem (H, allocaArray, bytesEqual, peek, poke, pokeBytes)
 import H.Console qualified as Console
 import H.Interrupts (IntId (..))
+import H.Interrupts qualified as Interrupts
+import H.Monad (liftIO)
 import H.Monad qualified as HM
+import H.Pages qualified as P
 import Kernel.Driver.Virtio.Net.Server qualified as NetServer
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types qualified as NT
@@ -57,6 +60,7 @@ import Kernel.FileSystem.BlockDev (BlockDev (..))
 import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as Endpoint
+import Kernel.IPC.Grant qualified as Grant
 import Kernel.IPC.IRQ qualified as IRQ
 import Kernel.IPC.Types qualified as IT
 import Kernel.Initramfs.Cpio qualified as Cpio
@@ -1423,10 +1427,12 @@ main = do
       , checkIO "lib version pin format" libVersionPinGolden
       , checkIO "lib version skew lines" libVersionSkewGolden
       , checkIO "cap deny anonymous" capCheckGolden
+      , checkIO "handler table remove idempotent" handlerTableGolden
       , checkIO "ipc two receivers one wakeup each" ipcWakeGolden
       , checkIO "irq drops counted on full queue" irqDropsGolden
       , checkIO "serveEndpoint dispatches and exits on free" serveEndpointGolden
       , checkIO "wedged server yields WouldBlock" wedgedGolden
+      , checkIO "aborted grant call returns its page" grantAbortGolden
       , check "svc mask full allows all" svcMaskFullGolden
       , check "svc mask narrow revokes one" svcMaskNarrowGolden
       , check "svc mask fork inherit exec retain" svcMaskInheritGolden
@@ -1975,6 +1981,43 @@ capCheckGolden = HM.runH $ do
       okWrong <- Endpoint.checkCap ep (Just (Endpoint.CapToken (w + 1)))
       Endpoint.freeEndpoint ep
       return (okRight && not okAnon && not okWrong)
+
+{- | Interrupt handler table observability: an unused INTID reads back
+uninstalled, and 'removeHandler' on it is an idempotent no-op. The
+install/reclaim path itself is not exercisable here: `installHandler` starts
+the IRQ dispatcher, whose blocking FFI wait freezes this single-capability
+(non-threaded) suite, so the reclaim is proven by the kernel gate's
+`irqDrops == 0` across teardown cycles instead.
+-}
+handlerTableGolden :: IO Bool
+handlerTableGolden = HM.runH $ do
+  let intid = IntId 700
+  before <- liftIO (Interrupts.handlerInstalled intid)
+  _ <- Interrupts.removeHandler intid
+  _ <- Interrupts.removeHandler intid
+  after <- liftIO (Interrupts.handlerInstalled intid)
+  oob <- liftIO (Interrupts.handlerInstalled (IntId 4096))
+  return (not before && not after && not oob)
+
+{- | An aborted `callTimeout` that carried a grant returns its page. The
+aborting caller owns the grant, so the abort path must dequeue the rendezvous
+*and* free the page: afterwards the page is no longer a live buddy page, and
+the caller must not free it again.
+-}
+grantAbortGolden :: IO Bool
+grantAbortGolden = HM.runH $ do
+  ep <- Endpoint.newEndpoint
+  mg <- Grant.grantAlloc
+  case mg of
+    Left _ -> Endpoint.freeEndpoint ep >> return False
+    Right g -> do
+      let page = IT.grantPage g
+          Right m = IT.mkMessage 0 [] (Just g)
+      res <- Endpoint.callTimeout 50000 ep m
+      let returned = P.validPage page
+      depth <- Endpoint.endpointQueueDepth ep
+      Endpoint.freeEndpoint ep
+      return (res == Left IT.WouldBlock && not returned && depth == Right 0)
 
 {- | A layer's /lib version record is a digest over its own /lib content,
 so a lower block root is attacker-controlled: only exactly 64 lowercase
