@@ -35,6 +35,7 @@ test-suite house-pure
     Kernel.Driver.IRQ
     Kernel.Driver.Registry
     Kernel.Driver.Types
+    Kernel.Driver.Virtio.Blk.Proto
     Kernel.Driver.Virtio.Blk.Server
     Kernel.Driver.Virtio.Blk.Types
     Kernel.Driver.Virtio.Con.Server
