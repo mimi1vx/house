@@ -1,0 +1,87 @@
+#!/usr/bin/expect -f
+# YIELD-starvation harness: spawn the yieldspin probe (a tight `svc #0` loop
+# with no UART inside it), then `uname` back-to-back. The shell must answer
+# within the bound: a spin-yielding process must not hold its capability long
+# enough to starve everything else. Runs at -smp 1 because that is the
+# single-capability case where the stall is observable at all; with two
+# capabilities the shell runs alongside the spinner and the bound proves
+# nothing. The probe is then reaped exit 0.
+# Usage: expect scripts/qemu-yield-spin.exp <kernel.bin> [marker] [timeout] [accel] [mem]
+set kernel [lindex $argv 0]
+set marker [lindex $argv 1]
+set timeout_arg [lindex $argv 2]
+set accel [lindex $argv 3]
+set mem [lindex $argv 4]
+if {$marker eq "" || $marker eq "hvf" || $marker eq "tcg"} {
+    set mem $accel
+    set accel $marker
+    set marker "yield-spin-ok"
+}
+if {$marker eq ""} { set marker "yield-spin-ok" }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$timeout_arg eq "" || $timeout_arg == 0} {
+    if {$accel eq "tcg"} { set timeout 120 } else { set timeout 60 }
+} else {
+    set timeout $timeout_arg
+}
+# Measured on this gate: ~14 ms with the bounded-backoff arm, ~134 ms with a
+# bare `resumeWith 0; loop`. The bound sits well above the good value so TCG
+# jitter cannot trip it, and well below the bad one so the gate still bites.
+set starve_bound_ms 60
+
+log_user 1
+spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
+    -smp 1 -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt" }
+    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+}
+# Back-to-back so the probe is already spinning when uname is issued. The
+# probe prints nothing until it finishes, so its output cannot satisfy the
+# uname pattern.
+set t0 [clock milliseconds]
+send "spawn /bin/yieldspin\r"
+send "uname\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string) }
+    timeout { puts "\nFAIL: spawn reply timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spawn reply"; exit 1 }
+}
+expect {
+    -re {House[^\r\n]*} { set dt [expr {[clock milliseconds] - $t0}] }
+    timeout { puts "\nFAIL: uname starved by spin-yielding process"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before uname"; exit 1 }
+}
+puts "\nPASS: spawned yieldspin pid $p1"
+if {$dt > $starve_bound_ms} {
+    puts "\nFAIL: uname took ${dt}ms while yieldspin spins (bound ${starve_bound_ms}ms)"
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+puts "\nPASS: shell answered in ${dt}ms while yieldspin spins (bound ${starve_bound_ms}ms)"
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after uname timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after uname"; exit 1 }
+}
+send "wait $p1\r"
+expect {
+    -re "ok exit 0" { puts "\nPASS: yieldspin reaped exit 0" }
+    timeout { puts "\nFAIL: wait timeout (probe hung?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before wait"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after wait timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after wait"; exit 1 }
+}
+puts "\nPASS: $marker"
+catch {exec kill -9 [exp_pid]}
+exit 0
