@@ -1,10 +1,11 @@
 {- | Driver registry wrapping 'Kernel.IPC.Nameservice'.
 Lock order: @drvSem@ outermost, @nsSem@ inner — never invert.
 Endpoint table's @endpointSem@ only around queue splice, never across registry calls:
-teardown snapshots the endpoint list under @drvSem@, releases, then clears IRQ
-forwarding, then frees (each @freeEndpoint@ takes @endpointSem@ on its own), then
-stops the service threads. A thread blocked in @recv@ on a freed endpoint observes
-@NoSuchEndpoint@ and exits, so freeing before stopping keeps the stop bounded.
+teardown snapshots the endpoint and thread lists under @drvSem@, releases, then
+clears IRQ forwarding, then frees (each @freeEndpoint@ takes @endpointSem@ on its
+own), then stops the service threads. A thread blocked in @recv@ on a freed endpoint
+observes @NoSuchEndpoint@ and exits, so freeing before stopping keeps the stop
+bounded however many threads the driver owns.
 -}
 module Kernel.Driver.Registry (
   registerDriver,
@@ -54,18 +55,18 @@ validation runs outside sems, then @drvSem@ is held across 'nsRegister'
 Note: 'NS.nsRegister' handles the global uniqueness check under @nsSem@;
 we hold @drvSem@ across the call to keep @drvMap@ and @nsMap@ consistent
 without inverting lock order — caller never holds @epSem@ here.
-The service thread id and endpoint list ride along so teardown can drop
-endpoints then stop the thread.
+The service thread list and endpoint list ride along so teardown can drop
+endpoints then stop every thread the driver started.
 -}
-registerDriver :: String -> Endpoint -> Maybe IntId -> DriverKind -> Maybe ThreadId -> [Endpoint] -> H (Either DriverError ())
-registerDriver name ep mIntId kind mService endpoints = case validDriverName name of
+registerDriver :: String -> Endpoint -> Maybe IntId -> DriverKind -> [ThreadId] -> [Endpoint] -> H (Either DriverError ())
+registerDriver name ep mIntId kind service endpoints = case validDriverName name of
   Left e -> return (Left e)
   Right () -> withQSem drvSem $ do
     m <- readRef drvMap
     if Map.member name m
       then return (Left AlreadyRegistered)
       else do
-        let info = DriverInfo name ep kind mIntId Nothing mService endpoints
+        let info = DriverInfo name ep kind mIntId Nothing service endpoints
         writeRef drvMap (Map.insert name info m)
         let rollback = do
               m2 <- readRef drvMap
@@ -109,7 +110,7 @@ unregisterDriver name = do
       -- into the endpoint this call is about to drop.
       forM_ (diIntId info) DIRQ.unregisterIrqForwarding
       mapM_ IPC.freeEndpoint (diEndpoints info)
-      forM_ (diService info) killH
+      mapM_ killH (diService info)
       return (Right ())
 
 -- | Lookup driver metadata.

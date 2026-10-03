@@ -2,9 +2,13 @@
 
 {- | Virtio-blk server — Endpoint + Grant, 4K blocks (wire 512 sectors), IRQ->Endpoint.
 Lock order: blkSem distinct from virtioSem/drvSem/nsSem/epSem; never hold blkSem across nsRegister.
+The request service thread takes @blkSem@ (inside the @*Block*@ helpers) and
+'serveEndpoint''s @recv@ takes @endpointSem@, in that order and never inverted.
+
 @blkEndpoint@ is the transport's endpoint: 'Transport.virtioInit' owns its sole
 serve loop, and blk reaches the device through it rather than serving it too.
-blk's own request endpoint arrives as @blkReqEndpoint@.
+Client traffic goes to the separate @blkReqEndpoint@, so an IRQ burst can never
+push a client call to @QueueFull@.
 -}
 module Kernel.Driver.Virtio.Blk.Server (
   BlkDevice (..),
@@ -15,6 +19,7 @@ module Kernel.Driver.Virtio.Blk.Server (
   blkGetCapacity,
   blkReadBlockBytes,
   blkWriteBlockBytes,
+  blkRequestHandler,
   blkBlockDev,
 )
 where
@@ -32,19 +37,21 @@ import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Concurrency qualified as HC
 import H.Interrupts (IntId)
-import H.Monad (H, liftIO)
+import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Blk.Device (blkPollUsed, blkProbeCapacity, blkSubmitRead, blkSubmitWrite)
+import Kernel.Driver.Virtio.Blk.Proto qualified as Proto
 import Kernel.Driver.Virtio.Blk.Types (BlkError (..), validateLba)
 import Kernel.Driver.Virtio.Transport qualified as VTrans
 import Kernel.FileSystem.BlockDev qualified as BlockDev
 import Kernel.FileSystem.Vfs qualified as Vfs
+import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
-import Kernel.IPC.Types (Endpoint, Grant (..))
+import Kernel.IPC.Types (Endpoint, Grant (..), IpcError (..), Message (..))
 
 -- | Blk device record (mirrors VirtioDevice but block-specific).
 data BlkDevice = BlkDevice {
@@ -53,6 +60,8 @@ data BlkDevice = BlkDevice {
   , blkIntId :: IntId
   , blkEndpoint :: Endpoint
   , blkQueueSize :: Word32
+  , blkReqEndpoint :: Endpoint
+  , blkReqToken :: Maybe IPC.CapToken
   }
   deriving (Eq, Show)
 
@@ -148,10 +157,13 @@ blkServerInit slot
                   case (mEp, mQ) of
                     (Just ep, Just _vq) -> do
                       liftIO $ c_reset_slot slot
+                      reqEp <- IPC.newEndpoint
+                      reqTok <- IPC.endpointToken reqEp
                       let qsz = 64
                           intid = VTrans.vdIntId vdev
-                          blkDev = BlkDevice slot cap intid ep qsz
-                      rReg <- DrvReg.registerDriver ("virtio-blk" ++ show slot) ep (Just intid) VirtioMMIO Nothing [ep]
+                          blkDev = BlkDevice slot cap intid ep qsz reqEp reqTok
+                      tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint reqEp blkRequestHandler)
+                      rReg <- DrvReg.registerDriver ("virtio-blk" ++ show slot) ep (Just intid) VirtioMMIO [tid] [ep, reqEp]
                       case rReg of
                         Left _ -> return (Left (BlkInvalidArg "register failed"))
                         Right () -> do
@@ -161,6 +173,69 @@ blkServerInit slot
                           Dmesg.dmesgLog ("blk slot " ++ show slot ++ ": init ok capacity=" ++ show cap ++ " sectors (" ++ show (cap `div` 8) ++ " blocks)")
                           return (Right blkDev)
                     _ -> return (Left BlkNotReady)
+
+{- | Request-endpoint service handler. Separate from the transport's IRQ
+endpoint so an IRQ burst can never push a client call to @QueueFull@: the
+transport endpoint is drained by the ISR and filled only by IRQs, while this
+one carries only client traffic.
+
+Dispatch goes through 'Proto.decodeReq' and then straight into the existing
+device bodies — this re-routes traffic, it does not reimplement the device
+path. The service thread holds @blkSem@ (inside the @*Blocks@ helpers) and
+'serveEndpoint''s @recv@ holds @endpointSem@, in that order and never
+inverted.
+
+Grant ownership: the client allocated the page and the client frees it. This
+handler never frees a page it did not allocate.
+-}
+blkRequestHandler :: Message -> H (Either IpcError Message)
+blkRequestHandler msg = do
+  r <- case Proto.decodeReq msg of
+    Left e -> return (Left e)
+    Right req -> dispatch req
+  return (Right (Proto.encodeReply r))
+  where
+    dispatch req = case req of
+      Proto.ReqCapacity s -> toIpc <$> blkGetCapacity (fromIntegral s)
+      Proto.ReqRead s lba -> readReq (fromIntegral s) lba
+      Proto.ReqWrite s lba -> writeReq (fromIntegral s) lba
+    -- Read and write reuse the existing device bodies unchanged; only the
+    -- route changed. The data crosses the wire in the caller's grant page:
+    -- the reply carries the byte count (read) or 0 (write).
+    readReq sl lba = do
+      r <- blkReadBlockBytes sl lba
+      case r of
+        Left e -> return (Left (ipcOfBlk e))
+        Right bytes -> case msgGrant msg of
+          Nothing -> return (Left BadGrant)
+          Just g -> do
+            fillGrantBytes g bytes
+            liftIO $ c_dc_flush (c_pagePa (grantPage g)) 4096
+            return (Right (fromIntegral (length bytes)))
+    writeReq sl lba = case msgGrant msg of
+      Nothing -> return (Left BadGrant)
+      Just g -> do
+        bytes <- liftIO (grantBytes g)
+        r <- blkWriteBlockBytes sl lba bytes
+        return $ case r of
+          Right () -> Right 0
+          Left e -> Left (ipcOfBlk e)
+    toIpc = either (Left . ipcOfBlk) Right
+    ipcOfBlk BlkNoSpace = QueueFull
+    ipcOfBlk BlkBadSlot = NoSuchEndpoint
+    ipcOfBlk BlkNotReady = NoSuchEndpoint
+    ipcOfBlk _ = WouldBlock
+
+-- | Copy a block out into a grant page, zero-padding the tail.
+fillGrantBytes :: Grant -> [Word8] -> H ()
+fillGrantBytes (Grant p _) bytes = liftIO $ do
+  let n = min (length bytes) 4096
+  mapM_ (\(i, b) -> poke (p `plusPtr` i) b) (zip [0 ..] (take n bytes))
+  mapM_ (\i -> poke (p `plusPtr` i) (0 :: Word8)) [n .. 4095]
+
+-- | Read a full block out of a grant page.
+grantBytes :: Grant -> IO [Word8]
+grantBytes (Grant p _) = mapM (\i -> peek (p `plusPtr` i) :: IO Word8) [0 .. 4095]
 
 -- | Teardown blk server.
 blkServerTeardown :: Int -> H (Either BlkError ())
