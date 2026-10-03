@@ -29,6 +29,7 @@ import Control.Exception (bracketOnError, onException)
 import Data.Bits (shiftR, xor)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Word (Word64)
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Monad (H, liftIO, runH)
@@ -208,15 +209,26 @@ send ep msg = do
     -- takeMVar dequeues our entry so no orphaned slot is left behind.
     Right () -> liftIO $ bracketOnError (return ()) (\_ -> runH (dequeueReply replyVar ep)) (\_ -> C.takeMVar replyVar)
 
--- | Remove one queued rendezvous by reply-slot identity (abort path).
+{- | Remove one queued rendezvous by reply-slot identity (abort path). The
+aborting caller still owns the rendezvous' grant, so its page is returned
+here alongside the filter.
+-}
 dequeueReply :: MVar (Either IpcError Message) -> Endpoint -> H ()
-dequeueReply var ep = withQSem endpointSem $ do
-  tbl <- readRef endpointTable
-  case Map.lookup (epId ep) tbl of
+dequeueReply var ep = do
+  mRv <- withQSem endpointSem $ do
+    tbl <- readRef endpointTable
+    case Map.lookup (epId ep) tbl of
+      Nothing -> return Nothing
+      Just st -> do
+        qs <- readRef st
+        let (before, at) = break ((== var) . rvReplyVar) (esQueue qs)
+        writeRef st (qs {esQueue = before ++ drop 1 at})
+        return (listToMaybe at)
+  case mRv of
     Nothing -> return ()
-    Just st -> do
-      qs <- readRef st
-      writeRef st (qs {esQueue = filter ((/= var) . rvReplyVar) (esQueue qs)})
+    Just rv -> case msgGrant (rvMsg rv) of
+      Nothing -> return ()
+      Just gg -> P.freePage (grantPage gg)
 
 {- | Non-blocking trySend: fire-and-forget enqueue, no reply wait.
 Returns Left QueueFull/NoSuchEndpoint immediately, Right () on enqueued.

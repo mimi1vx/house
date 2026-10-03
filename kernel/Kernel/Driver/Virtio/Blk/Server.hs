@@ -2,6 +2,9 @@
 
 {- | Virtio-blk server — Endpoint + Grant, 4K blocks (wire 512 sectors), IRQ->Endpoint.
 Lock order: blkSem distinct from virtioSem/drvSem/nsSem/epSem; never hold blkSem across nsRegister.
+@blkEndpoint@ is the transport's endpoint: 'Transport.virtioInit' owns its sole
+serve loop, and blk reaches the device through it rather than serving it too.
+blk's own request endpoint arrives as @blkReqEndpoint@.
 -}
 module Kernel.Driver.Virtio.Blk.Server (
   BlkDevice (..),
@@ -29,7 +32,7 @@ import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
 import H.Concurrency qualified as HC
 import H.Interrupts (IntId)
-import H.Monad (H, liftIO, runH)
+import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Dmesg qualified as Dmesg
@@ -40,9 +43,8 @@ import Kernel.Driver.Virtio.Blk.Types (BlkError (..), validateLba)
 import Kernel.Driver.Virtio.Transport qualified as VTrans
 import Kernel.FileSystem.BlockDev qualified as BlockDev
 import Kernel.FileSystem.Vfs qualified as Vfs
-import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
-import Kernel.IPC.Types (Endpoint, Grant (..), IpcError, Message (..))
+import Kernel.IPC.Types (Endpoint, Grant (..))
 
 -- | Blk device record (mirrors VirtioDevice but block-specific).
 data BlkDevice = BlkDevice {
@@ -149,8 +151,7 @@ blkServerInit slot
                       let qsz = 64
                           intid = VTrans.vdIntId vdev
                           blkDev = BlkDevice slot cap intid ep qsz
-                      tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep blkEndpointHandler)
-                      rReg <- DrvReg.registerDriver ("virtio-blk" ++ show slot) ep (Just intid) VirtioMMIO (Just tid) [ep]
+                      rReg <- DrvReg.registerDriver ("virtio-blk" ++ show slot) ep (Just intid) VirtioMMIO Nothing [ep]
                       case rReg of
                         Left _ -> return (Left (BlkInvalidArg "register failed"))
                         Right () -> do
@@ -160,17 +161,6 @@ blkServerInit slot
                           Dmesg.dmesgLog ("blk slot " ++ show slot ++ ": init ok capacity=" ++ show cap ++ " sectors (" ++ show (cap `div` 8) ++ " blocks)")
                           return (Right blkDev)
                     _ -> return (Left BlkNotReady)
-
-{- | Endpoint service handler: drains IRQ notifications and any early
-endpoint traffic with an error reply so the 32-deep queue cannot fill
-and spill into `irqDrops`. Direct Grant calls stay in place; a later
-slice re-routes filesystem traffic onto tags 0/1.
--}
-blkEndpointHandler :: Message -> H (Either IpcError Message)
-blkEndpointHandler msg = case msgTag msg of
-  0 -> return (Right (Message 0xFFFFFFFF [] Nothing))
-  1 -> return (Right (Message 0xFFFFFFFF [] Nothing))
-  _ -> return (Right (Message 0xFFFFFFFF [] Nothing))
 
 -- | Teardown blk server.
 blkServerTeardown :: Int -> H (Either BlkError ())

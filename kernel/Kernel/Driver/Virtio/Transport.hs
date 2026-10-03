@@ -200,6 +200,8 @@ virtioTeardown slot
         Nothing -> return (Left (InvalidArg "not initialized"))
         Just dev -> do
           DGIC.disableSpi (fromIntegral (16 + slot))
+          -- Before the free: a handler left installed trySends into a dead endpoint.
+          DIRQ.unregisterIrqForwarding (vdIntId dev)
           case vdEndpoint dev of
             Just ep -> do
               _ <- NS.nsUnregister ("virtio-slot" ++ show slot)

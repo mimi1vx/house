@@ -1,9 +1,9 @@
 {- | Driver registry wrapping 'Kernel.IPC.Nameservice'.
 Lock order: @drvSem@ outermost, @nsSem@ inner — never invert.
 Endpoint table's @endpointSem@ only around queue splice, never across registry calls:
-teardown snapshots the endpoint list under @drvSem@, releases, then frees
-(each @freeEndpoint@ takes @endpointSem@ on its own), then stops the service
-thread. A thread blocked in @recv@ on a freed endpoint observes
+teardown snapshots the endpoint list under @drvSem@, releases, then clears IRQ
+forwarding, then frees (each @freeEndpoint@ takes @endpointSem@ on its own), then
+stops the service threads. A thread blocked in @recv@ on a freed endpoint observes
 @NoSuchEndpoint@ and exits, so freeing before stopping keeps the stop bounded.
 -}
 module Kernel.Driver.Registry (
@@ -24,6 +24,7 @@ import H.Interrupts (IntId)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
+import Kernel.Driver.IRQ qualified as DIRQ
 import Kernel.Driver.Types (DriverError (..), DriverInfo (..), DriverKind)
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Nameservice qualified as NS
@@ -86,10 +87,10 @@ registerDriver name ep mIntId kind mService endpoints = case validDriverName nam
             writeRef drvMap (Map.delete name m2)
             return (Left (InvalidName "nsRegister failed"))
 
-{- | Unregister driver: stop accepting new work, drop endpoints outside
-@drvSem@ (each @freeEndpoint@ takes @endpointSem@ on its own), then stop
-the service thread. Join last: the thread observes @NoSuchEndpoint@ and
-exits on its own, so the stop is bounded.
+{- | Unregister driver: stop accepting new work, clear IRQ forwarding, drop
+endpoints outside @drvSem@ (each @freeEndpoint@ takes @endpointSem@ on its
+own), then stop the service threads. Join last: the threads observe
+@NoSuchEndpoint@ and exit on their own, so the stop is bounded.
 -}
 unregisterDriver :: String -> H (Either DriverError ())
 unregisterDriver name = do
@@ -104,6 +105,9 @@ unregisterDriver name = do
   case mInfo of
     Nothing -> return (Left NotFound)
     Just info -> do
+      -- Before the free, not after: a handler still installed would trySend
+      -- into the endpoint this call is about to drop.
+      forM_ (diIntId info) DIRQ.unregisterIrqForwarding
       mapM_ IPC.freeEndpoint (diEndpoints info)
       forM_ (diService info) killH
       return (Right ())

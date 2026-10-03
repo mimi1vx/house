@@ -32,6 +32,7 @@ test-suite house-pure
     Kernel.Debug
     Kernel.Console
     Kernel.Driver.Dmesg
+    Kernel.Driver.IRQ
     Kernel.Driver.Registry
     Kernel.Driver.Types
     Kernel.Driver.Virtio.Blk.Server
@@ -52,6 +53,7 @@ test-suite house-pure
     Kernel.Initramfs.Unpack
     Kernel.IPC.Endpoint
     Kernel.IPC.Grant
+    Kernel.IPC.IRQ
     Kernel.IPC.Nameservice
     Kernel.IPC.Types
     Kernel.Userspace.Fd
