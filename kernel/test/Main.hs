@@ -28,8 +28,8 @@ any FFI (foreign symbols are stubbed at link time, never called):
 module Main (main) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (SomeException, evaluate, try)
-import Control.Monad (foldM, forM, unless)
+import Control.Exception (SomeException, catch, evaluate, try)
+import Control.Monad (foldM, forM, unless, void)
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
@@ -51,6 +51,8 @@ import H.Interrupts qualified as Interrupts
 import H.Monad (liftIO)
 import H.Monad qualified as HM
 import H.Pages qualified as P
+import Kernel.Driver.Registry qualified as DrvReg
+import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Blk.Proto qualified as Proto
 import Kernel.Driver.Virtio.Net.Server qualified as NetServer
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
@@ -1444,6 +1446,7 @@ main = do
       , checkIO "ipc two receivers one wakeup each" ipcWakeGolden
       , checkIO "irq drops counted on full queue" irqDropsGolden
       , checkIO "serveEndpoint dispatches and exits on free" serveEndpointGolden
+      , checkIO "unregister kills both driver threads" driverTwoThreadGolden
       , checkIO "wedged server yields WouldBlock" wedgedGolden
       , checkIO "aborted grant call returns its page" grantAbortGolden
       , check "svc mask full allows all" svcMaskFullGolden
@@ -1897,6 +1900,48 @@ serveEndpointGolden = do
     _ <- HM.runH (Endpoint.freeEndpoint ep)
     threadDelay 50000
     return (r0 == Right (IT.Message 0 [1, 2] Nothing) && r9 == Right (IT.Message 0xFFFFFFFF [] Nothing))
+  return (r == Just True)
+  where
+    handler msg = case IT.msgTag msg of
+      0 -> return (Right msg)
+      _ -> return (Right (IT.Message 0xFFFFFFFF [] Nothing))
+
+{- | A two-thread, two-endpoint driver: teardown must free both endpoints and
+kill both threads. This is the shape virtio-blk has since it took a request
+endpoint alongside the transport's, and it is what `diService :: [ThreadId]`
+exists for — a `Maybe` could only ever have killed one of them.
+
+The second thread blocks on an MVar rather than on its endpoint, so freeing
+the endpoints cannot stop it: only an explicit `killH` can, which is what
+makes this discriminate a two-thread teardown from a one-thread one.
+-}
+driverTwoThreadGolden :: IO Bool
+driverTwoThreadGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    epA <- HM.runH Endpoint.newEndpoint
+    epB <- HM.runH Endpoint.newEndpoint
+    gate <- newEmptyMVar
+    killedB <- newIORef False
+    tidA <- forkIO $ HM.runH (Endpoint.serveEndpoint epA handler)
+    tidB <-
+      forkIO $
+        void (takeMVar gate)
+          `catch` \(_ :: SomeException) -> writeIORef killedB True
+    threadDelay 50000
+    reg <- HM.runH (DrvReg.registerDriver "two-thread" epA (Just (IntId 77)) VirtioMMIO [tidA, tidB] [epA, epB])
+    threadDelay 50000
+    unreg <- HM.runH (DrvReg.unregisterDriver "two-thread")
+    threadDelay 100000
+    goneA <- HM.runH (Endpoint.endpointQueueDepth epA)
+    goneB <- HM.runH (Endpoint.endpointQueueDepth epB)
+    bKilled <- readIORef killedB
+    return
+      ( reg == Right ()
+          && unreg == Right ()
+          && goneA == Left IT.NoSuchEndpoint
+          && goneB == Left IT.NoSuchEndpoint
+          && bKilled
+      )
   return (r == Just True)
   where
     handler msg = case IT.msgTag msg of

@@ -24,11 +24,12 @@ data DriverKind
 {- | Metadata kept per registered driver. Invariants: @diName@ non-empty,
 no '/', @<=255@ chars; @diEndpoint@ is a valid 'Endpoint' minted via
 'Kernel.IPC.Endpoint.newEndpoint'; @diIntId@ is @Just (spi n)@ iff
-@diKind == VirtioMMIO@. @diService@ is the supervised service thread from
-the endpoint slice (if any); @diEndpoints@ lists every endpoint the
-teardown must drop. A service thread blocked in @recv@ on a freed endpoint
-returns @NoSuchEndpoint@ and exits, so freeing before joining keeps the
-join bounded.
+@diKind == VirtioMMIO@. @diEndpoints@ lists **every** endpoint the driver
+minted, and @diService@ lists **every** thread the driver started — a driver
+that owns two endpoints serves both, and an omitted thread is an unjoined
+thread at teardown. A service thread blocked in @recv@ on a freed endpoint
+returns @NoSuchEndpoint@ and exits, so freeing before joining keeps the join
+bounded.
 -}
 data DriverInfo = DriverInfo {
   diName :: String
@@ -36,7 +37,7 @@ data DriverInfo = DriverInfo {
   , diKind :: DriverKind
   , diIntId :: Maybe IntId
   , diSlot :: Maybe Int
-  , diService :: Maybe ThreadId
+  , diService :: [ThreadId]
   , diEndpoints :: [Endpoint]
   }
   deriving (Eq, Show)
