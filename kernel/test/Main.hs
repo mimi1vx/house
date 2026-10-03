@@ -51,6 +51,7 @@ import H.Interrupts qualified as Interrupts
 import H.Monad (liftIO)
 import H.Monad qualified as HM
 import H.Pages qualified as P
+import Kernel.Driver.Virtio.Blk.Proto qualified as Proto
 import Kernel.Driver.Virtio.Net.Server qualified as NetServer
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types qualified as NT
@@ -1427,6 +1428,18 @@ main = do
       , checkIO "lib version pin format" libVersionPinGolden
       , checkIO "lib version skew lines" libVersionSkewGolden
       , checkIO "cap deny anonymous" capCheckGolden
+      , check "blk proto capacity roundtrip" (blkProtoCapacityGolden == Right True)
+      , checkIO "blk proto read roundtrip" blkProtoReadGolden
+      , checkIO "blk proto write roundtrip" blkProtoWriteGolden
+      , check "blk proto reply roundtrip" (blkProtoReplyGolden == Right True)
+      , assertLeft "blk proto rejects unknown tag" (blkProtoDecode (IT.Message 99 [] Nothing))
+      , assertLeft "blk proto rejects short capacity" (blkProtoDecode (IT.Message Proto.tagCapacity [] Nothing))
+      , assertLeft "blk proto rejects long capacity" (blkProtoDecode (IT.Message Proto.tagCapacity [1, 2] Nothing))
+      , assertLeft "blk proto rejects read without grant" (blkProtoDecode (IT.Message Proto.tagRead [1, 2] Nothing))
+      , assertLeft "blk proto rejects write without grant" (blkProtoDecode (IT.Message Proto.tagWrite [1, 2] Nothing))
+      , checkIO "blk proto rejects short read with grant" blkProtoShortReadGolden
+      , assertLeft "blk proto rejects error reply as success" (Proto.decodeReply (Proto.encodeReply (Left IT.WouldBlock)))
+      , assertLeft "blk proto rejects short reply" (Proto.decodeReply (IT.Message 0 [] Nothing))
       , checkIO "handler table remove idempotent" handlerTableGolden
       , checkIO "ipc two receivers one wakeup each" ipcWakeGolden
       , checkIO "irq drops counted on full queue" irqDropsGolden
@@ -1981,6 +1994,75 @@ capCheckGolden = HM.runH $ do
       okWrong <- Endpoint.checkCap ep (Just (Endpoint.CapToken (w + 1)))
       Endpoint.freeEndpoint ep
       return (okRight && not okAnon && not okWrong)
+
+{- | Blk wire-format goldens. Each decodes with a grant attached, so the
+round-trip covers the tag, the word count, and the grant presence the decoder
+requires. Truncation cases are framed as "must return Left, never ErrorCall",
+matching the convention the hostile-input decoders already use.
+-}
+blkProtoCapacityGolden :: Either String Bool
+blkProtoCapacityGolden = case Proto.encodeReq (Proto.ReqCapacity 7) of
+  Left e -> Left (show e)
+  Right msg -> Right (Proto.decodeReq msg == Right (Proto.ReqCapacity 7))
+
+blkProtoReadGolden :: IO Bool
+blkProtoReadGolden = HM.runH $ do
+  mg <- Grant.grantAlloc
+  case mg of
+    Left _ -> return False
+    Right g -> do
+      let req = Proto.ReqRead 3 42
+      case Proto.attachGrant g req of
+        Left _ -> Grant.grantFree g >> return False
+        Right msg -> do
+          let ok = Proto.decodeReq msg == Right req
+          Grant.grantFree g
+          return ok
+
+blkProtoWriteGolden :: IO Bool
+blkProtoWriteGolden = HM.runH $ do
+  mg <- Grant.grantAlloc
+  case mg of
+    Left _ -> return False
+    Right g -> do
+      let req = Proto.ReqWrite 1 9
+      case Proto.attachGrant g req of
+        Left _ -> Grant.grantFree g >> return False
+        Right msg -> do
+          let ok = Proto.decodeReq msg == Right req
+          Grant.grantFree g
+          return ok
+
+blkProtoDecode :: IT.Message -> Either IT.IpcError Proto.BlkReq
+blkProtoDecode = Proto.decodeReq
+
+{- | A read with a grant but only one word is an arity rejection, not a
+missing-grant one; it needs a real page to reach that arm.
+-}
+blkProtoShortReadGolden :: IO Bool
+blkProtoShortReadGolden = HM.runH $ do
+  mg <- Grant.grantAlloc
+  case mg of
+    Left _ -> return False
+    Right g -> do
+      let msg = IT.Message Proto.tagRead [1] (Just g)
+          ok = case Proto.decodeReq msg of
+            Left (IT.InvalidName s) -> "2" `elem` words s
+            _ -> False
+      Grant.grantFree g
+      return ok
+
+{- | A success reply and an error reply are distinguishable, and the success
+value survives the round trip.
+-}
+blkProtoReplyGolden :: Either String Bool
+blkProtoReplyGolden =
+  pure
+    ( Proto.decodeReply (Proto.encodeReply (Right 131072)) == Right 131072
+        && Proto.decodeReply (Proto.encodeReply (Right 0)) == Right 0
+        && isLeft (Proto.decodeReply (Proto.encodeReply (Left IT.WouldBlock)))
+        && IT.msgTag (Proto.encodeReply (Left IT.WouldBlock)) .&. Proto.tagError /= 0
+    )
 
 {- | Interrupt handler table observability: an unused INTID reads back
 uninstalled, and 'removeHandler' on it is an idempotent no-op. The
