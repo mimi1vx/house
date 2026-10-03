@@ -297,6 +297,13 @@ house-svcmask-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-svcmask.exp $(SPIKE_DIR)/build/house.bin 'svcmask-ok' 60 hvf $(SPIKE_MEM) $(SMP_N)
 	expect scripts/qemu-svcmask.exp $(SPIKE_DIR)/build/house.bin 'svcmask-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
+# YIELD starvation: a tight `svc #0` spinner must not hold the RTS capability
+# long enough to starve the shell. Spawns the probe, asserts `uname` still
+# answers, then reaps the probe exit 0.
+house-yield-spin-check: house-build initrd
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-yield-spin.exp $(SPIKE_DIR)/build/house.bin 'yield-spin-ok' 60 hvf $(SPIKE_MEM)
+	expect scripts/qemu-yield-spin.exp $(SPIKE_DIR)/build/house.bin 'yield-spin-ok' 120 tcg $(SPIKE_MEM)
+
 # EL0 fork/wait/exec via park ring (multiprocess step 9): fork probe
 # parent/child distinct + wait reaps; exec probe replaces image w/ hello
 house-fork-check: house-build initrd
@@ -476,6 +483,7 @@ check-tcg:
 	$(MAKE) house-fault-budget-check TCG_ONLY=1
 	$(MAKE) house-fault-kill-check TCG_ONLY=1
 	$(MAKE) house-svcmask-check TCG_ONLY=1
+	$(MAKE) house-yield-spin-check TCG_ONLY=1
 	$(MAKE) house-ipc-el0-check TCG_ONLY=1
 	$(MAKE) house-tls-el0-check TCG_ONLY=1
 	$(MAKE) rust-check
@@ -497,6 +505,7 @@ check:
 	$(MAKE) house-dynamic-userspace-check
 	$(MAKE) house-fault-budget-check
 	$(MAKE) house-fault-kill-check
+	$(MAKE) house-yield-spin-check
 	$(MAKE) house-ipc-el0-check
 	$(MAKE) house-tls-el0-check
 	$(MAKE) house-dynamic-root-check
@@ -508,4 +517,4 @@ check:
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
         irq-build irq-run irq-check gate-coverage \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg house-yield-spin-check

@@ -59,6 +59,7 @@ jobs:
           make house-fork-check TCG_ONLY=1
           make house-proc-check TCG_ONLY=1
           make house-svcmask-check TCG_ONLY=1
+          make house-yield-spin-check TCG_ONLY=1
       - name: SMP gates
         run: |
           make smp-check TCG_ONLY=1

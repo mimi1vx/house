@@ -1277,6 +1277,18 @@ resume the rendered byte count. Errors resume negative errnos:
 parkLoop :: VM.PageMap -> LoadBounds -> Pid -> Ptr Word64 -> Word64 -> MVar Int -> StopAck -> Word64 -> [Linker.LinkStep] -> H ()
 parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = loop
   where
+    {- Consecutive resumes with no blocking park in between. A process that
+       spins on @svc #0@ re-enters 'loop' without ever reaching the pipe
+       wait, so it holds the capability the resume path re-acquires; past
+       the threshold the YIELD arm takes the same release point the blocked
+       arm does. -}
+    spinCount :: Ref Int
+    spinCount = unsafePerformH (newRef 0)
+
+    -- Consecutive yields before the backoff arm takes over.
+    yieldSpinLimit :: Int
+    yieldSpinLimit = 64
+
     loop = do
       alive <- withQSem userSem (Map.member pid <$> readRef procMap)
       if not alive
@@ -1296,9 +1308,26 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                 Nothing -> do
                   liftIO c_parkPipeDrain
                   _ <- liftIO (c_parkPipeFd >>= \fd -> c_pipeWait fd 5000)
+                  -- The wait really blocked, so the process is not spinning.
+                  writeRef spinCount 0
                   yield
                   loop
-                Just ReqYield -> do resumeWith 0; threadDelay 100; loop
+                Just ReqYield -> do
+                  resumeWith 0
+                  spins <- readRef spinCount
+                  if spins < yieldSpinLimit
+                    then writeRef spinCount (spins + 1) >> loop
+                    else do
+                      -- `yield` alone does not release the capability: a
+                      -- thread that is immediately runnable re-acquires it
+                      -- before the timer fires, so the spinner starves the
+                      -- shell. The park-pipe wait returns at once here (this
+                      -- process's own park always leaves a byte), so the
+                      -- release has to be a real timer park. Only a spinner
+                      -- pays it; a cooperative process never reaches this.
+                      threadDelay 100
+                      writeRef spinCount 0
+                      loop
                 Just (ReqBrk nb) -> do handleBrk nb; loop
                 Just (ReqOpen va fl) -> do handleOpen va fl; loop
                 Just (ReqRead fd va ln) -> do handleRead fd va ln; loop
