@@ -27,7 +27,7 @@ import Data.Array.IO (IOArray, newArray, readArray, writeArray)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Ix (Ix)
 import Data.Maybe (isJust)
-import Data.Word (Word32, Word64)
+import Data.Word (Word32)
 import Foreign.StablePtr (StablePtr, deRefStablePtr, freeStablePtr, newStablePtr)
 import H.Concurrency (forkSupervisedIO)
 import H.Monad (H, liftIO, runH)
@@ -60,8 +60,6 @@ foreign import ccall unsafe "house_irq_pipe_drain" c_irqPipeDrain :: IO ()
 foreign import ccall unsafe "house_irq_pipe_fd" c_irqPipeFd :: IO Int
 
 foreign import ccall unsafe "house_irq_pipe_readable" c_irqPipeReadable :: Int -> IO Int
-
-foreign import ccall unsafe "house_pipe_wait" c_pipeWait :: Int -> Word64 -> IO Int
 
 enableInt :: IntId -> H ()
 enableInt (IntId n) = liftIO $ c_enableInt n
@@ -140,9 +138,8 @@ handlerInstalled (IntId n) = do
   if idx < 0 || idx >= 1024 then return False else isJust <$> readArray handlerTable idx
 
 -- Dispatcher: drains the SPSC ring the ISR fills and runs the matching handler.
--- Waits on the pipe via a bounded blocking wait so bursts wake immediately; a bounded
--- fallback timeout keeps progress if a pipe byte is ever missed. Drains to the
--- ring depth (256) so a burst larger than 64 is not split across windows.
+-- Drains to the ring depth (256) so a burst larger than 64 is not split across
+-- windows.
 dispatcherLoop :: IO ()
 dispatcherLoop = loop
   where
@@ -156,7 +153,9 @@ dispatcherLoop = loop
           C.yield
           loop
         else do
-          _ <- if fd < 0 then return 0 else c_pipeWait fd 5000
+          -- Timer, not the pipe: the blocking pipe wait is an unsafe FFI spin
+          -- and pins the capability this dispatcher was forked with (house-1hc.1).
+          C.threadDelay 20000
           c_irqPipeDrain
           drainBounded (256 :: Int)
           loop
