@@ -53,7 +53,11 @@ proc sock_drain {s} {
     set ::sockbuf ""
 }
 log_user 1
-set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
+# Plain `-M virt` on purpose: the guest probes all 32 virtio-mmio transports, so
+# no machine property is needed and this harness works on QEMU 8.2 through 11+
+# (virtio-mmio-transports= is QEMU 10+, and existed only to squeeze the serial
+# device into the old 8-slot guest scan). Its slot is discovered, not hardcoded.
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
 foreach a $qemu_extra {
     if {$a eq "--"} { continue }
     append cmd " $a"
@@ -84,21 +88,25 @@ expect {
     timeout { fail "virtio scan timeout" }
 }
 sleep 1
+# The serial device sits on the last free transport, so discover its slot
+# instead of assuming one; slot 31 is the scan's last line and therefore the
+# end-of-scan marker.
+set conSlot 31
 send "virtio scan\r"
 expect {
-    -re "device_id=3" { puts "\nPASS: virtio scan device_id=3" }
-    -re "slot 7:" {
-        # slot 7 is the last line: full scan arrived with no console device.
+    -re {virtio slot (\d+): device_id=3} { set conSlot $expect_out(1,string); puts "\nPASS: virtio scan device_id=3 at slot $conSlot" }
+    -re "virtio slot 31: " {
+        # slot 31 is the last line: full scan arrived with no console device.
         # (bare "virtio slot" matched partial output under slow tcg.)
         if {$has_serial} { fail "virtio scan no console device with -device present" } else { puts "\nINFO: virtio scan no console (no -device)" }
     }
     timeout { fail "virtio scan2 timeout" }
 }
 if {!$has_serial} {
-    send "con init 7\r"
+    send "con init $conSlot\r"
     expect {
-        -re "ConBadSlot|ConNotCon" { puts "\nINFO: con init 7 no device (empty slot)" }
-        -re "ok" { fail "con init 7 ok without serial device" }
+        -re "ConBadSlot|ConNotCon" { puts "\nINFO: con init $conSlot no device (empty slot)" }
+        -re "ok" { fail "con init $conSlot ok without serial device" }
         timeout { fail "con init timeout" }
     }
     catch {exec kill -9 [exp_pid]}
@@ -113,7 +121,6 @@ after 1000
 set s [socket 127.0.0.1 $tcpport]
 fconfigure $s -translation binary -buffering none -blocking 0
 puts "\nPASS: host socket connected"
-set conSlot 7
 send "con init $conSlot\r"
 expect {
     -re "ok" { puts "\nPASS: con init $conSlot ok" }
@@ -145,8 +152,8 @@ expect {
 sleep 1
 send "ns ls\r"
 expect {
-    -re "virtio-con7" { puts "\nPASS: ns ls shows virtio-con7" }
-    timeout { fail "ns ls missing virtio-con7" }
+    -re "virtio-con$conSlot" { puts "\nPASS: ns ls shows virtio-con$conSlot" }
+    timeout { fail "ns ls missing virtio-con$conSlot" }
 }
 send "con teardown $conSlot\r"
 expect {

@@ -4,7 +4,7 @@ use crate::mmio::{mmio_r32, mmio_w32};
 
 const BASE_H: u64 = 0x0a000000;
 const STRIDE_H: u64 = 0x200;
-const NUM_SLOTS_H: i32 = 8;
+const NUM_SLOTS_H: i32 = 32;
 const MAGIC_H: u32 = 0x74726976;
 
 const OFF_MAGIC: u64 = 0x000;

@@ -1,6 +1,6 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-{- | Virtio-MMIO probe (slot 0..7 at 0x0a000000+i*0x200). Probe-only, no
+{- | Virtio-MMIO probe (slot 0..31 at 0x0a000000+i*0x200). Probe-only, no
 queue/IRQ enable. Logs each slot to dmesg.
 -}
 module Kernel.Driver.VirtioProbe (
@@ -32,12 +32,12 @@ foreign import ccall unsafe "virtio_probe_slot"
   c_virtio_probe_slot ::
     Int -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> IO Int
 
-{- | Probe all 8 MMIO slots, log to dmesg, return list.
+{- | Probe all 32 MMIO slots, log to dmesg, return list.
 device_id 4 (virtio-rng) is named explicitly so `virtio scan` + dmesg
 surface the Track O RNG slice without extra queue code.
 -}
 virtioScan :: H [VirtioSlotInfo]
-virtioScan = mapM probeOne [0 .. 7]
+virtioScan = mapM probeOne [0 .. 31]
   where
     probeOne slot = do
       info <- liftIO $ alloca $ \pDid -> alloca $ \pVid -> alloca $ \pVer -> do

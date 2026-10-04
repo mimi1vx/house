@@ -130,7 +130,7 @@ wantedMask :: Word64
 wantedMask = (1 `shiftL` 32) + (1 `shiftL` 29)
 
 slotValid :: Int -> Bool
-slotValid n = n >= 0 && n < 8
+slotValid n = n >= 0 && n < 32
 
 -- | Init net server for slot.
 netServerInit :: Int -> H (Either NetError NetDevice)

@@ -20,7 +20,7 @@ use crate::mmio::{dc_cvac_range, dc_ivac_range, mmio_r32, mmio_w32};
 
 const BASE_H: u64 = 0x0a000000;
 const STRIDE_H: u64 = 0x200;
-const NUM_SLOTS_H: i32 = 8;
+const NUM_SLOTS_H: i32 = 32;
 const MAGIC_H: u32 = 0x74726976;
 const OFF_MAGIC: u64 = 0x000;
 const OFF_VERSION: u64 = 0x004;
@@ -66,80 +66,17 @@ struct NetSlotState {
     inited: u8,
 }
 
-static mut NET_SLOTS: [NetSlotState; 8] = [
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-    NetSlotState {
-        avail_idx: [0, 0],
-        used_idx: [0, 0],
-        desc_pa: [0, 0],
-        avail_pa: [0, 0],
-        used_pa: [0, 0],
-        qsize: [0, 0],
-        inited: 0,
-    },
-];
+const NET_SLOT_INIT: NetSlotState = NetSlotState {
+    avail_idx: [0, 0],
+    used_idx: [0, 0],
+    desc_pa: [0, 0],
+    avail_pa: [0, 0],
+    used_pa: [0, 0],
+    qsize: [0, 0],
+    inited: 0,
+};
+
+static mut NET_SLOTS: [NetSlotState; NUM_SLOTS_H as usize] = [NET_SLOT_INIT; NUM_SLOTS_H as usize];
 
 #[inline]
 fn slot_base(slot: i32) -> u64 {

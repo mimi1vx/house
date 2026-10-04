@@ -1,7 +1,7 @@
 {- | Virtio-MMIO transport types (device-agnostic).
 Strictness: status/feature masks are strict Word32/Word64.
 Exceptions: total decoders return Either, no partial head/fromJust/!!.
-Bounds: slot 0..7, queue size capped at 64.
+Bounds: slot 0..31, queue size capped at 64.
 -}
 module Kernel.Driver.Virtio.Types (
   VirtioFeature (..),

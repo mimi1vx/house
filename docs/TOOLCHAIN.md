@@ -64,8 +64,12 @@ and Miri use the same pinned nightly baked into the image.
 - `make check-tcg`: the check legs with `TCG_ONLY=1` (Linux CI has no nested
   virt, so the hvf halves are skipped), minus house-dynamic-root-check,
   which needs QEMU 11+ for virtio-mmio-transports. The remaining focused
-  gates run in nightly (`house-fs/ipc/driver/virtio-*/userspace/fd-el0/
-  fork/proc`, `smp-check`, `smp-hotplug-check` plus the scaling/memory/Miri legs).
+  gates run in nightly (`house-fs/ipc/driver/virtio-*/irq-dispatch/
+  userspace/fd-el0/fork/proc`, `smp-check`, `smp-hotplug-check` plus the
+  scaling/memory/Miri legs). The virtio and irq-dispatch harnesses no longer
+  pass `virtio-mmio-transports=`, so they work on Ubuntu noble's QEMU 8.2 too;
+  whether they move into `check-tcg` is a gate-suite decision, not a QEMU-version
+  one.
 
 ## Design notes
 

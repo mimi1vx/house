@@ -59,8 +59,9 @@ pub unsafe extern "C" fn house_irq_push(intid: u32) {
     // starving the interrupted thread (livelock — polled drivers never run to
     // consume the ring). The Endpoint forward below still delivers one message
     // per completion; the used ring itself is consumed by the driver's poll.
-    // Slot SPIs are 48..56 (32 + 16 + slot); MMIO only, no locks, no alloc.
-    if (48..56).contains(&intid) {
+    // Slot SPIs are 48..80 (32 + 16 + slot, slot 0..31); MMIO only, no locks,
+    // no alloc.
+    if (48..80).contains(&intid) {
         let slot = (intid - 48) as i32;
         if unsafe { virtio_transport_interrupt_status(slot) } & 1 != 0 {
             unsafe { virtio_transport_ack(slot, 1) };

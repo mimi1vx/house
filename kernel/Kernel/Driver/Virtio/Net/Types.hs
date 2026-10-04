@@ -1,7 +1,7 @@
 {- | Virtio-net types — MAC, IPv4, errors, device record.
 Strictness: MAC/IPv4 are strict Word8 tuples; NetDevice fields strict.
 Exceptions: all validation returns Either, no partial head/fromJust/!!.
-Bounds: slot 0..7, MTU 1500, maxPacketBytes 2048 fits Grant page.
+Bounds: slot 0..31, MTU 1500, maxPacketBytes 2048 fits Grant page.
 -}
 module Kernel.Driver.Virtio.Net.Types (
   NetError (..),

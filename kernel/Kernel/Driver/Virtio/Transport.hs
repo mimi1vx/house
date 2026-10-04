@@ -89,7 +89,7 @@ wantedMask :: Word64
 wantedMask = virtioFeatureMask [VirtioFVersion1, VirtioFRingEventIdx]
 
 slotValid :: Int -> Bool
-slotValid n = n >= 0 && n < 8
+slotValid n = n >= 0 && n < 32
 
 -- | Init one slot: probe, negotiate, allocate queue, enable SPI+IRQ->Endpoint.
 virtioInit :: Int -> H (Either VirtioError VirtioDevice)
@@ -257,7 +257,7 @@ virtioLookup slot
 
 -- | All slots status.
 virtioStatusAll :: H [(Int, Word32)]
-virtioStatusAll = mapM getOne [0 .. 7]
+virtioStatusAll = mapM getOne [0 .. 31]
   where
     getOne s = do
       r <- virtioGetStatus s

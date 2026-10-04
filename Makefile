@@ -245,8 +245,8 @@ house-virtio-blk-check: house-build initrd
 # house_pipe_wait spin in wfe pins the RTS capability (house-1hc.1). Three
 # init/teardown rounds on one slot, then virtio status must still answer.
 # Pinned to -smp 1: the wedge needs dispatcher and shell on one capability.
-# Not in check-tcg: needs QEMU 10+ for virtio-mmio-transports, and Ubuntu
-# 24.04 CI ships 8.2 (same reason as house-dynamic-root-check).
+# Not in check-tcg: still wired to nightly, but no longer for a QEMU-version
+# reason — the harness runs plain `-M virt` like the other virtio gates.
 house-irq-dispatch-check: house-build initrd
 	qemu-img create -f raw /tmp/house-irq.img 64M
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-irq-dispatch.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) 1 -- -drive if=none,file=/tmp/house-irq.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
@@ -477,10 +477,12 @@ gate-coverage:
 
 # TCG-only gate for Linux CI: the check legs under TCG, except the hvf
 # halves (TCG_ONLY=1 skips them; hosted runners have no nested virt) and
-# except house-dynamic-root-check, which needs QEMU 11+ for
-# virtio-mmio-transports to place its block device in the guest's slots
-# 0..7 (Ubuntu noble ships QEMU 8.2, whose 32 fixed transports land it at
-# slot 31, outside the guest map). It still runs locally via make check.
+# except house-dynamic-root-check, whose harness still forces
+# virtio-mmio-transports=8 (Ubuntu noble ships QEMU 8.2, where the property
+# does not exist). It still runs locally via make check. The virtio-* and
+# irq-dispatch harnesses no longer force that property — the guest probes all
+# 32 transports and the harnesses discover the device slot — so they are no
+# longer excluded on QEMU-version grounds.
 check-tcg:
 	$(MAKE) doctor
 	$(MAKE) spike-check TCG_ONLY=1

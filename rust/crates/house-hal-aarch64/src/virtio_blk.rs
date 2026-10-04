@@ -20,7 +20,7 @@ use crate::mmio::{dc_cvac_range, dc_ivac_range, mmio_r32, mmio_w32};
 
 const BASE_H: u64 = 0x0a000000;
 const STRIDE_H: u64 = 0x200;
-const NUM_SLOTS_H: i32 = 8;
+const NUM_SLOTS_H: i32 = 32;
 const MAGIC_H: u32 = 0x74726976;
 const OFF_MAGIC: u64 = 0x000;
 const OFF_VERSION: u64 = 0x004;
@@ -79,96 +79,19 @@ struct BlkSlotState {
     qsize: u32,
 }
 
-static mut BLK_SLOTS: [BlkSlotState; 8] = [
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-    BlkSlotState {
-        avail_idx: 0,
-        used_idx: 0,
-        req_buf: [0; 16],
-        status_byte: 0,
-        inited: 0,
-        desc_pa: 0,
-        avail_pa: 0,
-        used_pa: 0,
-        qsize: 0,
-    },
-];
+const BLK_SLOT_INIT: BlkSlotState = BlkSlotState {
+    avail_idx: 0,
+    used_idx: 0,
+    req_buf: [0; 16],
+    status_byte: 0,
+    inited: 0,
+    desc_pa: 0,
+    avail_pa: 0,
+    used_pa: 0,
+    qsize: 0,
+};
+
+static mut BLK_SLOTS: [BlkSlotState; NUM_SLOTS_H as usize] = [BLK_SLOT_INIT; NUM_SLOTS_H as usize];
 
 #[inline]
 fn slot_base(slot: i32) -> u64 {

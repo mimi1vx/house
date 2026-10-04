@@ -1,7 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 {- | Low-level per-slot helpers over C FFI for virtio-console (ID 3).
-Validates slot 0..7 and maps C errors to ConError.
+Validates slot 0..31 and maps C errors to ConError.
 -}
 module Kernel.Driver.Virtio.Con.Device (
   conProbe,
@@ -63,7 +63,7 @@ cErrToConError n = case n of
   _ -> ConIoError n
 
 slotValid :: Int -> Bool
-slotValid n = n >= 0 && n < 8
+slotValid n = n >= 0 && n < 32
 
 {- | Probe slot for virtio-console. device_id 3 is the serial bus in both
 cases: a pure 2-queue console (cols/rows config only) yields ConConsole,

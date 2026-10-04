@@ -4,7 +4,9 @@ use crate::mmio::mmio_r32;
 
 const VIRTIO_BASE: u64 = 0x0a000000;
 const VIRTIO_STRIDE: u64 = 0x200;
-const VIRTIO_NUM_SLOTS: i32 = 8;
+// QEMU's `virt` machine default is 32 virtio-mmio transports; the guest
+// probes all of them so no harness has to narrow the machine.
+const VIRTIO_NUM_SLOTS: i32 = 32;
 const VIRTIO_MAGIC: u32 = 0x74726976;
 
 #[unsafe(no_mangle)]

@@ -27,7 +27,7 @@ use crate::mmio::{dc_cvac_range, dc_ivac_range, mmio_r32, mmio_w32};
 
 const BASE_H: u64 = 0x0a000000;
 const STRIDE_H: u64 = 0x200;
-const NUM_SLOTS_H: i32 = 8;
+const NUM_SLOTS_H: i32 = 32;
 const MAGIC_H: u32 = 0x74726976;
 const OFF_MAGIC: u64 = 0x000;
 const OFF_VERSION: u64 = 0x004;
@@ -77,96 +77,19 @@ struct ConSlotState {
     inited: u8,
 }
 
-static mut CON_SLOTS: [ConSlotState; 8] = [
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-    ConSlotState {
-        avail_idx: [0, 0, 0, 0],
-        used_idx: [0, 0, 0, 0],
-        desc_pa: [0, 0, 0, 0],
-        avail_pa: [0, 0, 0, 0],
-        used_pa: [0, 0, 0, 0],
-        qsize: [0, 0, 0, 0],
-        port_qrx: 0,
-        port_qtx: 1,
-        inited: 0,
-    },
-];
+const CON_SLOT_INIT: ConSlotState = ConSlotState {
+    avail_idx: [0, 0, 0, 0],
+    used_idx: [0, 0, 0, 0],
+    desc_pa: [0, 0, 0, 0],
+    avail_pa: [0, 0, 0, 0],
+    used_pa: [0, 0, 0, 0],
+    qsize: [0, 0, 0, 0],
+    port_qrx: 0,
+    port_qtx: 1,
+    inited: 0,
+};
+
+static mut CON_SLOTS: [ConSlotState; NUM_SLOTS_H as usize] = [CON_SLOT_INIT; NUM_SLOTS_H as usize];
 
 #[inline]
 fn slot_base(slot: i32) -> u64 {

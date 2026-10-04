@@ -1,7 +1,7 @@
 {- | Virtio-blk types — 4K blocks, wire 512B sectors (Q2=B).
 Strictness: capacity and LBA are strict Word64, counts strict Word32.
 Exceptions: all validation returns Either, no partial head/fromJust/!!.
-Bounds: slot 0..7, block count 1 per Grant page, LBA *8 <= capacity.
+Bounds: slot 0..31, block count 1 per Grant page, LBA *8 <= capacity.
 -}
 module Kernel.Driver.Virtio.Blk.Types (
   BlkError (..),

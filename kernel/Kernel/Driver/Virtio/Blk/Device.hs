@@ -47,7 +47,7 @@ cErrToBlkError n = case n of
     | otherwise -> BlkUnknown n
 
 slotValid :: Int -> Bool
-slotValid n = n >= 0 && n < 8
+slotValid n = n >= 0 && n < 32
 
 -- | Probe capacity (sectors). Validates slot and device_id==2.
 blkProbeCapacity :: Int -> H (Either BlkError Word64)

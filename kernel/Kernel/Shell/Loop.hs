@@ -609,7 +609,9 @@ loop = do
           Right () -> withCString "teardown ok\n" c_uart_puts
       _ -> withCString "usage: con teardown <slot>\n" c_uart_puts
     handleConMirror on = do
-      _ <- runH (if on then installConMirror 7 else clearConMirror)
+      xs <- runH NS.nsList
+      let slot = findConSlot xs
+      _ <- runH (if on then installConMirror slot else clearConMirror)
       withCString (if on then "mirror on\n" else "mirror off\n") c_uart_puts
     findConSlot xs = case filter ("virtio-con" `isPrefixOf`) xs of
       (x : _) -> case reads (drop (length "virtio-con") x) of [(n, "")] -> n; _ -> 0

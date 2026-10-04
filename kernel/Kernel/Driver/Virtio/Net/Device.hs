@@ -1,7 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 {- | Low-level per-slot helpers over C FFI for virtio-net.
-Validates slot 0..7 and maps C errors to NetError.
+Validates slot 0..31 and maps C errors to NetError.
 -}
 module Kernel.Driver.Virtio.Net.Device (
   netProbeMac,
@@ -51,7 +51,7 @@ cErrToNetError n = case n of
   _ -> NetIoError n
 
 slotValid :: Int -> Bool
-slotValid n = n >= 0 && n < 8
+slotValid n = n >= 0 && n < 32
 
 -- | Probe MAC for virtio-net slot. Validates device_id==1.
 netProbeMac :: Int -> H (Either NetError Mac)

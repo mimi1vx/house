@@ -82,7 +82,7 @@ foreign import ccall unsafe "virtio_blk_invalidate" c_invalidate :: Word64 -> Wo
 foreign import ccall unsafe "virtio_blk_reset_slot" c_reset_slot :: Int -> IO ()
 
 slotValid :: Int -> Bool
-slotValid n = n >= 0 && n < 8
+slotValid n = n >= 0 && n < 32
 
 {- | Shell write bound: one 4K block per call; over-length input is truncated
 (graceful, + dmesg) so a hostile/long line cannot starve the server.

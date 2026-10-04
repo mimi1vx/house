@@ -85,7 +85,7 @@ wantedMaskFor ConConsole = wantedMask
 wantedMaskFor (ConSerial _) = wantedMask + serialFeatBit
 
 slotValid :: Int -> Bool
-slotValid n = n >= 0 && n < 8
+slotValid n = n >= 0 && n < 32
 
 -- | Init console server for slot.
 conServerInit :: Int -> H (Either ConError ConDevice)

@@ -7,205 +7,225 @@ set accel [lindex $argv 2]
 set mem [lindex $argv 3]
 set smp [lindex $argv 4]
 set qemu_extra [lrange $argv 5 end]
+set has_blkdev [string match "*-device virtio-blk-device*" [join $qemu_extra " "]]
 if {$accel eq ""} { set accel hvf }
 if {$mem eq ""} { set mem 4G }
 if {$smp eq ""} { set smp 2 }
 log_user 1
-# Build spawn command with extra args
-# Force 8 transports so first blk lands at slot 7 (within 0..7 scan) — QEMU default 32 puts it at 31 outside our 8.
+# Build spawn command with extra args.
+# Plain `-M virt` on purpose: the guest probes all 32 virtio-mmio transports,
+# so no machine property is needed and the harness works on QEMU 8.2 through 11+
+# (virtio-mmio-transports= is QEMU 10+, and existed only to squeeze the device
+# into the old 8-slot guest scan). The blk device lands on the last free
+# transport, so its slot is discovered from `virtio scan`, not hardcoded.
 # Also force modern virtio (force-legacy=false) else queue setup fails with legacy mode.
-set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
 foreach a $qemu_extra {
     if {$a eq "--"} { continue }
     append cmd " $a"
 }
 puts "SPAWN: $cmd"
 eval spawn $cmd
+proc fail {msg} {
+    puts "\nFAIL: $msg"
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
 expect {
     -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
-    timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before welcome"; exit 1 }
+    timeout { fail "welcome timeout" }
+    eof { fail "eof before welcome" }
 }
 expect {
     -re ">" { puts "\nPASS: saw prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
+    timeout { fail "prompt timeout" }
+    eof { fail "eof before prompt" }
 }
 send "dmesg\r"
 expect {
     -re "House driver framework online" { puts "\nPASS: dmesg framework online" }
-    timeout { puts "\nFAIL: dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "dmesg timeout" }
 }
 sleep 1
 send "lsdev\r"
-expect { -re ">" { puts "\nPASS: lsdev" } timeout { puts "\nFAIL: lsdev timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" { puts "\nPASS: lsdev" } timeout { fail "lsdev timeout" } }
 send "virtio scan\r"
 expect {
     -re "virtio slot 0" { puts "\nPASS: virtio scan slot 0" }
-    timeout { puts "\nFAIL: virtio scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "virtio scan timeout" }
 }
 sleep 1
-# Check device_id=2 present when blk device supplied; if no drive, scan will show empty - still pass scan
+# Check device_id=2 present when blk device supplied; if no drive, scan will show
+# every slot empty. The device sits on the last free transport, so capture its
+# slot from the scan line instead of assuming one.
 send "virtio scan\r"
+set blkSlot ""
 expect {
-    -re "device_id=2" { puts "\nPASS: virtio scan device_id=2" }
-    -re "virtio slot" { puts "\nINFO: virtio scan no blk device (maybe no drive)"; }
-    timeout { puts "\nFAIL: virtio scan2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re {virtio slot (\d+): device_id=2} { set blkSlot $expect_out(1,string); puts "\nPASS: virtio scan device_id=2 at slot $blkSlot" }
+    -re "virtio slot 31: empty" {
+        if {$has_blkdev} { fail "virtio scan found no blk device at slot 31 with -device present" } else { puts "\nINFO: virtio scan no blk device (maybe no drive)" }
+    }
+    timeout { fail "virtio scan2 timeout" }
 }
-set blkSlot 7
+if {$blkSlot eq "" && !$has_blkdev} { set blkSlot 0 }
 send "blk init $blkSlot\r"
 expect {
-    -re "ok.*capacity" { puts "\nPASS: blk init 0 ok capacity" }
-    -re "BlkBadSlot|BlkNotBlk|BadSlot|BadVersion" { puts "\nINFO: blk init 0 no device (empty slot) - checking fallback"; }
-    timeout { puts "\nFAIL: blk init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk init $blkSlot ok capacity" }
+    -re "BlkBadSlot|BlkNotBlk|BadSlot|BadVersion" {
+        if {$has_blkdev} { fail "blk init $blkSlot found no device with -device present" } else { puts "\nINFO: blk init $blkSlot no device (empty slot)" }
+    }
+    timeout { fail "blk init timeout" }
 }
 sleep 1
 # If init succeeded, do full r/w sequence, else skip to ramfs check
 send "blk status $blkSlot\r"
 expect {
     -re "capacity" { puts "\nPASS: blk status capacity" }
-    -re "Blk" { puts "\nINFO: blk status returned error (expected if no device)" }
-    timeout { puts "\nFAIL: blk status timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "Blk" { if {$has_blkdev} { fail "blk status error with -device present" } else { puts "\nINFO: blk status returned error (expected if no device)" } }
+    timeout { fail "blk status timeout" }
 }
 sleep 1
 send "blk write $blkSlot 0 hello-blk\r"
 expect {
-    -re "ok" { puts "\nPASS: blk write 0 0 hello-blk" }
-    -re "Blk" { puts "\nINFO: blk write failed (no device?)" }
-    timeout { puts "\nFAIL: blk write timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "ok" { puts "\nPASS: blk write $blkSlot 0 hello-blk" }
+    -re "Blk" { if {$has_blkdev} { fail "blk write error with -device present" } else { puts "\nINFO: blk write failed (no device?)" } }
+    timeout { fail "blk write timeout" }
 }
 sleep 1
 send "blk read $blkSlot 0\r"
 expect {
-    -re "hello-blk" { puts "\nPASS: blk read 0 0 hello-blk" }
-    -re "Blk" { puts "\nINFO: blk read returned error" }
-    timeout { puts "\nFAIL: blk read timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "hello-blk" { puts "\nPASS: blk read $blkSlot 0 hello-blk" }
+    -re "Blk" { if {$has_blkdev} { fail "blk read error with -device present" } else { puts "\nINFO: blk read returned error" } }
+    timeout { fail "blk read timeout" }
 }
 sleep 1
 send "write /a hello\r"
-expect { -re ">" { puts "\nPASS: write /a hello" } timeout { puts "\nFAIL: write timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" { puts "\nPASS: write /a hello" } timeout { fail "write timeout" } }
 send "cat /a\r"
-expect { -re "hello" { puts "\nPASS: cat /a -> hello" } timeout { puts "\nFAIL: cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re "hello" { puts "\nPASS: cat /a -> hello" } timeout { fail "cat timeout" } }
 sleep 1
 send "ns ls\r"
-expect { -re ">" { puts "\nPASS: ns ls after blk" } timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" { puts "\nPASS: ns ls after blk" } timeout { fail "ns ls timeout" } }
 # Overwrite + reread persistence within same boot
 send "blk write $blkSlot 1 world2\r"
 expect {
-    -re "ok" { puts "\nPASS: blk write 0 1 world2" }
-    -re "Blk" { puts "\nINFO: blk write 1 failed" }
-    timeout { puts "\nFAIL: blk write 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "ok" { puts "\nPASS: blk write $blkSlot 1 world2" }
+    -re "Blk" { if {$has_blkdev} { fail "blk write 1 error with -device present" } else { puts "\nINFO: blk write 1 failed" } }
+    timeout { fail "blk write 1 timeout" }
 }
 sleep 1
 send "blk read $blkSlot 1\r"
 expect {
-    -re "world2" { puts "\nPASS: blk read 0 1 world2" }
-    -re "Blk" { puts "\nINFO: blk read 1 error" }
-    timeout { puts "\nFAIL: blk read 1 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "world2" { puts "\nPASS: blk read $blkSlot 1 world2" }
+    -re "Blk" { if {$has_blkdev} { fail "blk read 1 error with -device present" } else { puts "\nINFO: blk read 1 error" } }
+    timeout { fail "blk read 1 timeout" }
 }
 sleep 1
 send "blk read $blkSlot 0\r"
 expect {
-    -re "hello-blk" { puts "\nPASS: blk read 0 0 still hello-blk" }
-    timeout { puts "\nFAIL: blk read 0 0 second timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "hello-blk" { puts "\nPASS: blk read $blkSlot 0 still hello-blk" }
+    timeout { fail "blk read 0 0 second timeout" }
 }
 sleep 1
 send "blk teardown $blkSlot\r"
 expect {
-    -re "teardown ok|ok" { puts "\nPASS: blk teardown 0" }
-    -re "Blk" { puts "\nINFO: blk teardown error" }
-    timeout { puts "\nFAIL: blk teardown timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "teardown ok|ok" { puts "\nPASS: blk teardown $blkSlot" }
+    -re "Blk" { if {$has_blkdev} { fail "blk teardown error with -device present" } else { puts "\nINFO: blk teardown error" } }
+    timeout { fail "blk teardown timeout" }
 }
 sleep 1
 send "blk init $blkSlot\r"
 expect {
-    -re "ok.*capacity" { puts "\nPASS: blk re-init 0 ok" }
-    -re "Blk" { puts "\nINFO: blk re-init failed" }
-    timeout { puts "\nFAIL: blk re-init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk re-init $blkSlot ok" }
+    -re "Blk" { if {$has_blkdev} { fail "blk re-init error with -device present" } else { puts "\nINFO: blk re-init failed" } }
+    timeout { fail "blk re-init timeout" }
 }
 sleep 1
 send "blk read $blkSlot 0\r"
 expect {
     -re "hello-blk" { puts "\nPASS: blk read after re-init hello-blk (in-boot persistence)" }
-    -re "Blk" { puts "\nINFO: blk read after re-init error (maybe device reset cleared?)" }
-    timeout { puts "\nFAIL: blk read after re-init timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "Blk" { if {$has_blkdev} { fail "blk read after re-init error with -device present" } else { puts "\nINFO: blk read after re-init error (maybe device reset cleared?)" } }
+    timeout { fail "blk read after re-init timeout" }
 }
 sleep 1
 # HFS1 persist round-trip: sync ramfs, drop file, mount restores it
 send "write /persist hello-persist\r"
-expect { -re ">" { puts "\nPASS: write /persist hello-persist" } timeout { puts "\nFAIL: write /persist timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" { puts "\nPASS: write /persist hello-persist" } timeout { fail "write /persist timeout" } }
 send "blk sync $blkSlot\r"
 expect {
     -re "sync ok" { puts "\nPASS: blk sync ok" }
-    -re "bad image|blk I/O error|Blk" { puts "\nFAIL: blk sync error"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    timeout { puts "\nFAIL: blk sync timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "bad image|blk I/O error|Blk" { fail "blk sync error" }
+    timeout { fail "blk sync timeout" }
 }
 sleep 1
 send "rm /persist\r"
-expect { -re ">" { puts "\nPASS: rm /persist" } timeout { puts "\nFAIL: rm /persist timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" { puts "\nPASS: rm /persist" } timeout { fail "rm /persist timeout" } }
 send "cat /persist\r"
 expect {
     -re "ENOENT|No such" { puts "\nPASS: cat /persist after rm -> ENOENT" }
-    timeout { puts "\nFAIL: cat /persist ENOENT timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "cat /persist ENOENT timeout" }
 }
-expect { -re ">" {} timeout { puts "\nFAIL: prompt after ENOENT timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" {} timeout { fail "prompt after ENOENT timeout" } }
 send "blk mount $blkSlot\r"
 expect {
     -re "mount ok" { puts "\nPASS: blk mount ok" }
-    -re "bad image|blk I/O error|Blk" { puts "\nFAIL: blk mount error"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    timeout { puts "\nFAIL: blk mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    -re "bad image|blk I/O error|Blk" { fail "blk mount error" }
+    timeout { fail "blk mount timeout" }
 }
 sleep 1
 send "cat /persist\r"
 expect {
     -re "hello-persist" { puts "\nPASS: cat /persist after mount -> hello-persist" }
-    timeout { puts "\nFAIL: cat /persist after mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "cat /persist after mount timeout" }
 }
-expect { -re ">" {} timeout { puts "\nFAIL: prompt after mount-cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" {} timeout { fail "prompt after mount-cat timeout" } }
 # Hostile image: clobber superblock, mount must fail cleanly, ramfs intact
 send "blk write $blkSlot 0 not-hfs1-garbage\r"
 expect {
     -re "ok" { puts "\nPASS: clobber superblock" }
-    timeout { puts "\nFAIL: clobber timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "clobber timeout" }
 }
 sleep 1
 send "blk mount $blkSlot\r"
 expect {
     -re "bad image" { puts "\nPASS: blk mount rejects hostile image" }
-    timeout { puts "\nFAIL: hostile mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "hostile mount timeout" }
 }
-expect { -re ">" {} timeout { puts "\nFAIL: prompt after hostile mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" {} timeout { fail "prompt after hostile mount timeout" } }
 send "cat /persist\r"
 expect {
     -re "hello-persist" { puts "\nPASS: ramfs intact after rejected mount (quarantine)" }
-    timeout { puts "\nFAIL: quarantine cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "quarantine cat timeout" }
 }
-expect { -re ">" {} timeout { puts "\nFAIL: prompt after quarantine timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" {} timeout { fail "prompt after quarantine timeout" } }
 # Hostile version: valid magic but non-allowlisted version must be rejected
 send "blk write $blkSlot 0 HFS1Xbadver\r"
 expect {
     -re "ok" { puts "\nPASS: clobber version" }
-    timeout { puts "\nFAIL: clobber version timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "clobber version timeout" }
 }
 sleep 1
 send "blk mount $blkSlot\r"
 expect {
     -re "bad image: bad version" { puts "\nPASS: blk mount rejects bad version" }
-    timeout { puts "\nFAIL: bad-version mount timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "bad-version mount timeout" }
 }
-expect { -re ">" {} timeout { puts "\nFAIL: prompt after bad-version timeout"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+expect { -re ">" {} timeout { fail "prompt after bad-version timeout" } }
 send "blk sync $blkSlot\r"
 expect {
     -re "sync ok" { puts "\nPASS: blk re-sync ok" }
-    timeout { puts "\nFAIL: blk re-sync timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    timeout { fail "blk re-sync timeout" }
 }
 sleep 1
-# burst 5 scans without deadlock
+# burst 5 scans without deadlock. Fire-and-forget: per-iteration expects race
+# the line-editor prompt redraw (32 scan lines per command widens the window),
+# so send-and-sleep like qemu-virtio-net.exp does.
 for {set i 0} {$i < 5} {incr i} {
     send "virtio scan\r"
-    expect { -re "virtio slot 0" {} timeout { puts "\nFAIL: burst scan $i"; catch {exec kill -9 [exp_pid]}; exit 1 } }
-    expect { -re ">" {} timeout { puts "\nFAIL: prompt burst $i"; catch {exec kill -9 [exp_pid]}; exit 1 } }
+    sleep 1
 }
+expect { -re "virtio slot 31" {} timeout { fail "burst scan 5 output" } }
+expect { -re ">" {} timeout { fail "prompt after burst 5" } }
 puts "\nPASS: burst 5 scans ok"
 puts "\nPASS: virtio-blk ok"
 catch {exec kill -9 [exp_pid]}

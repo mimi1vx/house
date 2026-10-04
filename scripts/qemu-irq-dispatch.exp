@@ -16,10 +16,12 @@ if {$accel eq ""} { set accel hvf }
 if {$mem eq ""} { set mem 4G }
 if {$smp eq ""} { set smp 1 }
 log_user 1
-# Force 8 transports so the blk device lands at slot 7 (the guest maps 0..7),
-# and force modern virtio else queue setup fails. Same command line as
-# qemu-virtio-blk.exp, which is what puts a real device in that slot.
-set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,virtio-mmio-transports=8,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
+# Plain `-M virt` on purpose: the guest probes all 32 virtio-mmio transports, so
+# no machine property is needed (and an 8-transport machine makes the scan read
+# 24 addresses with no device behind them, which times out under tcg). The blk
+# device lands on the last free transport, so its slot is discovered, not
+# hardcoded. Also force modern virtio else queue setup fails.
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
 foreach a $qemu_extra {
     if {$a eq "--"} { continue }
     append cmd " $a"
@@ -41,8 +43,9 @@ expect {
 # Non-vacuity precondition: the block device really is in a guest slot, so a
 # missing device can never read as a pass.
 send "virtio scan\r"
+set blkSlot ""
 expect {
-    -re "device_id=2" { puts "\nPASS: virtio scan sees the blk device" }
+    -re {virtio slot (\d+): device_id=2} { set blkSlot $expect_out(1,string); puts "\nPASS: virtio scan sees the blk device at slot $blkSlot" }
     timeout { puts "\nFAIL: virtio scan timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof during virtio scan"; exit 1 }
 }
@@ -57,7 +60,7 @@ expect {
 set maxms 0
 for {set i 0} {$i < 3} {incr i} {
     set t0 [clock milliseconds]
-    send "virtio init 7\r"
+    send "virtio init $blkSlot\r"
     expect {
         -re "ok device_id=" {}
         timeout { puts "\nFAIL: virtio init round $i never answered (dispatcher wedged the capability)"; catch {exec kill -9 [exp_pid]}; exit 1 }
@@ -71,7 +74,7 @@ for {set i 0} {$i < 3} {incr i} {
         timeout { puts "\nFAIL: prompt after init round $i timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
         eof { puts "\nFAIL: eof after init round $i"; exit 1 }
     }
-    send "virtio teardown 7\r"
+    send "virtio teardown $blkSlot\r"
     expect {
         -re "teardown ok" {}
         timeout { puts "\nFAIL: virtio teardown round $i never answered"; catch {exec kill -9 [exp_pid]}; exit 1 }
@@ -84,7 +87,7 @@ for {set i 0} {$i < 3} {incr i} {
     }
     puts "\nPASS: virtio teardown round $i ok"
 }
-# virtioStatusAll prints slots 0..7 unconditionally, so this always has output:
+# virtioStatusAll prints slots 0..31 unconditionally, so this always has output:
 # a machine that wedged quietly cannot pass by timing out the same way.
 send "virtio status\r"
 expect {
