@@ -85,7 +85,9 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
   editing a staged shared object changes the digest, and the build fails on pin
   drift until the pin is regenerated. Staging a new `/lib` file therefore re-pins
   `scripts/lib-version.sha256` and moves the initramfs file count asserted by
-  `scripts/qemu-initramfs.exp`, so regenerate both in the same change.
+  `scripts/qemu-initramfs.exp`, so regenerate both in the same change. A comment-
+  or lint-only `house-el0-tiny` edit moves no repacked bytes yet still re-pins
+  `scripts/dynamic-root.sha256`, whose image embeds the unrepacked DSO and its DWARF.
 - `plans/` contains untracked local notes and is intentionally not ignored; do
   not treat those files as product documentation or generated artifacts.
 
