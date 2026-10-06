@@ -187,10 +187,7 @@ EXTS = -XGHC2024
 |   `-- crates/
 |-- userspace/          # EL0 sources: pid1 init + FS coreutils (userspace.ld link)
 |-- scripts/            # host-side QEMU Expect harnesses and ABI checks
-`-- plans/              # untracked, left on disk (local dev notes)
 ```
-
-`plans/` is intentionally untracked (not gitignored) — local development notes kept on disk for contributors but not committed.
 
 ## License
 

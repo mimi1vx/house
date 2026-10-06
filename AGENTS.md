@@ -88,8 +88,6 @@ only AArch64 QEMU `virt` on Apple silicon; do not add or assume x86 paths.
   `scripts/qemu-initramfs.exp`, so regenerate both in the same change. A comment-
   or lint-only `house-el0-tiny` edit moves no repacked bytes yet still re-pins
   `scripts/dynamic-root.sha256`, whose image embeds the unrepacked DSO and its DWARF.
-- `plans/` contains untracked local notes and is intentionally not ignored; do
-  not treat those files as product documentation or generated artifacts.
 
 <!-- br-agent-instructions-v1 -->
 
