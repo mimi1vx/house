@@ -39,7 +39,7 @@ the outcome.
 |---|---|---|---|---|
 | 0 | EL0 syscall ABI | `libc.so.6` has 411 `svc #0x0` with the number in `x8` (`mov x8, #0x5d`); EL1 reads `svc_imm = esr & 0xFFFF` and dispatches house numbers `0x00`–`0x14` | **ABI — decisive** | open — `house-q0g.13` |
 | 1 | `maxElfBytes` 1 MiB | 13,024,352 B and 16,038,808 B mains | cap-raise | open — `house-q0g.1` |
-| 2 | `maxPhnum` 8 over **all** headers | phnum 10–13, but only 2 are `PT_LOAD`; a 70,440-byte C `hello` from the image's default gcc fails identically | cap-raise | separate one-line format fix, not GHC-scale |
+| 2 | `maxPhnum` 8 over **all** headers | phnum 10–13, but only 2 are `PT_LOAD`; a 70,440-byte C `hello` from the image's default gcc fails identically | cap-raise | landed — the phnum/segment split: `maxPhnum` 16 over every header, plus a separate `maxSegments` 8 for size-bearing segments (`Loader.hs:86-94`) |
 | 3 | `PT_INTERP` must be `/lib/ld-house.so.0` | every object carries `/lib/ld-linux-aarch64.so.1` | policy (relink) | open — part of slice 7 |
 | 4 | unsupported `DT_*`, first in table order | `DT_RUNPATH` first rejected in the 72 KB fixtures; `DT_INIT_ARRAY`/`FINI_ARRAY` in all 9 objects | feature | landed by C5/C1–C6 |
 | 5 | `DT_GNU_HASH` where v1 pins `--hash-style=sysv` | SysV `DT_HASH` count is 0 in all 9 closure objects; every one has `DT_GNU_HASH` | feature | open — `house-q0g.5` |
@@ -85,8 +85,9 @@ count is checkable against the table:
 
 Only two of the seven are the cheap part the old note assumed was the whole
 problem. Three (GNU hash + versioning, TLS with a `tpidr_el0` resolver, IFUNC)
-are each larger than anything M2 shipped. Row 2 is not in the list because it
-is not a scale problem; rows 19 and 20 are as noted above.
+are each larger than anything M2 shipped. Row 2 was never in the list because
+it is not a scale problem — a one-line format fix any gcc-linked binary needs —
+and it has since landed; rows 19 and 20 are as noted above.
 
 ## Explicit non-goal
 
