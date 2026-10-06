@@ -121,3 +121,40 @@ deferral.
 - The measured closures are never staged. No `initramfs-staging` file, no
   manifest, no `/lib` pin, and no initramfs file count may move as a
   consequence of loader work.
+
+## house-q0g.1 retune decision (2026-10-06)
+
+One reviewed bound decision for branch B (provenance (ii), GHC libraries
+rebuilt against `house-libc`). Sizing target is the branch-B `house-libc`
+closure, not the stock bindist closure: the 2026-09-27 violation numbers
+(165,975 relocs, 59,724 symbols, 4,972 pages, 18.5 MB PT_LOAD) are reference
+upper bounds, not sizing targets — stock needs the row-0 syscall layer
+(`house-q0g.13`) regardless, so admitting its scale buys nothing. Re-measured
+2026-10-06 (`br` comment on `house-q0g.1`): house fixtures max 9,640 B file /
+3,328 B PT_LOAD / 3 pages / 6 relas / 5 syms / 2 needed / 2 deps; house-image
+main 71,936 B / 4,480 B / 3 pages / 37 relas / 24 syms / 8 needed; stock
+`libm.so.6` 591,960 B / 579,440 B / 143 pages / 21 relas / 1,280 syms.
+`loadElf` stays `ByteString` (`Loader.hs:602`); no representation change even
+at 16 MiB.
+
+- `maxElfBytes` 1 MiB → 16 MiB (`1 shiftL 20` → `1 shiftL 24`) admits the
+  13 MB / 16 MB mains (row 1) with `ByteString`, still refuses the 20 MB
+  `libHSghc-internal` at file size — `house-q0g.1`.
+- `maxSegMemSz` 256 KiB → 1 MiB (`256 * 1024` → `1024 * 1024`) admits `libm`
+  579,440 B with 1.8x headroom, refuses `libc` 1.6 MB / `base` 2.5 MB /
+  internal 18.5 MB — `house-q0g.1`.
+- Loader `maxTotalPages` 64 → 256 admits `libm` 143 pages with 1.8x headroom,
+  refuses `base` 660 / internal 4,973 / `libc` 417 — `house-q0g.1`.
+- `maxRelaCount` 4096 → 32768 admits `base` 13,265 with 2.4x headroom for B1,
+  refuses internal 165,975 — `house-q0g.1`.
+- `maxDynSymbols` 4096 → 16384 admits `base` 9,720 with 1.7x headroom, refuses
+  internal 59,724 — `house-q0g.1`.
+- `maxNeeded` 8 → 16: main needs exactly 8 at the cap, 2x headroom; coupled
+  to TLS (threaded RTS adds `PT_TLS` + 2 `TLSDESC`, still refused by
+  `house-q0g.6`) — `house-q0g.1`.
+- `maxDependencies` 8 → 16: closure main + 8 = 9 at the cap, symmetric with
+  `maxNeeded`; 2x would be 32 but that admits DoS-scale graphs — `house-q0g.1`.
+- Linker `maxObjectPages` 64 → 256, same as Loader pages, admits `libm`
+  143 — `house-q0g.1`.
+- Linker `maxTotalPages` 256 → 1024 admits main + `libm` (146) and single
+  `base` (660) but refuses the full stock 6,526-page closure — `house-q0g.1`.
