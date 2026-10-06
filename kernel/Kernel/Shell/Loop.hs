@@ -17,7 +17,7 @@ where
 
 import Control.Concurrent (killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (bracket)
+import Control.Exception (SomeException, bracket, catch, throwIO)
 import Control.Monad (forM_, when)
 import Data.Bits (shiftL, shiftR, (.&.))
 import Data.ByteString qualified as BS
@@ -89,9 +89,13 @@ loop = do
   editor <- runH (LE.newEditor kbd console)
   go editor
   where
+    -- Dispatch boundary: one throwing handler must not unwind through `loop`
+    -- into house_main and leave the machine idle. Report and keep reading.
     go ed = do
       line <- runH (LE.getLine ed "> ")
-      handle line
+      handle line `catch` \(e :: SomeException) -> do
+        withCString ("shell: " ++ show e ++ "\n") c_uart_puts
+        runH (Dmesg.dmesgLog ("shell handler: " ++ show e))
       go ed
     handle line = case words line of
       [] -> return ()
@@ -191,6 +195,7 @@ loop = do
       ["forktest"] -> handleForktest
       ["loaderrefs"] -> handleLoaderRefs "/bin/hello-dyn"
       ["loaderrefs", p] -> handleLoaderRefs p
+      ["throwtest"] -> throwIO (userError "deliberate shell handler failure")
       ["run"] -> withCString "usage: run <path> [args...]\n" c_uart_puts
       ("run" : p : args) -> handleRun p args
       ["spawn"] -> withCString "usage: spawn <path> [args...]\n" c_uart_puts
@@ -919,6 +924,7 @@ loop = do
         , "       fdtest -- per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)"
         , "       forktest -- EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)"
         , "       loaderrefs [path] -- launch two dynamic images (default /bin/hello-dyn), verify finalized DSO page sharing, then drain refs"
+        , "       throwtest -- throw from a handler; the dispatch catch must log it and answer the next command"
         ]
     seqFib :: Int -> Int
     seqFib n

@@ -150,6 +150,31 @@ expect {
     timeout { puts "\nFAIL: prompt after history timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof after history"; exit 1 }
 }
+# A throwing handler must be caught at the dispatch boundary: the error is
+# reported, and the loop still answers the next command.
+send "throwtest\r"
+expect {
+    -re "shell: .*deliberate shell handler failure" { puts "\nPASS: shell caught handler exception" }
+    timeout { puts "\nFAIL: throwtest timeout (handler killed the loop?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before throwtest"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after throwtest" }
+    timeout { puts "\nFAIL: prompt after throwtest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after throwtest"; exit 1 }
+}
+# the failure is in the ring too, not only on the console
+send "dmesg\r"
+expect {
+    -re "shell handler: .*deliberate shell handler failure" { puts "\nPASS: throwtest in dmesg" }
+    timeout { puts "\nFAIL: dmesg after throwtest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after dmesg"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after dmesg" }
+    timeout { puts "\nFAIL: prompt after dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after dmesg"; exit 1 }
+}
 puts "\nPASS: shell interactive ok"
 catch {exec kill -9 [exp_pid]}
 exit 0
