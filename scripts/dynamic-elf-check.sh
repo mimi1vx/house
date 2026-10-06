@@ -320,16 +320,17 @@ EOF
 		cat "$WORK/house-main.relocs" >&2
 		exit 1
 	}
-	# The closure stops at a named bound, not at the GNU-hash refusal it would
-	# reach next: libm.so.6 carries a PT_LOAD past maxSegMemSz, and the caps
-	# are read before the dynamic table. The retune moves this line.
+	# The closure stops at the GNU-hash bound: libm.so.6 now passes the retuned
+	# caps (1 MiB PT_LOAD, 256 pages) and reaches the dynamic table, where the
+	# SysV-only policy refuses it. Caps are still read before the table, so a
+	# future cap move would show up here first.
 	set -- $(tail -n +2 "$house/objects" | cut -f2)
 	if "$LOADER_CHECK" link "$house/build/house-image" "$@" >"$WORK/house-link.out" 2>"$WORK/house-link.err"; then
 		echo "dynamic-elf-check: the stock GHC closure linked, expected a named refusal" >&2
 		exit 1
 	fi
-	grep -q 'NoSpace: total pages >64 or memsz >262144' "$WORK/house-link.err" || {
-		echo "dynamic-elf-check: the House closure no longer stops at the first segment-size bound" >&2
+	grep -q 'BadDyn: GNU hash unsupported' "$WORK/house-link.err" || {
+		echo "dynamic-elf-check: the House closure no longer stops at the GNU-hash bound" >&2
 		cat "$WORK/house-link.err" >&2
 		exit 1
 	}
@@ -489,7 +490,7 @@ if audit_symbols "$WORK/bad-u.so" >/dev/null 2>&1; then
 	exit 1
 fi
 
-dd if=/dev/zero of="$WORK/oversized" bs=1 count=0 seek=1048577 >/dev/null 2>&1
+dd if=/dev/zero of="$WORK/oversized" bs=1 count=0 seek=16777217 >/dev/null 2>&1
 if "$LOADER_CHECK" "$WORK/oversized" >/dev/null 2>&1; then
 	echo "dynamic-elf-check: oversized Loader input was not rejected" >&2
 	exit 1

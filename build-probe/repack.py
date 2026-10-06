@@ -12,21 +12,21 @@ import struct
 import sys
 from typing import NoReturn
 
-MAX_ELF_BYTES = 1024 * 1024
+MAX_ELF_BYTES = 16 * 1024 * 1024
 # Total program headers (parse work) and size-bearing segments (mapping work)
 # are separate bounds; the loader keeps them apart in Loader.hs too.
 MAX_PHNUM = 16
 MAX_SEGMENTS = 8
-MAX_SEG_MEM = 256 * 1024
-MAX_PAGES = 64
+MAX_SEG_MEM = 1024 * 1024
+MAX_PAGES = 256
 MAX_INTERP = 256
 MAX_DYN_STR = 64 * 1024
-MAX_NEEDED = 8
-MAX_RELA = 4096
+MAX_NEEDED = 16
+MAX_RELA = 32768
 MAX_DYN_ENT = 64
 MAX_NEEDED_NAME = 128
 MAX_HASH_BUCKETS = 4096
-MAX_SYMBOLS = 4096
+MAX_SYMBOLS = 16384
 MAX_INIT_ARRAY = 64
 MAX_SYMBOL_NAME = 256
 MIN_EXEC_VADDR = 0x01000000
@@ -538,8 +538,8 @@ def repack_static(
                 fail("BadSegment: filesz > memsz")
             if filesz != memsz:
                 fail("BadSegment: bss not supported")
-            if filesz > 256 * 1024:
-                fail("NoSpace: total pages >64 or memsz >256K")
+            if filesz > MAX_SEG_MEM:
+                fail("NoSpace: total pages >256 or memsz >1048576")
             if align not in ALLOWED_ALIGN:
                 fail("Misaligned: bad p_align or p_offset")
             if align and ((vaddr - poff) & (align - 1)):
@@ -568,8 +568,8 @@ def repack_static(
     if new_entry is None:
         fail("BadSegment: entry not in LOAD")
     pages = sum((len(blob) + 4095) // 4096 for _vaddr, blob, _flags in blobs)
-    if pages > 64:
-        fail("NoSpace: total pages >64 or memsz >256K")
+    if pages > MAX_PAGES:
+        fail("NoSpace: total pages >256 or memsz >1048576")
     n = len(blobs)
     if n > MAX_SEGMENTS:
         fail(f"TooManySegments: >{MAX_SEGMENTS} size-bearing segments")
@@ -620,7 +620,7 @@ def repack_dynamic(
         if filesz > memsz:
             fail("BadSegment: filesz > memsz")
         if memsz > MAX_SEG_MEM:
-            fail("NoSpace: total pages >64 or memsz >256K")
+            fail("NoSpace: total pages >256 or memsz >1048576")
         if poff > len(img) or filesz > len(img) - poff:
             fail("Truncated")
         if align not in ALLOWED_ALIGN:
@@ -651,7 +651,7 @@ def repack_dynamic(
         fail("BadSegment: entry not in LOAD")
     pages = sum((len(blob) + 4095) // 4096 for _vaddr, blob, _flags in blobs)
     if pages > MAX_PAGES:
-        fail("NoSpace: total pages >64 or memsz >256K")
+        fail("NoSpace: total pages >256 or memsz >1048576")
 
     interps = [raw for raw in raws if raw[0] == PT_INTERP]
     interp_blob = None

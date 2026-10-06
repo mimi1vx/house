@@ -17,6 +17,8 @@ module Kernel.Userspace.Linker (
   PlacedObject (..),
   RelocationPatch (..),
   maxDependencies,
+  maxObjectPages,
+  maxTotalPages,
   linkDynamic,
   plannedPageAccess,
 )
@@ -56,13 +58,13 @@ objectAlignment :: Word64
 objectAlignment = 64 * 1024
 
 maxDependencies :: Int
-maxDependencies = 8
+maxDependencies = 16
 
 maxObjectPages :: Word64
-maxObjectPages = 64
+maxObjectPages = 256
 
 maxTotalPages :: Word64
-maxTotalPages = 256
+maxTotalPages = 1024
 
 pfWrite :: Word32
 pfWrite = 2

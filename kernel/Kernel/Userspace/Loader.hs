@@ -53,6 +53,8 @@ module Kernel.Userspace.Loader (
   maxElfBytes,
   maxPhnum,
   maxSegments,
+  maxSegMemSz,
+  maxTotalPages,
   maxInterpLen,
   maxDynStrSz,
   maxNeeded,
@@ -77,7 +79,7 @@ import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Word (Word16, Word32, Word64, Word8)
 
 maxElfBytes :: Int
-maxElfBytes = 1 `shiftL` 20
+maxElfBytes = 1 `shiftL` 24
 
 {- | Total program headers, a parse-work bound over every header a linker
 emits. 16 covers ld.lld's 8 and glibc's 13 with margin; the mapping-work
@@ -94,10 +96,10 @@ maxSegments :: Int
 maxSegments = 8
 
 maxSegMemSz :: Int
-maxSegMemSz = 256 * 1024
+maxSegMemSz = 1024 * 1024
 
 maxTotalPages :: Int
-maxTotalPages = 64
+maxTotalPages = 256
 
 minExecVAddr :: Word64
 minExecVAddr = 0x01000000
@@ -112,10 +114,10 @@ maxDynStrSz :: Int
 maxDynStrSz = 64 * 1024
 
 maxNeeded :: Int
-maxNeeded = 8
+maxNeeded = 16
 
 maxRelaCount :: Int
-maxRelaCount = 4096
+maxRelaCount = 32768
 
 maxDynEnt :: Int
 maxDynEnt = 64
@@ -127,7 +129,7 @@ maxDynHashBuckets :: Int
 maxDynHashBuckets = 4096
 
 maxDynSymbols :: Int
-maxDynSymbols = 4096
+maxDynSymbols = 16384
 
 maxSymbolNameLen :: Int
 maxSymbolNameLen = 256

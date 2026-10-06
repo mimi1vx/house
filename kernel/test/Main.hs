@@ -877,7 +877,7 @@ main = do
       , assertLoadLeft "elf bad arch" elfBadArch Ldr.BadArch
       , assertLoadLeft "elf phoff trunc" elfPhoffTrunc Ldr.Truncated
       , check "showHex64 via OutOfWindow" (Ldr.loadErrorToString (Ldr.OutOfWindow 0x01000000) == "OutOfWindow: 0x1000000")
-      , check "NoSpace renders caps" (Ldr.loadErrorToString Ldr.NoSpace == "NoSpace: total pages >64 or memsz >262144")
+      , check "NoSpace renders caps" (Ldr.loadErrorToString Ldr.NoSpace == "NoSpace: total pages >" ++ show Ldr.maxTotalPages ++ " or memsz >" ++ show Ldr.maxSegMemSz)
       , -- BlkPersist golden truncations
         assertLeft "blk empty" (BP.decodeImage [])
       , assertLeft "blk short header" (BP.decodeImage [0, 1, 2])
@@ -1029,6 +1029,9 @@ main = do
       , assertLoadLeft "elf strsz overrun" elfStrszOverrun (Ldr.BadDyn "strsz overrun")
       , assertLoadLeft "elf rela outside LOAD" elfRelaOutside (Ldr.BadDyn "rela outside LOAD")
       , assertLoadLeft "elf rela count cap" elfRelaCount (Ldr.BadDyn "rela count")
+      , check "elf maxElfBytes cap" (Ldr.loadElf (BS.replicate (Ldr.maxElfBytes + 1) 0) == Left Ldr.OverlapSize)
+      , assertLoadLeft "elf segmem cap" elfSegMemCap Ldr.NoSpace
+      , assertLoadLeft "elf loader total pages cap" elfLoaderTotalPages Ldr.NoSpace
       , check "elf size-bearing segment cap" (loadFixture elfManySegments == Left Ldr.TooManySegments)
       , check "elf total phdr cap" (loadFixture elfManyPhdrs == Left Ldr.TooManyPhdrs)
       , check "elf gcc-shaped header count parses" (isDynRight elfGccShaped False)
@@ -1555,19 +1558,30 @@ main = do
               [("liba.so.0", elfLinkDep, clearDependencyRelro (validDependency "liba.so.0" [] []))]
           )
       , check
-          "link dependency cap accepts eight"
-          (linkNamesAre ("main" : dependencyNames 8) (dependencyCapPlan 8))
+          "link dependency cap accepts cap"
+          (linkNamesAre ("main" : dependencyNames Linker.maxDependencies) (dependencyCapPlan Linker.maxDependencies))
       , assertLinkError
-          "link dependency cap rejects nine"
-          (dependencyCapPlan 9)
+          "link dependency cap rejects cap + 1"
+          (dependencyCapPlan (Linker.maxDependencies + 1))
           (Ldr.BadDyn "link: dependency object cap exceeded")
+      , assertLinkLeft
+          "link needed cap"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded (dependencyNames (Ldr.maxNeeded + 1)))
+              []
+          )
+      , assertPageAccessError
+          "link object page cap"
+          (plannedAccessFor 0x01000000 (Linker.maxObjectPages + 1) (accessSegments, accessRelro))
+          (Ldr.BadDyn "link: main exceeds object page cap")
       , assertLinkLeft
           "link total page cap"
           ( linkWith
               elfLinkMain
-              (Right . setMainRelocations [] . setMainNeeded ["lib0.so.0", "lib1.so.0", "lib2.so.0", "lib3.so.0"])
+              (Right . setMainRelocations [] . setMainNeeded (dependencyNames Linker.maxDependencies))
               [ ("lib" ++ show index ++ ".so.0", elfLinkDepLarge, validDependency ("lib" ++ show index ++ ".so.0") [] [])
-              | index <- ([0 .. 3] :: [Int])
+              | index <- ([0 .. Linker.maxDependencies - 1] :: [Int])
               ]
           )
       , assertLinkLeft
@@ -2447,6 +2461,26 @@ elfManySegments = mkHeaderCountElf (Ldr.maxSegments + 1) (Ldr.maxSegments + 1)
 elfManyPhdrs :: [Word8]
 elfManyPhdrs = mkHeaderCountElf (Ldr.maxPhnum + 1) 2
 
+-- | One byte past the per-segment mapping bound.
+elfSegMemCap :: [Word8]
+elfSegMemCap =
+  let mem = Ldr.maxSegMemSz + 1
+      base = 64 + 56
+   in mkEhdr 2 0x01000000 1 ++ mkPhdr 1 5 (fromIntegral base) 0x01000000 (fromIntegral mem) (fromIntegral mem) 0 ++ replicate (base + mem) 0
+
+{- | One page past the per-object mapping bound, spread over two LOADs so no
+single segment trips the per-segment bound and the count stays under the
+size-bearing-segment bound.
+-}
+elfLoaderTotalPages :: [Word8]
+elfLoaderTotalPages =
+  let base = 64 + 56 * 2
+      mem1 = Ldr.maxSegMemSz
+      mem2 = 0x1000
+      p1 = mkPhdr 1 5 (fromIntegral base) 0x01000000 (fromIntegral mem1) (fromIntegral mem1) 0
+      p2 = mkPhdr 1 6 (fromIntegral (base + mem1)) 0x02000000 (fromIntegral mem2) (fromIntegral mem2) 0
+   in mkEhdr 2 0x01000000 2 ++ p1 ++ p2 ++ replicate (base + mem1 + mem2) 0
+
 -- | The shape a gcc/glibc link emits: ten headers, two of which carry bytes.
 elfGccShaped :: [Word8]
 elfGccShaped = mkHeaderCountElf 10 2
@@ -2580,7 +2614,7 @@ elfRelaOutside =
 
 elfRelaCount :: [Word8]
 elfRelaCount =
-  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [(7, 0x01000180), (8, 120000), (9, 24)] (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
+  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [(7, 0x01000180), (8, fromIntegral ((Ldr.maxRelaCount + 1) * 24)), (9, 24)] (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 64)] [] []
 
 elfJumpSlot :: [Word8]
 elfJumpSlot = mkM2Elf m2JumpEnts 1026 1 6 0x500 True True

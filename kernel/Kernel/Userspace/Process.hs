@@ -525,7 +525,7 @@ resolveDependencies ns main = go (Ldr.dynNeeded (Ldr.elfDyn main)) Map.empty Set
     go [] deps _ = return (Right deps)
     go (name : rest) deps seen
       | Set.member name seen = go rest deps seen
-      | Map.size deps >= Linker.maxDependencies =
+      | Map.size deps > Linker.maxDependencies =
           return (Left (BadDyn "dependency object cap exceeded"))
       | otherwise = do
           bytesResult <- Vfs.vfsReadOverlay ns ("/lib/" ++ name)
