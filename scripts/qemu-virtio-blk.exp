@@ -92,9 +92,12 @@ expect {
     timeout { fail "blk write timeout" }
 }
 sleep 1
+# Completion-latency probe, not a bound: the round-trip for one 4K read is
+# reported so the device poll ceiling is chosen against a measured number.
+set t0 [clock milliseconds]
 send "blk read $blkSlot 0\r"
 expect {
-    -re "hello-blk" { puts "\nPASS: blk read $blkSlot 0 hello-blk" }
+    -re "hello-blk" { puts "\nPASS: blk read $blkSlot 0 hello-blk in [expr {[clock milliseconds] - $t0}]ms" }
     -re "Blk" { if {$has_blkdev} { fail "blk read error with -device present" } else { puts "\nINFO: blk read returned error" } }
     timeout { fail "blk read timeout" }
 }

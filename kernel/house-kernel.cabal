@@ -47,6 +47,7 @@ library
     Kernel.Driver.Types
     Kernel.Driver.Virtio
     Kernel.Driver.Virtio.Blk
+    Kernel.Driver.Virtio.Blk.Completion
     Kernel.Driver.Virtio.Blk.Device
     Kernel.Driver.Virtio.Blk.Server
     Kernel.Driver.Virtio.Blk.Types

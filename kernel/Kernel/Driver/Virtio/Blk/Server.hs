@@ -43,6 +43,7 @@ import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
+import Kernel.Driver.Virtio.Blk.Completion qualified as Completion
 import Kernel.Driver.Virtio.Blk.Device (blkPollUsed, blkProbeCapacity, blkSubmitRead, blkSubmitWrite)
 import Kernel.Driver.Virtio.Blk.Proto qualified as Proto
 import Kernel.Driver.Virtio.Blk.Types (BlkError (..), validateLba)
@@ -111,25 +112,23 @@ grantToString (Grant p _) = liftIO $ do
 invalidateGrant :: Grant -> H ()
 invalidateGrant (Grant p _) = liftIO $ c_invalidate (c_pagePa p) 4096
 
--- | Helper: wait for completion of req id with bounded poll.
+-- | Helper: wait for completion of req id with the bounded device poll.
 waitForCompletion :: Int -> Word32 -> Grant -> H (Either BlkError ())
-waitForCompletion slot reqId grant = loop (200 :: Int)
+waitForCompletion slot reqId grant = Completion.awaitCompletion poll
   where
-    loop 0 = return (Left (BlkIoError 99))
-    loop n = do
-      HC.threadDelay 2000
+    poll = do
       r <- blkPollUsed slot
       case r of
         Left e -> return (Left e)
-        Right Nothing -> loop (n - 1)
+        Right Nothing -> return (Right False)
         Right (Just (cid, st)) ->
           if cid /= reqId
-            then loop (n - 1)
+            then return (Right False)
             else
               if st == 0
                 then do
                   invalidateGrant grant
-                  return (Right ())
+                  return (Right True)
                 else return (Left (BlkIoError (fromIntegral st)))
 
 -- | Init blk server for slot. Direct Grant path (no forked recv loop in this slice).

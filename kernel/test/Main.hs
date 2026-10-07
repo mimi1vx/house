@@ -22,6 +22,8 @@ any FFI (foreign symbols are stubbed at link time, never called):
   backends, manifest line validation, RamFS quota math + over-quota
   refusal.
 * Kernel.FileSystem.Vfs.splitPath: normalization goldens.
+* Virtio-blk completion poll: the bounded-poll ceiling gives up after
+  exactly @blkPollAttempts@ polls, and a completing device needs one.
 * Util.Word12: Enum/Ix contract errors fire (HasCallStack-annotated),
   guarded paths stay pure.
 -}
@@ -34,7 +36,7 @@ import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.Either (fromRight, isLeft)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Ix qualified as Ix
 import Data.List (sort)
@@ -53,7 +55,9 @@ import H.Monad qualified as HM
 import H.Pages qualified as P
 import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
+import Kernel.Driver.Virtio.Blk.Completion qualified as Completion
 import Kernel.Driver.Virtio.Blk.Proto qualified as Proto
+import Kernel.Driver.Virtio.Blk.Types qualified as BlkTypes
 import Kernel.Driver.Virtio.Net.Server qualified as NetServer
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
 import Kernel.Driver.Virtio.Net.Types qualified as NT
@@ -885,6 +889,8 @@ main = do
       , assertLeft "blk bad path" (BP.encodeImage [("noSlash", [1])])
       , assertLeft "blk empty path" (BP.encodeImage [("", [1])])
       , blkTruncGolden
+      , checkIO "blk poll ceiling bounds the failure path" blkPollCeilingGolden
+      , checkIO "blk poll completes on the first poll" blkPollImmediateGolden
       , check "vfs longest-prefix" (Vfs.resolvePrefix [([], "root"), (["a"], "a"), (["a", "b"], "blk")] ["a", "b", "c"] == Just ("blk", ["c"]))
       , check "vfs root-fallback" (Vfs.resolvePrefix [([], "root"), (["a"], "a")] ["z"] == Just ("root", ["z"]))
       , check "vfs dotdot confined" (Vfs.splitPath "/a/../../b" == Right ["b"])
@@ -1855,6 +1861,38 @@ blkTruncGolden :: IO Bool
 blkTruncGolden = case BP.encodeImage [("/a", [1, 2, 3])] of
   Left _ -> check "blk trunc body" False
   Right img -> assertLeft "blk trunc body" (BP.decodeImage (trunc img))
+
+{- | The virtio-blk poll ceiling bounds the failure path, and the poll count is
+what pins it: a device that never completes must be given up on after exactly
+'Completion.blkPollAttempts' polls, not the 200 a 2 ms step allowed. The wall
+bound is 200 ms — ten times the 20 ms ceiling, and half the 400 ms budget it
+replaces, so the old loop fails it and the new one clears it.
+-}
+blkPollCeilingGolden :: IO Bool
+blkPollCeilingGolden = do
+  polls <- newIORef (0 :: Int)
+  r <- Timeout.timeout 200000 $ do
+    res <- HM.runH (Completion.awaitCompletion (countPoll polls False))
+    n <- readIORef polls
+    return (res == Left (BlkTypes.BlkIoError 99) && n == Completion.blkPollAttempts)
+  return (r == Just True)
+
+-- | A device that completes must not pay the whole ceiling: one poll is enough.
+blkPollImmediateGolden :: IO Bool
+blkPollImmediateGolden = do
+  polls <- newIORef (0 :: Int)
+  r <- Timeout.timeout 10000000 $ do
+    res <- HM.runH (Completion.awaitCompletion (countPoll polls True))
+    n <- readIORef polls
+    return (res == Right () && n == 1)
+  return (r == Just True)
+
+-- | Injected poll: count the attempt, then report done or still outstanding.
+countPoll :: IORef Int -> Bool -> H (Either BlkTypes.BlkError Bool)
+countPoll ref done = do
+  n <- liftIO (readIORef ref)
+  liftIO (writeIORef ref (n + 1))
+  return (Right done)
 
 -- | Two blocked receivers each receive exactly one wakeup (no lost, no double).
 ipcWakeGolden :: IO Bool
