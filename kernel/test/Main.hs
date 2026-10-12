@@ -3260,6 +3260,8 @@ parityVectors =
   , ("relro-outside", elfRelroOutside)
   , ("many-segments", elfManySegments)
   , ("many-phdrs", elfManyPhdrs)
+  , ("segmem-cap", elfSegMemCap)
+  , ("loader-total-pages-cap", elfLoaderTotalPages)
   , ("gcc-shaped", elfGccShaped)
   , ("skipped-runpath", elfDynWithTag (29, 0))
   , ("rejected-auxiliary", elfDynWithTag (0x7FFFFFFD, 0))

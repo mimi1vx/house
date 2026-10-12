@@ -8,6 +8,8 @@ relocations, bind-now, and RELRO. The validation contract mirrors
 Kernel.Userspace.Loader; unknown or unsupported metadata fails closed.
 """
 
+from __future__ import annotations
+
 import struct
 import sys
 from typing import NoReturn
