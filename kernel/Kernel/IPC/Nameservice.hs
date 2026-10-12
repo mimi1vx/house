@@ -19,9 +19,9 @@ import H.Concurrency (QSem, newQSem, withQSem)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.IPC.Endpoint (CapToken, checkCap)
 import Kernel.IPC.Types (Endpoint, IpcError (..))
+import Kernel.Log.Dmesg qualified as Dmesg
 
 {-# NOINLINE nsMap #-}
 nsMap :: Ref (Map String Endpoint)

@@ -31,7 +31,6 @@ import H.Interrupts (IntId, spi)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.GIC qualified as DGIC
 import Kernel.Driver.IRQ qualified as DIRQ
 import Kernel.Driver.Virtio.Queue (VirtQueue, allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
@@ -39,6 +38,7 @@ import Kernel.Driver.Virtio.Types (VirtioError (..), VirtioFeature (..), cErrToV
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (Endpoint, IpcError, Message (..))
+import Kernel.Log.Dmesg qualified as Dmesg
 
 -- | Device record kept in transport map.
 data VirtioDevice = VirtioDevice {

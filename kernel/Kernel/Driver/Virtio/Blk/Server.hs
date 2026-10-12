@@ -40,7 +40,6 @@ import H.Interrupts (IntId)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Blk.Completion qualified as Completion
@@ -53,6 +52,7 @@ import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Types (Endpoint, Grant (..), IpcError (..), Message (..))
+import Kernel.Log.Dmesg qualified as Dmesg
 
 -- | Blk device record (mirrors VirtioDevice but block-specific).
 data BlkDevice = BlkDevice {

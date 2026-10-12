@@ -433,6 +433,7 @@ run: house-run
 # hlint cannot parse GHC2024 (see lint above), so the Haskell gates stay on
 # the host until Hackage hlint supports ghc-lib-parser 9.14.
 haskell-check:
+	sh scripts/layering-check.sh
 	fourmolu -m check kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs userspace/hs/ userspace/test/
 	hlint kernel/ platform/aarch64/Spike.hs platform/aarch64/IrqCheck.hs userspace/hs/ userspace/test/
 	cabal build all --enable-tests

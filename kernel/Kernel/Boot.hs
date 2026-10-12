@@ -22,12 +22,12 @@ import Data.Word (Word8)
 import Foreign.C.String (withCString)
 import H.Console (c_uart_puts)
 import H.Monad (runH)
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.FileSystem.RamFs qualified as RamFs
 import Kernel.FileSystem.Vfs qualified as FS
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Nameservice qualified as NS
 import Kernel.Initramfs qualified as Initrd
+import Kernel.Log.Dmesg qualified as Dmesg
 import Kernel.Shell.Format (showFsError, toExecError)
 import Kernel.Userspace qualified as U
 import Kernel.Userspace.Loader qualified as ULdr

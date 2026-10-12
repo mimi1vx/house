@@ -53,10 +53,10 @@ import H.PhysicalMemory (fromPhysPage, toPhysPage)
 import H.Unsafe (unsafePerformH)
 import H.Utils (ptrFromWord64, ptrToWord64)
 import H.VirtualMemory qualified as VM
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Types (EndpointId (..), IpcError (..), Message (..), mkMessage)
+import Kernel.Log.Dmesg qualified as Dmesg
 import Kernel.Userspace.Fd qualified as Fd
 import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf, stackPageStart, validateStaticRunElf)

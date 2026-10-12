@@ -16,7 +16,7 @@ import Foreign.Ptr (Ptr)
 import Foreign.Storable (peek)
 import H.Interrupts (IntId, spi)
 import H.Monad (H, liftIO)
-import Kernel.Driver.Dmesg qualified as Dmesg
+import Kernel.Log.Dmesg qualified as Dmesg
 
 -- | Per-slot probe result.
 data VirtioSlotInfo = VirtioSlotInfo {

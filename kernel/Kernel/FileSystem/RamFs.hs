@@ -42,8 +42,8 @@ import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Pages qualified as P
 import H.Unsafe (unsafePerformH)
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.FileSystem.Vfs (FsError (..), FsOps (..), FsStat (..), splitPath)
+import Kernel.Log.Dmesg qualified as Dmesg
 
 -- Store ------------------------------------------------------------------------
 

@@ -37,7 +37,6 @@ library
     Kernel.Console
     Kernel.Debug
     Kernel.Driver
-    Kernel.Driver.Dmesg
     Kernel.Driver.GIC
     Kernel.Driver.IRQ
     Kernel.Driver.Keyboard
@@ -80,6 +79,7 @@ library
     Kernel.IPC.Nameservice
     Kernel.IPC.Types
     Kernel.LineEditor
+    Kernel.Log.Dmesg
     Kernel.Shell.Foreign
     Kernel.Shell.Format
     Kernel.Shell.Loop

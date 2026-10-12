@@ -29,7 +29,6 @@ import H.Interrupts (spi)
 import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.GIC qualified as DGIC
 import Kernel.Driver.IRQ qualified as DIRQ
 import Kernel.Driver.Registry qualified as DrvReg
@@ -41,6 +40,7 @@ import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
 import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (Grant (..), IpcError, Message (..))
+import Kernel.Log.Dmesg qualified as Dmesg
 
 foreign import ccall unsafe "virtio_transport_init" c_init :: Int -> Ptr Word32 -> Ptr Word32 -> IO Int
 

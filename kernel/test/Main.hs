@@ -2234,7 +2234,7 @@ libVersionSkewGolden = do
       lowerOnly = skew Nothing blockRootPin
       bothUnpinned = skew Nothing Nothing
       produced = catMaybes [mismatch, upperOnly, lowerOnly, bothUnpinned]
-      -- Kernel.Driver.Dmesg truncates at 120 and does not export the bound.
+      -- Kernel.Log.Dmesg truncates at 120 and does not export the bound.
       dmesgWidth = 120 :: Int
   results <-
     sequence

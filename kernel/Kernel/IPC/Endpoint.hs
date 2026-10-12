@@ -36,7 +36,6 @@ import H.Monad (H, liftIO, runH)
 import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import H.Pages qualified as P
 import H.Unsafe (unsafePerformH)
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.IPC.Types (
   Endpoint (..),
   EndpointId (..),
@@ -44,6 +43,7 @@ import Kernel.IPC.Types (
   IpcError (..),
   Message (..),
  )
+import Kernel.Log.Dmesg qualified as Dmesg
 import System.Timeout qualified as T
 
 foreign import ccall unsafe "house_uptime_ns" c_uptime_ns :: IO Word64

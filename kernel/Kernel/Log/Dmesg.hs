@@ -1,7 +1,7 @@
 {- | Bounded Haskell dmesg ring (64 entries * 120 chars), coherency via WB.
 Non-blocking: 'dmesgLog' never holds MVar across block.
 -}
-module Kernel.Driver.Dmesg (
+module Kernel.Log.Dmesg (
   dmesgInit,
   dmesgLog,
   dmesgRead,

@@ -37,7 +37,6 @@ import GHC.Conc (
 import H.Concurrency (forkSupervisedIO)
 import H.Monad (liftIO, runH)
 import H.VirtualMemory qualified as VM
-import Kernel.Driver.Dmesg qualified as Dmesg
 import Kernel.Driver.PL011 qualified as PL011
 import Kernel.Driver.PL011Server qualified as PL011S
 import Kernel.Driver.Registry qualified as DrvReg
@@ -61,6 +60,7 @@ import Kernel.IPC.IRQ qualified as IRQ
 import Kernel.IPC.Nameservice qualified as NS
 import Kernel.IPC.Types (EndpointId (..), Message (..))
 import Kernel.LineEditor qualified as LE
+import Kernel.Log.Dmesg qualified as Dmesg
 import Kernel.SMP qualified as SMP
 import Kernel.Shell.Foreign (c_asid_map_len, c_uart_puts, clearConMirror, installConMirror)
 import Kernel.Shell.Format (hexDigit, showFsError, showHex, toExecError)

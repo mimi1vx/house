@@ -31,7 +31,7 @@ test-suite house-pure
     H.VirtualMemory
     Kernel.Debug
     Kernel.Console
-    Kernel.Driver.Dmesg
+    Kernel.Log.Dmesg
     Kernel.Driver.IRQ
     Kernel.Driver.Registry
     Kernel.Driver.Types
