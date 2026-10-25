@@ -59,7 +59,9 @@ forkSupervisedIO act = IO.forkIO (act `catch` handler)
 
 killH = liftIO . IO.killThread
 
-yield = liftIO IO.yield
+-- Stock yield only switches among runnable threads, so a spinner starves
+-- timer-blocked threads at -N1; a 1us timer park releases the capability.
+yield = liftIO (IO.threadDelay 1)
 
 threadDelay = liftIO . IO.threadDelay
 

@@ -150,7 +150,8 @@ dispatcherLoop = loop
         then do
           c_irqPipeDrain
           drainBounded (256 :: Int)
-          C.yield
+          -- Stock yield only switches among runnable threads; a 1us timer park releases the capability.
+          C.threadDelay 1
           loop
         else do
           -- Timer, not the pipe: the blocking pipe wait is an unsafe FFI spin

@@ -1318,7 +1318,7 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                   if spins < yieldSpinLimit
                     then writeRef spinCount (spins + 1) >> loop
                     else do
-                      -- `yield` alone does not release the capability: a
+                      -- Stock yield alone does not release the capability: a
                       -- thread that is immediately runnable re-acquires it
                       -- before the timer fires, so the spinner starves the
                       -- shell. The park-pipe wait returns at once here (this
