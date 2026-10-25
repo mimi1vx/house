@@ -214,6 +214,10 @@ blkRequestHandler msg = do
     writeReq sl lba = case msgGrant msg of
       Nothing -> return (Left BadGrant)
       Just g -> do
+        -- Discard stale lines for this recycled pool page before peeking
+        -- the client's flushed bytes (safe: every service-side poke is
+        -- flushed before the page is freed, so no dirty lines are lost).
+        invalidateGrant g
         bytes <- liftIO (grantBytes g)
         r <- blkWriteBlockBytes sl lba bytes
         return $ case r of
@@ -376,14 +380,103 @@ blkWriteBlockBytes slot lba bytes = do
                       Left e -> return (Left e)
                       Right () -> return (Right ())
 
+{- | Request-endpoint timeout (us) for 'blkBlockDev' traffic. Well above the
+20 ms device poll ceiling plus the 5 ms endpoint wake poll, with headroom
+for RTS scheduling jitter and TCG device-emulation overhead (a TCG round
+trip alone measures ~10 ms): a slow-but-successful completion never
+surfaces as WouldBlock, only a wedged server does (then dmesg logs it
+within half a second, far below any harness timeout).
+-}
+blkEndpointTimeoutUs :: Int
+blkEndpointTimeoutUs = 500000
+
+{- | Snapshot the request endpoint for a slot without resolving any raw id.
+The stored token minted at init is checked via 'IPC.checkCap' before
+every call, so a client with no (or a wrong) token never reaches the queue.
+The snapshot releases @blkSem@ before the capability check and the
+blocking 'IPC.callTimeout', so the service thread's @blkSem@ is never
+contended across a rendezvous.
+-}
+lookupReqEp :: Int -> H (Either IpcError Endpoint)
+lookupReqEp slot = do
+  mDev <- withQSem blkSem $ do m <- readRef blkMap; return (Map.lookup slot m)
+  case mDev of
+    Nothing -> return (Left NoSuchEndpoint)
+    Just dev -> case blkReqToken dev of
+      Nothing -> return (Left NotOwner)
+      Just tok -> do
+        ok <- IPC.checkCap (blkReqEndpoint dev) (Just tok)
+        if ok then return (Right (blkReqEndpoint dev)) else return (Left NotOwner)
+
 {- | Build the filesystem-facing block interface. The driver depends on
-the filesystem's record, not the reverse. `BlkError` maps to `FsError`
-here, the single conversion point.
+the filesystem's record, not the reverse. `IpcError` maps to `FsError`
+here, the single conversion point. Each operation allocates a grant,
+routes through the request endpoint, and reads back from the grant page;
+the client frees the page it allocated, never the service thread.
 -}
 blkBlockDev :: Int -> H BlockDev.BlockDev
 blkBlockDev _ = return (BlockDev.BlockDev mapCap mapRead mapWrite)
   where
-    mapCap slot = either (Left . cvt) Right <$> blkGetCapacity slot
-    mapRead slot lba = either (Left . cvt) Right <$> blkReadBlockBytes slot lba
-    mapWrite slot lba bs = either (Left . cvt) Right <$> blkWriteBlockBytes slot lba bs
+    mapCap slot = do
+      eEp <- lookupReqEp slot
+      case eEp of
+        Left e -> return (Left (cvt e))
+        Right ep -> do
+          case Proto.encodeReq (Proto.ReqCapacity (fromIntegral slot)) of
+            Left e -> return (Left (cvt e))
+            Right msg -> do
+              r <- IPC.callTimeout blkEndpointTimeoutUs ep msg
+              case r of
+                Left e -> return (Left (cvt e))
+                Right reply -> case Proto.decodeReply reply of
+                  Left e -> return (Left (cvt e))
+                  Right cap -> return (Right cap)
+    mapRead slot lba = do
+      eEp <- lookupReqEp slot
+      case eEp of
+        Left e -> return (Left (cvt e))
+        Right ep -> do
+          mg <- G.grantAlloc
+          case mg of
+            Left e -> return (Left (cvt e))
+            Right g0 -> G.withGrantAllocated g0 $ \g -> do
+              case Proto.attachGrant g (Proto.ReqRead (fromIntegral slot) lba) of
+                Left e -> do G.grantFree g; return (Left (cvt e))
+                Right msg -> do
+                  r <- IPC.callTimeout blkEndpointTimeoutUs ep msg
+                  case r of
+                    Left e -> do G.grantFree g; return (Left (cvt e))
+                    Right reply -> case Proto.decodeReply reply of
+                      Left e -> do G.grantFree g; return (Left (cvt e))
+                      Right n -> do
+                        -- The fresh grant still holds our own zeroPage
+                        -- lines; discard them so the peek fetches the
+                        -- service's flushed bytes.
+                        invalidateGrant g
+                        bytes <- liftIO $ mapM (\i -> peek (grantPage g `plusPtr` i) :: IO Word8) [0 .. 4095]
+                        G.grantFree g
+                        return (Right (take (min (fromIntegral n) 4096) bytes))
+    mapWrite slot lba bs = do
+      eEp <- lookupReqEp slot
+      case eEp of
+        Left e -> return (Left (cvt e))
+        Right ep -> do
+          mg <- G.grantAlloc
+          case mg of
+            Left e -> return (Left (cvt e))
+            Right g0 -> G.withGrantAllocated g0 $ \g -> do
+              liftIO $ do
+                let n = min (length bs) 4096
+                mapM_ (\(i, b) -> poke (grantPage g `plusPtr` i) b) (zip [0 ..] (take n bs))
+                mapM_ (\i -> poke (grantPage g `plusPtr` i) (0 :: Word8)) [n .. 4095]
+              liftIO $ c_dc_flush (c_pagePa (grantPage g)) 4096
+              case Proto.attachGrant g (Proto.ReqWrite (fromIntegral slot) lba) of
+                Left e -> do G.grantFree g; return (Left (cvt e))
+                Right msg -> do
+                  r <- IPC.callTimeout blkEndpointTimeoutUs ep msg
+                  case r of
+                    Left e -> do G.grantFree g; return (Left (cvt e))
+                    Right reply -> case Proto.decodeReply reply of
+                      Left e -> do G.grantFree g; return (Left (cvt e))
+                      Right _ -> do G.grantFree g; return (Right ())
     cvt _ = Vfs.EINVAL "blk I/O error"
