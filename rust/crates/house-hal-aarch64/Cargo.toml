@@ -2,19 +2,19 @@
 name = "house-hal-aarch64"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [lib]
 crate-type = ["rlib"]
 
-[features]
-aarch64 = ["house-hal/aarch64"]
-riscv64 = ["house-hal/riscv64"]
-default = ["aarch64"]
-
 [dependencies]
 house-hal.workspace = true
+
+[features]
+default = ["aarch64"]
+aarch64 = ["house-hal/aarch64"]
+riscv64 = ["house-hal/riscv64"]
 
 [lints]
 workspace = true
