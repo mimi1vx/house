@@ -80,6 +80,7 @@ library
     Kernel.IPC.Types
     Kernel.LineEditor
     Kernel.Log.Dmesg
+    Kernel.Shell.Commands
     Kernel.Shell.Foreign
     Kernel.Shell.Format
     Kernel.Shell.Loop

@@ -62,6 +62,7 @@ import Kernel.IPC.Types (EndpointId (..), Message (..))
 import Kernel.LineEditor qualified as LE
 import Kernel.Log.Dmesg qualified as Dmesg
 import Kernel.SMP qualified as SMP
+import Kernel.Shell.Commands (Cmd (..), parseCmd, renderHelp)
 import Kernel.Shell.Foreign (c_asid_map_len, c_uart_puts, clearConMirror, installConMirror)
 import Kernel.Shell.Format (hexDigit, showFsError, showHex, toExecError)
 import Kernel.Shell.Mem (handleDetect, handleFree, handleMem, handlePalloc)
@@ -97,117 +98,115 @@ loop = do
         withCString ("shell: " ++ show e ++ "\n") c_uart_puts
         runH (Dmesg.dmesgLog ("shell handler: " ++ show e))
       go ed
-    handle line = case words line of
-      [] -> return ()
-      ("help" : _) -> withCString usage c_uart_puts
-      ("echo" : ws) -> handleEcho ws
-      ["clear"] -> withCString "\ESC[2J\ESC[H" c_uart_puts
-      ("uname" : args) -> handleUname args
-      ["uptime"] -> handleUptime
-      ("shutdown" : args) -> handleShutdown args
-      ["lambda"] -> withCString "Too much to abstract!\n" c_uart_puts
-      ["preempt"] -> do withCString (replicate 100 'a' ++ "\n") c_uart_puts; withCString (replicate 100 'b' ++ "\n") c_uart_puts
-      ["wastemem", nStr] -> case reads nStr of
+    handle line = case parseCmd (words line) of
+      Just CmdEmpty -> return ()
+      Just CmdHelp -> withCString (renderHelp "help") c_uart_puts
+      Just (CmdEcho ws) -> handleEcho ws
+      Just CmdClear -> withCString "\ESC[2J\ESC[H" c_uart_puts
+      Just (CmdUname args) -> handleUname args
+      Just CmdUptime -> handleUptime
+      Just (CmdShutdown args) -> handleShutdown args
+      Just CmdLambda -> withCString "Too much to abstract!\n" c_uart_puts
+      Just CmdPreempt -> do withCString (replicate 100 'a' ++ "\n") c_uart_puts; withCString (replicate 100 'b' ++ "\n") c_uart_puts
+      Just (CmdWastemem nStr) -> case reads nStr of
         [(n, "")] -> withCString (show (sum [1 .. n :: Integer]) ++ "\n") c_uart_puts
         _ -> withCString "usage: wastemem <number>\n" c_uart_puts
-      ["smp"] -> do
+      Just CmdSmp -> do
         caps <- getNumCapabilities
         procs <- getNumProcessors
         on <- SMP.onlineSet
         let n = length on
             mask = sum [1 `shiftL` i | i <- on] :: Int
         withCString ("smp: " ++ show n ++ " cores online caps=" ++ show caps ++ " procs=" ++ show procs ++ " timers=PPI27+30 ipi=SGI0 caches=WB onlineMask=0x" ++ showHex mask ++ "\n") c_uart_puts
-      ["smp", "up", nStr] -> handleSmpUp nStr
-      ["smp", "down", nStr] -> handleSmpDown nStr
-      ["caps"] -> do caps <- getNumCapabilities; procs <- getNumProcessors; withCString ("caps " ++ show caps ++ " procs " ++ show procs ++ "\n") c_uart_puts
-      ["parfib", nStr] -> case reads nStr of
+      Just (CmdSmpUp nStr) -> handleSmpUp nStr
+      Just (CmdSmpDown nStr) -> handleSmpDown nStr
+      Just CmdCaps -> do caps <- getNumCapabilities; procs <- getNumProcessors; withCString ("caps " ++ show caps ++ " procs " ++ show procs ++ "\n") c_uart_puts
+      Just (CmdParfib nStr) -> case reads nStr of
         [(n, "")] -> do v <- parFibIO n; withCString ("parfib " ++ show n ++ " = " ++ show v ++ "\n") c_uart_puts
         _ -> withCString "usage: parfib <n>\n" c_uart_puts
-      ["mvar", nStr] -> case reads nStr of
+      Just (CmdMvar nStr) -> case reads nStr of
         [(n, "")] -> do ok <- mvarTest n; withCString (if ok then "mvar ok\n" else "mvar fail\n") c_uart_puts
         _ -> withCString "usage: mvar <number> (capped at 5000 over 32 workers)\n" c_uart_puts
-      ["ls"] -> handleLs "/"
-      ["ls", p] -> handleLs p
-      ["cat", p] -> handleCat p
-      ["mkdir", p] -> handleMkdir p
-      ["rm", p] -> handleRm p
-      ["stat", p] -> handleStat p
-      ("write" : p : rest) -> handleWrite p (unwords rest)
-      ["write"] -> withCString "usage: write <path> <text>\n" c_uart_puts
-      ["ns", "ls"] -> handleNsLs
-      ["ns", "reg", name] -> handleNsReg name
-      ["ns", "reg"] -> withCString "usage: ns reg <name>\n" c_uart_puts
-      ["ipc", "ping", name] -> handleIpcPing name
-      ["ipc", "ping"] -> withCString "usage: ipc ping <nsName>\n" c_uart_puts
-      ["ipc", "grant"] -> handleIpcGrant
-      ["ipc", "el0pp", name] -> handleIpcEl0pp name
-      ["ipc", "timeout", name] -> handleIpcTimeout name
-      ["ipc"] -> withCString "usage: ipc ping <nsName> | ipc grant | ipc el0pp <nsName> | ipc timeout <nsName>\n" c_uart_puts
-      ["lsdev"] -> handleLsdev
-      ["dmesg"] -> handleDmesg
-      ["dmesg", "clear"] -> handleDmesgClear
-      ["virtio", "scan"] -> handleVirtioScan
-      ["virtio", "init", s] -> handleVirtioInit s
-      ["virtio", "notify", s] -> handleVirtioNotify s
-      ["virtio", "status"] -> handleVirtioStatus
-      ["virtio", "ack", s] -> handleVirtioAck s
-      ["virtio", "irqtest", s] -> handleVirtioIrqtest s
-      ["virtio", "teardown", s] -> handleVirtioTeardown s
-      ["virtio"] -> withCString "usage: virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot>\n" c_uart_puts
-      ["blk", "init", s] -> handleBlkInit s
-      ["blk", "status", s] -> handleBlkStatus s
-      ["blk", "read", s, lba] -> handleBlkRead s lba
-      ["blk", "write", s, lba, txt] -> handleBlkWrite s lba txt
-      ["blk", "write", s, lba] -> handleBlkWrite s lba ""
-      ["blk", "teardown", s] -> handleBlkTeardown s
-      ["blk", "sync"] -> handleBlkSync Nothing
-      ["blk", "sync", s] -> handleBlkSync (Just s)
-      ["blk", "mount", s] -> handleBlkMount s
-      ["blk", "root", s] -> handleBlkRoot s
-      ["blk"] -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|root <slot>|teardown <slot>\n" c_uart_puts
-      ["net", "init", s] -> handleNetInit s
-      ["net", "status", s] -> handleNetStatus s
-      ["net", "teardown", s] -> handleNetTeardown s
-      ["ifconfig"] -> handleIfConfig
-      ["ping", ip] -> handlePing ip
-      ["udpecho", ip, port, txt] -> handleUdpEcho ip port txt
-      ["udpecho", ip, port] -> handleUdpEcho ip port ""
-      ["arp", "ls"] -> handleArpLs
-      ["net", "dhcp"] -> handleNetDhcp
-      ["dns", name] -> handleDns name
-      ["dns"] -> withCString "usage: dns <name>\n" c_uart_puts
-      ["net"] -> withCString "usage: net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>\n" c_uart_puts
-      ["con", "init", s] -> handleConInit s
-      ["con", "status", s] -> handleConStatus s
-      ("con" : "write" : s : rest) -> handleConWrite s (unwords rest)
-      ["con", "read", s] -> handleConRead (Just s)
-      ["con", "read"] -> handleConRead Nothing
-      ["con", "teardown", s] -> handleConTeardown s
-      ["con", "mirror", "on"] -> handleConMirror True
-      ["con", "mirror", "off"] -> handleConMirror False
-      ["con"] -> withCString "usage: con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off\n" c_uart_puts
-      ["free"] -> handleFree
-      ["mem"] -> handleMem
-      ["detect"] -> handleDetect
-      ["vm"] -> handleVm
-      ["palloc"] -> handlePalloc
-      ["fdtest"] -> handleFdtest
-      ["forktest"] -> handleForktest
-      ["loaderrefs"] -> handleLoaderRefs "/bin/hello-dyn"
-      ["loaderrefs", p] -> handleLoaderRefs p
-      ["throwtest"] -> throwIO (userError "deliberate shell handler failure")
-      ["run"] -> withCString "usage: run <path> [args...]\n" c_uart_puts
-      ("run" : p : args) -> handleRun p args
-      ["spawn"] -> withCString "usage: spawn <path> [args...]\n" c_uart_puts
-      ("spawn" : p : args) -> handleSpawn p args
-      ["jobs"] -> handleJobs
-      ["wait"] -> handleWaitAll
-      ["wait", s] -> handleWaitOne s
-      ["quantum"] -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
-      ["quantum", s] -> handleQuantum s
-      ["svcmask"] -> withCString "usage: svcmask <pid> <imm> (0x00..0x14 revoked)\n" c_uart_puts
-      ["svcmask", spid, simm] -> handleSvcMask spid simm
-      _ -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
+      Just (CmdLs Nothing) -> handleLs "/"
+      Just (CmdLs (Just p)) -> handleLs p
+      Just (CmdCat p) -> handleCat p
+      Just (CmdMkdir p) -> handleMkdir p
+      Just (CmdRm p) -> handleRm p
+      Just (CmdStat p) -> handleStat p
+      Just (CmdWrite p txt) -> handleWrite p txt
+      Just CmdWriteUsage -> withCString "usage: write <path> <text>\n" c_uart_puts
+      Just CmdNsLs -> handleNsLs
+      Just (CmdNsReg name) -> handleNsReg name
+      Just CmdNsRegUsage -> withCString "usage: ns reg <name>\n" c_uart_puts
+      Just (CmdIpcPing name) -> handleIpcPing name
+      Just CmdIpcPingUsage -> withCString "usage: ipc ping <nsName>\n" c_uart_puts
+      Just CmdIpcGrant -> handleIpcGrant
+      Just (CmdIpcEl0pp name) -> handleIpcEl0pp name
+      Just (CmdIpcTimeout name) -> handleIpcTimeout name
+      Just CmdIpcUsage -> withCString "usage: ipc ping <nsName> | ipc grant | ipc el0pp <nsName> | ipc timeout <nsName>\n" c_uart_puts
+      Just CmdLsdev -> handleLsdev
+      Just CmdDmesg -> handleDmesg
+      Just CmdDmesgClear -> handleDmesgClear
+      Just CmdVirtioScan -> handleVirtioScan
+      Just (CmdVirtioInit s) -> handleVirtioInit s
+      Just (CmdVirtioNotify s) -> handleVirtioNotify s
+      Just CmdVirtioStatus -> handleVirtioStatus
+      Just (CmdVirtioAck s) -> handleVirtioAck s
+      Just (CmdVirtioIrqtest s) -> handleVirtioIrqtest s
+      Just (CmdVirtioTeardown s) -> handleVirtioTeardown s
+      Just CmdVirtioUsage -> withCString "usage: virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot>\n" c_uart_puts
+      Just (CmdBlkInit s) -> handleBlkInit s
+      Just (CmdBlkStatus s) -> handleBlkStatus s
+      Just (CmdBlkRead s lba) -> handleBlkRead s lba
+      Just (CmdBlkWrite s lba txt) -> handleBlkWrite s lba txt
+      Just (CmdBlkTeardown s) -> handleBlkTeardown s
+      Just (CmdBlkSync Nothing) -> handleBlkSync Nothing
+      Just (CmdBlkSync (Just s)) -> handleBlkSync (Just s)
+      Just (CmdBlkMount s) -> handleBlkMount s
+      Just (CmdBlkRoot s) -> handleBlkRoot s
+      Just CmdBlkUsage -> withCString "usage: blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|root <slot>|teardown <slot>\n" c_uart_puts
+      Just (CmdNetInit s) -> handleNetInit s
+      Just (CmdNetStatus s) -> handleNetStatus s
+      Just (CmdNetTeardown s) -> handleNetTeardown s
+      Just CmdIfconfig -> handleIfConfig
+      Just (CmdPing ip) -> handlePing ip
+      Just (CmdUdpEcho ip port txt) -> handleUdpEcho ip port txt
+      Just CmdArpLs -> handleArpLs
+      Just CmdNetDhcp -> handleNetDhcp
+      Just (CmdDns name) -> handleDns name
+      Just CmdDnsUsage -> withCString "usage: dns <name>\n" c_uart_puts
+      Just CmdNetUsage -> withCString "usage: net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>\n" c_uart_puts
+      Just (CmdConInit s) -> handleConInit s
+      Just (CmdConStatus s) -> handleConStatus s
+      Just (CmdConWrite s txt) -> handleConWrite s txt
+      Just (CmdConRead (Just s)) -> handleConRead (Just s)
+      Just (CmdConRead Nothing) -> handleConRead Nothing
+      Just (CmdConTeardown s) -> handleConTeardown s
+      Just (CmdConMirror True) -> handleConMirror True
+      Just (CmdConMirror False) -> handleConMirror False
+      Just CmdConUsage -> withCString "usage: con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off\n" c_uart_puts
+      Just CmdFree -> handleFree
+      Just CmdMem -> handleMem
+      Just CmdDetect -> handleDetect
+      Just CmdVm -> handleVm
+      Just CmdPalloc -> handlePalloc
+      Just CmdFdtest -> handleFdtest
+      Just CmdForktest -> handleForktest
+      Just (CmdLoaderRefs Nothing) -> handleLoaderRefs "/bin/hello-dyn"
+      Just (CmdLoaderRefs (Just p)) -> handleLoaderRefs p
+      Just CmdThrowtest -> throwIO (userError "deliberate shell handler failure")
+      Just CmdRunUsage -> withCString "usage: run <path> [args...]\n" c_uart_puts
+      Just (CmdRun p args) -> handleRun p args
+      Just CmdSpawnUsage -> withCString "usage: spawn <path> [args...]\n" c_uart_puts
+      Just (CmdSpawn p args) -> handleSpawn p args
+      Just CmdJobs -> handleJobs
+      Just CmdWaitAll -> handleWaitAll
+      Just (CmdWaitOne s) -> handleWaitOne s
+      Just CmdQuantumUsage -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
+      Just (CmdQuantum s) -> handleQuantum s
+      Just CmdSvcMaskUsage -> withCString "usage: svcmask <pid> <imm> (0x00..0x14 revoked)\n" c_uart_puts
+      Just (CmdSvcMask spid simm) -> handleSvcMask spid simm
+      Nothing -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     -- Echo stays a shell builtin (not a /bin/echo wrapper): output
     -- flows through c_uart_puts, the console-mirror interposition point.
     -- EL0 svc WRITE hits the UART directly and would silently unmirror.
@@ -883,49 +882,6 @@ loop = do
           Left e -> withCString ("svcmask failed: " ++ e ++ "\n") c_uart_puts
           Right m -> withCString ("svcmask ok pid=" ++ show pid ++ " mask=" ++ show m ++ "\n") c_uart_puts
       _ -> withCString "usage: svcmask <pid> <imm> (0x00..0x14 revoked)\n" c_uart_puts
-    usage =
-      unlines
-        [ "Usage: help | echo <word>... [> /path] | cat <path> | ls [path] | mkdir <path> | rm <path> | write <path> <text> | stat <path> | clear | uname [-asnrvmio] | uptime | shutdown [-h|-r] -- halt or reboot the machine"
-        , "       lambda -- lambda demo"
-        , "       preempt -- preemption demo"
-        , "       wastemem <number> -- allocate memory"
-        , "       free -- show H.Pages + buddy + ram"
-        , "       mem -- show ram/stack/buddy+libc pool/ttbr"
-        , "       detect -- show ram/stack/caps"
-        , "       vm -- demand pager 100 pages + mmap/mprotect/munmap + isolate + asid+smp shootdown"
-        , "       smp -- show SMP cores online | smp up <core> | smp down <core> -- hotplug to ceiling 32, caps mirror online"
-        , "       caps -- show capabilities"
-        , "       parfib <n> -- parallel fib"
-        , "       mvar <n> -- MVar ping-pong test"
-        , "       uname [-asnrvmio] [--help] -- print system information (default -s; -a all)"
-        , "       ls [path] -- list directory"
-        , "       cat <path> -- show file"
-        , "       mkdir <path> -- create directory"
-        , "       rm <path> -- remove file or empty dir"
-        , "       write <path> <text> -- write file (truncate)"
-        , "       stat <path> -- show file stat"
-        , "       echo <word>... [> /path] -- echo or write via ramfs (volatile 2 MiB pool)"
-        , "       ns ls -- list IPC names"
-        , "       ns reg <name> -- register name (pl011 launches server)"
-        , "       ipc ping <nsName> -- sync call to endpoint"
-        , "       ipc grant -- alloc one page and send to pl011"
-        , "       ipc timeout <nsName> -- bounded call that degrades to WouldBlock"
-        , "       ipc el0pp <nsName> -- EL0 ping-pong: server RECV+REPLY + client CALL via the park ring"
-        , "       lsdev -- list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)"
-        , "       virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot> -- Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)"
-        , "       blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|root <slot>|teardown <slot> -- Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; mount restores RamFS, root appends a lower / layer for /lib reads and blocks teardown)"
-        , "       net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot> -- Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)"
-        , "       dns <name> -- A-record lookup via 10.0.2.3 (UDP/53, no TCP; e.g. dns example.com)"
-        , "       con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off -- Virtio-console server (ID 3 console / multiport serial port0 + control q2/q3 DEVICE_READY/OPEN, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)"
-        , "       run </path> [args...] -- load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/fd/ipc, EL0 eret (TTBR0/ASID/pager)"
-        , "       spawn </path> [args...] -- run without waiting (prints pid) | jobs -- list live pids | wait [pid] -- reap (all when bare)"
-        , "       quantum <ticks> -- preempt quantum in timer ticks (0..1000000, 0 means 1; default 10)"
-        , "       svcmask <pid> <imm> -- revoke one syscall for a live pid (0x00..0x14)"
-        , "       fdtest -- per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)"
-        , "       forktest -- EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)"
-        , "       loaderrefs [path] -- launch two dynamic images (default /bin/hello-dyn), verify finalized DSO page sharing, then drain refs"
-        , "       throwtest -- throw from a handler; the dispatch catch must log it and answer the next command"
-        ]
     seqFib :: Int -> Int
     seqFib n
       | n <= 1 = n
