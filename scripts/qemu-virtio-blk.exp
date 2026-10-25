@@ -69,8 +69,9 @@ expect {
 }
 if {$blkSlot eq "" && !$has_blkdev} { set blkSlot 0 }
 send "blk init $blkSlot\r"
+set blk_ok 0
 expect {
-    -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk init $blkSlot ok capacity" }
+    -re {ok capacity=[1-9][0-9]* sectors} { set blk_ok 1; puts "\nPASS: blk init $blkSlot ok capacity" }
     -re "BlkBadSlot|BlkNotBlk|BadSlot|BadVersion" {
         if {$has_blkdev} { fail "blk init $blkSlot found no device with -device present" } else { puts "\nINFO: blk init $blkSlot no device (empty slot)" }
     }
@@ -130,18 +131,60 @@ expect {
     timeout { fail "blk read 0 0 second timeout" }
 }
 sleep 1
-send "blk teardown $blkSlot\r"
-expect {
-    -re "teardown ok|ok" { puts "\nPASS: blk teardown $blkSlot" }
-    -re "Blk" { if {$has_blkdev} { fail "blk teardown error with -device present" } else { puts "\nINFO: blk teardown error" } }
-    timeout { fail "blk teardown timeout" }
-}
-sleep 1
-send "blk init $blkSlot\r"
-expect {
-    -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk re-init $blkSlot ok" }
-    -re "Blk" { if {$has_blkdev} { fail "blk re-init error with -device present" } else { puts "\nINFO: blk re-init failed" } }
-    timeout { fail "blk re-init timeout" }
+# Step 11 verify: three init/teardown cycles must leave irqDrops at 0. The
+# unregister path is what this proves: without it every post-teardown IRQ on
+# the slot trySends into a freed endpoint and drops climbs monotonically.
+# Output patterns only, never the prompt (the line editor redraws the prompt
+# during echo); same shape as qemu-irq-dispatch.exp. Ends with one more
+# teardown for the lsdev/drops assert, then re-inits to continue the gate.
+if {$blk_ok} {
+    for {set i 0} {$i < 3} {incr i} {
+        send "blk teardown $blkSlot\r"
+        expect {
+            -re "teardown ok" { puts "\nPASS: blk teardown round $i ok" }
+            timeout { fail "blk teardown round $i timeout" }
+        }
+        sleep 1
+        send "blk init $blkSlot\r"
+        expect {
+            -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk re-init round $i ok capacity" }
+            timeout { fail "blk re-init round $i timeout" }
+        }
+        sleep 1
+    }
+    send "blk teardown $blkSlot\r"
+    expect {
+        -re "teardown ok" { puts "\nPASS: blk final teardown ok" }
+        timeout { fail "blk final teardown timeout" }
+    }
+    sleep 1
+    send "lsdev\r"
+    expect {
+        -re "virtio-blk" { fail "lsdev still lists virtio-blk after final teardown" }
+        -re {irq drops=0[^0-9]} { puts "\nPASS: irq drops=0 after 3 init/teardown cycles" }
+        -re {irq drops=([0-9]+)} { fail "irq drops=$expect_out(1,string) after 3 init/teardown cycles, want 0" }
+        timeout { fail "lsdev after teardown timeout" }
+    }
+    sleep 1
+    send "blk init $blkSlot\r"
+    expect {
+        -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk re-init $blkSlot ok" }
+        timeout { fail "blk re-init timeout" }
+    }
+} else {
+    send "blk teardown $blkSlot\r"
+    expect {
+        -re "teardown ok|ok" { puts "\nPASS: blk teardown $blkSlot" }
+        -re "Blk" { puts "\nINFO: blk teardown error" }
+        timeout { fail "blk teardown timeout" }
+    }
+    sleep 1
+    send "blk init $blkSlot\r"
+    expect {
+        -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk re-init $blkSlot ok" }
+        -re "Blk" { puts "\nINFO: blk re-init failed" }
+        timeout { fail "blk re-init timeout" }
+    }
 }
 sleep 1
 send "blk read $blkSlot 0\r"
