@@ -1,4 +1,5 @@
 {-# LANGUAGE GHC2024 #-}
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 {- | Pure regression suite for Track H (SOTA Haskell 02/03/07).
 
@@ -26,6 +27,10 @@ any FFI (foreign symbols are stubbed at link time, never called):
   exactly @blkPollAttempts@ polls, and a completing device needs one.
 * Util.Word12: Enum/Ix contract errors fire (HasCallStack-annotated),
   guarded paths stay pure.
+* Kernel.Shell.Commands: the dispatch table covers every 'Cmd'
+  constructor (a new verb without an equation here fails to compile),
+  every entry carries a help row mentioned by the full render, and
+  'parseCmd' goldens accept and reject one input per verb family.
 -}
 module Main (main) where
 
@@ -72,6 +77,7 @@ import Kernel.IPC.IRQ qualified as IRQ
 import Kernel.IPC.Types qualified as IT
 import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
+import Kernel.Shell.Commands qualified as Shell
 import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Process qualified as Proc
@@ -835,6 +841,321 @@ icmpCapGolden =
   let pairs = [((fromIntegral i, fromIntegral (i * 7)), fromIntegral i) | i <- [1 .. 10000 :: Int]]
       m = foldl (\acc (k, n) -> NetServer.insertIcmpSeen k n acc) Map.empty pairs
    in Map.size m <= NetServer.netIcmpCap
+
+-- Shell table goldens (step 14) -------------------------------------------------
+
+{- | One equation per 'Cmd' constructor, no wildcard. A new verb without an
+equation here stops the suite from compiling, so a verb can never
+silently lose its help row; 'shellCoverGolden' checks the rows exist.
+-}
+shellCoverCmd :: Shell.Cmd -> (String, String)
+shellCoverCmd Shell.CmdEmpty = Shell.cmdUsage Shell.CmdEmpty
+shellCoverCmd Shell.CmdHelp = Shell.cmdUsage Shell.CmdHelp
+shellCoverCmd (Shell.CmdEcho args) = Shell.cmdUsage (Shell.CmdEcho args)
+shellCoverCmd Shell.CmdClear = Shell.cmdUsage Shell.CmdClear
+shellCoverCmd (Shell.CmdUname args) = Shell.cmdUsage (Shell.CmdUname args)
+shellCoverCmd Shell.CmdUptime = Shell.cmdUsage Shell.CmdUptime
+shellCoverCmd (Shell.CmdShutdown args) = Shell.cmdUsage (Shell.CmdShutdown args)
+shellCoverCmd Shell.CmdLambda = Shell.cmdUsage Shell.CmdLambda
+shellCoverCmd Shell.CmdPreempt = Shell.cmdUsage Shell.CmdPreempt
+shellCoverCmd (Shell.CmdWastemem n) = Shell.cmdUsage (Shell.CmdWastemem n)
+shellCoverCmd Shell.CmdSmp = Shell.cmdUsage Shell.CmdSmp
+shellCoverCmd (Shell.CmdSmpUp n) = Shell.cmdUsage (Shell.CmdSmpUp n)
+shellCoverCmd (Shell.CmdSmpDown n) = Shell.cmdUsage (Shell.CmdSmpDown n)
+shellCoverCmd Shell.CmdCaps = Shell.cmdUsage Shell.CmdCaps
+shellCoverCmd (Shell.CmdParfib n) = Shell.cmdUsage (Shell.CmdParfib n)
+shellCoverCmd (Shell.CmdMvar n) = Shell.cmdUsage (Shell.CmdMvar n)
+shellCoverCmd (Shell.CmdLs mp) = Shell.cmdUsage (Shell.CmdLs mp)
+shellCoverCmd (Shell.CmdCat p) = Shell.cmdUsage (Shell.CmdCat p)
+shellCoverCmd (Shell.CmdMkdir p) = Shell.cmdUsage (Shell.CmdMkdir p)
+shellCoverCmd (Shell.CmdRm p) = Shell.cmdUsage (Shell.CmdRm p)
+shellCoverCmd (Shell.CmdStat p) = Shell.cmdUsage (Shell.CmdStat p)
+shellCoverCmd (Shell.CmdWrite p t) = Shell.cmdUsage (Shell.CmdWrite p t)
+shellCoverCmd Shell.CmdWriteUsage = Shell.cmdUsage Shell.CmdWriteUsage
+shellCoverCmd Shell.CmdNsLs = Shell.cmdUsage Shell.CmdNsLs
+shellCoverCmd (Shell.CmdNsReg name) = Shell.cmdUsage (Shell.CmdNsReg name)
+shellCoverCmd Shell.CmdNsRegUsage = Shell.cmdUsage Shell.CmdNsRegUsage
+shellCoverCmd (Shell.CmdIpcPing name) = Shell.cmdUsage (Shell.CmdIpcPing name)
+shellCoverCmd Shell.CmdIpcPingUsage = Shell.cmdUsage Shell.CmdIpcPingUsage
+shellCoverCmd Shell.CmdIpcGrant = Shell.cmdUsage Shell.CmdIpcGrant
+shellCoverCmd (Shell.CmdIpcEl0pp name) = Shell.cmdUsage (Shell.CmdIpcEl0pp name)
+shellCoverCmd (Shell.CmdIpcTimeout name) = Shell.cmdUsage (Shell.CmdIpcTimeout name)
+shellCoverCmd Shell.CmdIpcUsage = Shell.cmdUsage Shell.CmdIpcUsage
+shellCoverCmd Shell.CmdLsdev = Shell.cmdUsage Shell.CmdLsdev
+shellCoverCmd Shell.CmdDmesg = Shell.cmdUsage Shell.CmdDmesg
+shellCoverCmd Shell.CmdDmesgClear = Shell.cmdUsage Shell.CmdDmesgClear
+shellCoverCmd Shell.CmdVirtioScan = Shell.cmdUsage Shell.CmdVirtioScan
+shellCoverCmd (Shell.CmdVirtioInit s) = Shell.cmdUsage (Shell.CmdVirtioInit s)
+shellCoverCmd (Shell.CmdVirtioNotify s) = Shell.cmdUsage (Shell.CmdVirtioNotify s)
+shellCoverCmd Shell.CmdVirtioStatus = Shell.cmdUsage Shell.CmdVirtioStatus
+shellCoverCmd (Shell.CmdVirtioAck s) = Shell.cmdUsage (Shell.CmdVirtioAck s)
+shellCoverCmd (Shell.CmdVirtioIrqtest s) = Shell.cmdUsage (Shell.CmdVirtioIrqtest s)
+shellCoverCmd (Shell.CmdVirtioTeardown s) = Shell.cmdUsage (Shell.CmdVirtioTeardown s)
+shellCoverCmd Shell.CmdVirtioUsage = Shell.cmdUsage Shell.CmdVirtioUsage
+shellCoverCmd (Shell.CmdBlkInit s) = Shell.cmdUsage (Shell.CmdBlkInit s)
+shellCoverCmd (Shell.CmdBlkStatus s) = Shell.cmdUsage (Shell.CmdBlkStatus s)
+shellCoverCmd (Shell.CmdBlkRead s l) = Shell.cmdUsage (Shell.CmdBlkRead s l)
+shellCoverCmd (Shell.CmdBlkWrite s l t) = Shell.cmdUsage (Shell.CmdBlkWrite s l t)
+shellCoverCmd (Shell.CmdBlkTeardown s) = Shell.cmdUsage (Shell.CmdBlkTeardown s)
+shellCoverCmd (Shell.CmdBlkSync ms) = Shell.cmdUsage (Shell.CmdBlkSync ms)
+shellCoverCmd (Shell.CmdBlkMount s) = Shell.cmdUsage (Shell.CmdBlkMount s)
+shellCoverCmd (Shell.CmdBlkRoot s) = Shell.cmdUsage (Shell.CmdBlkRoot s)
+shellCoverCmd Shell.CmdBlkUsage = Shell.cmdUsage Shell.CmdBlkUsage
+shellCoverCmd (Shell.CmdNetInit s) = Shell.cmdUsage (Shell.CmdNetInit s)
+shellCoverCmd (Shell.CmdNetStatus s) = Shell.cmdUsage (Shell.CmdNetStatus s)
+shellCoverCmd (Shell.CmdNetTeardown s) = Shell.cmdUsage (Shell.CmdNetTeardown s)
+shellCoverCmd Shell.CmdIfconfig = Shell.cmdUsage Shell.CmdIfconfig
+shellCoverCmd (Shell.CmdPing ip) = Shell.cmdUsage (Shell.CmdPing ip)
+shellCoverCmd (Shell.CmdUdpEcho ip port txt) = Shell.cmdUsage (Shell.CmdUdpEcho ip port txt)
+shellCoverCmd Shell.CmdArpLs = Shell.cmdUsage Shell.CmdArpLs
+shellCoverCmd Shell.CmdNetDhcp = Shell.cmdUsage Shell.CmdNetDhcp
+shellCoverCmd (Shell.CmdDns name) = Shell.cmdUsage (Shell.CmdDns name)
+shellCoverCmd Shell.CmdDnsUsage = Shell.cmdUsage Shell.CmdDnsUsage
+shellCoverCmd Shell.CmdNetUsage = Shell.cmdUsage Shell.CmdNetUsage
+shellCoverCmd (Shell.CmdConInit s) = Shell.cmdUsage (Shell.CmdConInit s)
+shellCoverCmd (Shell.CmdConStatus s) = Shell.cmdUsage (Shell.CmdConStatus s)
+shellCoverCmd (Shell.CmdConWrite s t) = Shell.cmdUsage (Shell.CmdConWrite s t)
+shellCoverCmd (Shell.CmdConRead ms) = Shell.cmdUsage (Shell.CmdConRead ms)
+shellCoverCmd (Shell.CmdConTeardown s) = Shell.cmdUsage (Shell.CmdConTeardown s)
+shellCoverCmd (Shell.CmdConMirror b) = Shell.cmdUsage (Shell.CmdConMirror b)
+shellCoverCmd Shell.CmdConUsage = Shell.cmdUsage Shell.CmdConUsage
+shellCoverCmd Shell.CmdFree = Shell.cmdUsage Shell.CmdFree
+shellCoverCmd Shell.CmdMem = Shell.cmdUsage Shell.CmdMem
+shellCoverCmd Shell.CmdDetect = Shell.cmdUsage Shell.CmdDetect
+shellCoverCmd Shell.CmdVm = Shell.cmdUsage Shell.CmdVm
+shellCoverCmd Shell.CmdPalloc = Shell.cmdUsage Shell.CmdPalloc
+shellCoverCmd Shell.CmdFdtest = Shell.cmdUsage Shell.CmdFdtest
+shellCoverCmd Shell.CmdForktest = Shell.cmdUsage Shell.CmdForktest
+shellCoverCmd (Shell.CmdLoaderRefs mp) = Shell.cmdUsage (Shell.CmdLoaderRefs mp)
+shellCoverCmd Shell.CmdThrowtest = Shell.cmdUsage Shell.CmdThrowtest
+shellCoverCmd (Shell.CmdRun p args) = Shell.cmdUsage (Shell.CmdRun p args)
+shellCoverCmd Shell.CmdRunUsage = Shell.cmdUsage Shell.CmdRunUsage
+shellCoverCmd (Shell.CmdSpawn p args) = Shell.cmdUsage (Shell.CmdSpawn p args)
+shellCoverCmd Shell.CmdSpawnUsage = Shell.cmdUsage Shell.CmdSpawnUsage
+shellCoverCmd Shell.CmdJobs = Shell.cmdUsage Shell.CmdJobs
+shellCoverCmd Shell.CmdWaitAll = Shell.cmdUsage Shell.CmdWaitAll
+shellCoverCmd (Shell.CmdWaitOne s) = Shell.cmdUsage (Shell.CmdWaitOne s)
+shellCoverCmd Shell.CmdQuantumUsage = Shell.cmdUsage Shell.CmdQuantumUsage
+shellCoverCmd (Shell.CmdQuantum s) = Shell.cmdUsage (Shell.CmdQuantum s)
+shellCoverCmd Shell.CmdSvcMaskUsage = Shell.cmdUsage Shell.CmdSvcMaskUsage
+shellCoverCmd (Shell.CmdSvcMask a b) = Shell.cmdUsage (Shell.CmdSvcMask a b)
+
+{- | Every table entry carries a help row: only 'CmdEmpty' may map to a
+blank usage. Runs through 'shellCoverCmd', so the compile-time cover and
+the row-existence check agree on every entry.
+-}
+shellCoverGolden :: Bool
+shellCoverGolden = all hasRow Shell.allCmds
+  where
+    hasRow c = shellCoverCmd c /= ("", "") || c == Shell.CmdEmpty
+
+{- | The full help render mentions the first word of every entry's verb
+string, so no dispatch target is invisible in @help@ output.
+-}
+shellHelpGolden :: Bool
+shellHelpGolden =
+  let full = words (Shell.renderHelp "")
+   in all (mentioned full) Shell.allCmds
+  where
+    mentioned full c = case shellCoverCmd c of
+      ("", _) -> c == Shell.CmdEmpty
+      (verbs, _) -> case words verbs of
+        (w : _) -> w `elem` full
+        [] -> False
+
+{- | Every @(input, expected)@ pair must match 'parseCmd' exactly: one
+accept and one reject per verb family (wrong arity decodes to the
+family's @...Usage@ constructor where the loop has one, and to
+'Nothing' otherwise; unknown verbs decode to 'Nothing').
+-}
+shellParseGolden :: [([String], Maybe Shell.Cmd)] -> Bool
+shellParseGolden = all (\(ws, want) -> Shell.parseCmd ws == want)
+
+shellParseCore :: [([String], Maybe Shell.Cmd)]
+shellParseCore =
+  [ ([], Just Shell.CmdEmpty)
+  , ([""], Nothing)
+  , (["help"], Just Shell.CmdHelp)
+  , (["help", "extra"], Just Shell.CmdHelp)
+  , (["halp"], Nothing)
+  , (["echo", "hello"], Just (Shell.CmdEcho ["hello"]))
+  , (["echo"], Just (Shell.CmdEcho []))
+  , (["eco", "hello"], Nothing)
+  , (["clear"], Just Shell.CmdClear)
+  , (["clear", "x"], Nothing)
+  , (["uname", "-a"], Just (Shell.CmdUname ["-a"]))
+  , (["uname"], Just (Shell.CmdUname []))
+  , (["unam"], Nothing)
+  , (["uptime"], Just Shell.CmdUptime)
+  , (["uptime", "now"], Nothing)
+  , (["shutdown", "-h"], Just (Shell.CmdShutdown ["-h"]))
+  , (["shutdown"], Just (Shell.CmdShutdown []))
+  , (["shut"], Nothing)
+  , (["lambda"], Just Shell.CmdLambda)
+  , (["lambda", "x"], Nothing)
+  , (["preempt"], Just Shell.CmdPreempt)
+  , (["preempt", "x"], Nothing)
+  , (["wastemem", "1024"], Just (Shell.CmdWastemem "1024"))
+  , (["wastemem"], Nothing)
+  , (["wastemem", "1", "2"], Nothing)
+  , (["smp"], Just Shell.CmdSmp)
+  , (["smp", "up", "1"], Just (Shell.CmdSmpUp "1"))
+  , (["smp", "down", "0"], Just (Shell.CmdSmpDown "0"))
+  , (["smp", "up"], Nothing)
+  , (["smp", "sideways", "1"], Nothing)
+  , (["caps"], Just Shell.CmdCaps)
+  , (["caps", "x"], Nothing)
+  , (["parfib", "10"], Just (Shell.CmdParfib "10"))
+  , (["parfib"], Nothing)
+  , (["mvar", "100"], Just (Shell.CmdMvar "100"))
+  , (["mvar", "1", "2"], Nothing)
+  ]
+
+shellParseFs :: [([String], Maybe Shell.Cmd)]
+shellParseFs =
+  [ (["ls"], Just (Shell.CmdLs Nothing))
+  , (["ls", "/"], Just (Shell.CmdLs (Just "/")))
+  , (["ls", "/", "x"], Nothing)
+  , (["cat", "/init"], Just (Shell.CmdCat "/init"))
+  , (["cat"], Nothing)
+  , (["mkdir", "/tmp"], Just (Shell.CmdMkdir "/tmp"))
+  , (["mkdir"], Nothing)
+  , (["rm", "/f"], Just (Shell.CmdRm "/f"))
+  , (["rm"], Nothing)
+  , (["stat", "/"], Just (Shell.CmdStat "/"))
+  , (["stat"], Nothing)
+  , (["stat", "/", "x"], Nothing)
+  , (["write", "/f", "hi"], Just (Shell.CmdWrite "/f" "hi"))
+  , (["write", "/f"], Just (Shell.CmdWrite "/f" ""))
+  , (["write"], Just Shell.CmdWriteUsage)
+  , (["writ", "/f"], Nothing)
+  , (["ns", "ls"], Just Shell.CmdNsLs)
+  , (["ns", "reg", "pl011"], Just (Shell.CmdNsReg "pl011"))
+  , (["ns", "reg"], Just Shell.CmdNsRegUsage)
+  , (["ns"], Nothing)
+  , (["ns", "bogus"], Nothing)
+  , (["ns", "reg", "a", "b"], Nothing)
+  ]
+
+shellParseIpc :: [([String], Maybe Shell.Cmd)]
+shellParseIpc =
+  [ (["ipc", "ping", "pl011"], Just (Shell.CmdIpcPing "pl011"))
+  , (["ipc", "ping"], Just Shell.CmdIpcPingUsage)
+  , (["ipc", "grant"], Just Shell.CmdIpcGrant)
+  , (["ipc", "el0pp", "pl011"], Just (Shell.CmdIpcEl0pp "pl011"))
+  , (["ipc", "timeout", "pl011"], Just (Shell.CmdIpcTimeout "pl011"))
+  , (["ipc"], Just Shell.CmdIpcUsage)
+  , (["ipc", "bogus"], Nothing)
+  , (["ipc", "ping", "a", "b"], Nothing)
+  , (["lsdev"], Just Shell.CmdLsdev)
+  , (["lsdev", "x"], Nothing)
+  , (["dmesg"], Just Shell.CmdDmesg)
+  , (["dmesg", "clear"], Just Shell.CmdDmesgClear)
+  , (["dmesg", "bogus"], Nothing)
+  ]
+
+shellParseVirtioBlk :: [([String], Maybe Shell.Cmd)]
+shellParseVirtioBlk =
+  [ (["virtio", "scan"], Just Shell.CmdVirtioScan)
+  , (["virtio", "init", "3"], Just (Shell.CmdVirtioInit "3"))
+  , (["virtio", "notify", "3"], Just (Shell.CmdVirtioNotify "3"))
+  , (["virtio", "status"], Just Shell.CmdVirtioStatus)
+  , (["virtio", "ack", "3"], Just (Shell.CmdVirtioAck "3"))
+  , (["virtio", "irqtest", "3"], Just (Shell.CmdVirtioIrqtest "3"))
+  , (["virtio", "teardown", "3"], Just (Shell.CmdVirtioTeardown "3"))
+  , (["virtio"], Just Shell.CmdVirtioUsage)
+  , (["virtio", "init"], Nothing)
+  , (["virtio", "bogus"], Nothing)
+  , (["blk", "init", "7"], Just (Shell.CmdBlkInit "7"))
+  , (["blk", "status", "7"], Just (Shell.CmdBlkStatus "7"))
+  , (["blk", "read", "7", "0"], Just (Shell.CmdBlkRead "7" "0"))
+  , (["blk", "write", "7", "0"], Just (Shell.CmdBlkWrite "7" "0" ""))
+  , (["blk", "write", "7", "0", "hi"], Just (Shell.CmdBlkWrite "7" "0" "hi"))
+  , (["blk", "teardown", "7"], Just (Shell.CmdBlkTeardown "7"))
+  , (["blk", "sync"], Just (Shell.CmdBlkSync Nothing))
+  , (["blk", "sync", "7"], Just (Shell.CmdBlkSync (Just "7")))
+  , (["blk", "mount", "7"], Just (Shell.CmdBlkMount "7"))
+  , (["blk", "root", "7"], Just (Shell.CmdBlkRoot "7"))
+  , (["blk"], Just Shell.CmdBlkUsage)
+  , (["blk", "init"], Nothing)
+  , (["blk", "bogus"], Nothing)
+  , (["blk", "sync", "0", "1"], Nothing)
+  ]
+
+shellParseNet :: [([String], Maybe Shell.Cmd)]
+shellParseNet =
+  [ (["net", "init", "0"], Just (Shell.CmdNetInit "0"))
+  , (["net", "status", "0"], Just (Shell.CmdNetStatus "0"))
+  , (["net", "teardown", "0"], Just (Shell.CmdNetTeardown "0"))
+  , (["net", "dhcp"], Just Shell.CmdNetDhcp)
+  , (["net"], Just Shell.CmdNetUsage)
+  , (["net", "init"], Nothing)
+  , (["net", "bogus"], Nothing)
+  , (["ifconfig"], Just Shell.CmdIfconfig)
+  , (["ifconfig", "x"], Nothing)
+  , (["ping", "10.0.2.2"], Just (Shell.CmdPing "10.0.2.2"))
+  , (["ping"], Nothing)
+  , (["udpecho", "10.0.2.2", "7", "hi"], Just (Shell.CmdUdpEcho "10.0.2.2" "7" "hi"))
+  , (["udpecho", "10.0.2.2", "7"], Just (Shell.CmdUdpEcho "10.0.2.2" "7" ""))
+  , (["udpecho", "10.0.2.2"], Nothing)
+  , (["arp", "ls"], Just Shell.CmdArpLs)
+  , (["arp"], Nothing)
+  , (["dns", "example.com"], Just (Shell.CmdDns "example.com"))
+  , (["dns"], Just Shell.CmdDnsUsage)
+  , (["dns", "a", "b"], Nothing)
+  , (["con", "init", "0"], Just (Shell.CmdConInit "0"))
+  , (["con", "status", "0"], Just (Shell.CmdConStatus "0"))
+  , (["con", "write", "0", "hi"], Just (Shell.CmdConWrite "0" "hi"))
+  , (["con", "write", "0"], Just (Shell.CmdConWrite "0" ""))
+  , (["con", "read"], Just (Shell.CmdConRead Nothing))
+  , (["con", "read", "0"], Just (Shell.CmdConRead (Just "0")))
+  , (["con", "teardown", "0"], Just (Shell.CmdConTeardown "0"))
+  , (["con", "mirror", "on"], Just (Shell.CmdConMirror True))
+  , (["con", "mirror", "off"], Just (Shell.CmdConMirror False))
+  , (["con"], Just Shell.CmdConUsage)
+  , (["con", "mirror", "maybe"], Nothing)
+  , (["con", "read", "0", "1"], Nothing)
+  ]
+
+shellParseProc :: [([String], Maybe Shell.Cmd)]
+shellParseProc =
+  [ (["free"], Just Shell.CmdFree)
+  , (["free", "x"], Nothing)
+  , (["mem"], Just Shell.CmdMem)
+  , (["mem", "x"], Nothing)
+  , (["detect"], Just Shell.CmdDetect)
+  , (["detect", "x"], Nothing)
+  , (["vm"], Just Shell.CmdVm)
+  , (["vm", "x"], Nothing)
+  , (["palloc"], Just Shell.CmdPalloc)
+  , (["palloc", "x"], Nothing)
+  , (["fdtest"], Just Shell.CmdFdtest)
+  , (["fdtest", "x"], Nothing)
+  , (["forktest"], Just Shell.CmdForktest)
+  , (["forktest", "x"], Nothing)
+  , (["loaderrefs"], Just (Shell.CmdLoaderRefs Nothing))
+  , (["loaderrefs", "/bin/hello-dyn"], Just (Shell.CmdLoaderRefs (Just "/bin/hello-dyn")))
+  , (["loaderrefs", "a", "b"], Nothing)
+  , (["throwtest"], Just Shell.CmdThrowtest)
+  , (["throwtest", "x"], Nothing)
+  , (["run", "/bin/hello"], Just (Shell.CmdRun "/bin/hello" []))
+  , (["run", "/bin/hello", "a", "b"], Just (Shell.CmdRun "/bin/hello" ["a", "b"]))
+  , (["run"], Just Shell.CmdRunUsage)
+  , (["spawn", "/bin/hello"], Just (Shell.CmdSpawn "/bin/hello" []))
+  , (["spawn", "/bin/hello", "x"], Just (Shell.CmdSpawn "/bin/hello" ["x"]))
+  , (["spawn"], Just Shell.CmdSpawnUsage)
+  , (["jobs"], Just Shell.CmdJobs)
+  , (["jobs", "x"], Nothing)
+  , (["wait"], Just Shell.CmdWaitAll)
+  , (["wait", "1"], Just (Shell.CmdWaitOne "1"))
+  , (["wait", "1", "2"], Nothing)
+  , (["quantum"], Just Shell.CmdQuantumUsage)
+  , (["quantum", "10"], Just (Shell.CmdQuantum "10"))
+  , (["quantum", "1", "2"], Nothing)
+  , (["svcmask"], Just Shell.CmdSvcMaskUsage)
+  , (["svcmask", "1", "0x14"], Just (Shell.CmdSvcMask "1" "0x14"))
+  , (["svcmask", "1"], Nothing)
+  ]
 
 -- Main ----------------------------------------------------------------------
 
@@ -1739,6 +2060,14 @@ main = do
           "link main SysV required"
           (linkWith elfLinkMain (Right . setMainHash Ldr.NoHash . setMainRelocations []) [])
       , checkIO "loader vs repack parity" parityCheck
+      , checkIO "shell cmd cover" (return shellCoverGolden)
+      , checkIO "shell help mentions verbs" (return shellHelpGolden)
+      , checkIO "shell parse core verbs" (return (shellParseGolden shellParseCore))
+      , checkIO "shell parse fs verbs" (return (shellParseGolden shellParseFs))
+      , checkIO "shell parse ipc verbs" (return (shellParseGolden shellParseIpc))
+      , checkIO "shell parse virtio+blk verbs" (return (shellParseGolden shellParseVirtioBlk))
+      , checkIO "shell parse net verbs" (return (shellParseGolden shellParseNet))
+      , checkIO "shell parse proc verbs" (return (shellParseGolden shellParseProc))
       ]
   unless (and results) exitFailure
   putStrLn "all pure tests passed"
