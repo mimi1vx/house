@@ -8,8 +8,15 @@ on:
 jobs:
   slow-gates:
     # Same runner constraints as check: Docker builds, TCG-only QEMU.
+    # Matrix with fail-fast: false so one red leg no longer aborts the tail
+    # (defect C): every leg runs to completion and each leg's result is
+    # visible on its own. Groups match the old sequential steps 1:1.
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 240
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [fs-driver, el0, smp, scaling, memory, miri, slow-smp]
     steps:
       - uses: actions/checkout@v7
       - name: Install host deps
@@ -42,39 +49,46 @@ jobs:
           docker run --rm -v house-cargo:/dest -v /tmp/house-volcache/cargo-registry:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-target:/dest -v /tmp/house-volcache/cargo-target:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-cabal:/dest -v /tmp/house-volcache/cabal:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
-      - name: Filesystem and driver gates
+      - name: Run gates (${{ matrix.group }})
         run: |
-          make house-fs-check TCG_ONLY=1
-          make house-ipc-check TCG_ONLY=1
-          make house-driver-check TCG_ONLY=1
-          make house-virtio-transport-check TCG_ONLY=1
-          make house-virtio-blk-check TCG_ONLY=1
-          make house-virtio-net-check TCG_ONLY=1
-          make house-virtio-con-check TCG_ONLY=1
-      - name: EL0 execution gates
-        # house-proc-check covers the COW-reap livelock path; slow but a hang is worse than a wrong value.
-        run: |
-          make house-userspace-check TCG_ONLY=1
-          make house-fd-el0-check TCG_ONLY=1
-          make house-fork-check TCG_ONLY=1
-          make house-proc-check TCG_ONLY=1
-          make house-svcmask-check TCG_ONLY=1
-          make house-yield-spin-check TCG_ONLY=1
-      - name: SMP gates
-        run: |
-          make smp-check TCG_ONLY=1
-          make smp-hotplug-check TCG_ONLY=1
-      - name: Scaling gate
-        run: make smp-check-8 TCG_ONLY=1
-      - name: Memory matrix
-        run: make vm-check TCG_ONLY=1
-      - name: Miri
-        run: make miri
-      - name: Slow SMP legs
-        run: |
-          make house-spin-hotplug-check TCG_ONLY=1
-          make house-preempt-check TCG_ONLY=1
-          make house-smp-fault-race-check TCG_ONLY=1
+          case "${{ matrix.group }}" in
+            fs-driver)
+              make house-fs-check TCG_ONLY=1
+              make house-ipc-check TCG_ONLY=1
+              make house-driver-check TCG_ONLY=1
+              make house-virtio-transport-check TCG_ONLY=1
+              make house-virtio-blk-check TCG_ONLY=1
+              make house-virtio-net-check TCG_ONLY=1
+              make house-virtio-con-check TCG_ONLY=1
+              ;;
+            el0)
+              # house-proc-check covers the COW-reap livelock path; slow but a hang is worse than a wrong value.
+              make house-userspace-check TCG_ONLY=1
+              make house-fd-el0-check TCG_ONLY=1
+              make house-fork-check TCG_ONLY=1
+              make house-proc-check TCG_ONLY=1
+              make house-svcmask-check TCG_ONLY=1
+              make house-yield-spin-check TCG_ONLY=1
+              ;;
+            smp)
+              make smp-check TCG_ONLY=1
+              make smp-hotplug-check TCG_ONLY=1
+              ;;
+            scaling)
+              make smp-check-8 TCG_ONLY=1
+              ;;
+            memory)
+              make vm-check TCG_ONLY=1
+              ;;
+            miri)
+              make miri
+              ;;
+            slow-smp)
+              make house-spin-hotplug-check TCG_ONLY=1
+              make house-preempt-check TCG_ONLY=1
+              make house-smp-fault-race-check TCG_ONLY=1
+              ;;
+          esac
       - name: Save container volumes to cache
         if: always()
         run: |
