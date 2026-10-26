@@ -15,7 +15,8 @@
 # EDSL tools (EDSL_TOOLS): `house-gen <tool>` output must match the
 # checked-in .s byte-for-byte (fail on drift); the checked-in .s stays the
 # reviewable artifact that gets assembled. The link gains the tiny EL0
-# archive (strlen/strncmp/memcpy/memset + EXIT(1) unwind) with
+# archive (39 string/memory/stdio/locale/errno/exit helpers + EXIT(1)
+# unwind, B1 shared flavour) with
 # --gc-sections, so unused helpers never reach the binary (hello stays
 # 227B). build-probe/*.s keep the bare link line, untouched.
 set -eu

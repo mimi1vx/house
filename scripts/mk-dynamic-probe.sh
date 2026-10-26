@@ -110,10 +110,45 @@ UNWIND=$(nm "$OBJ" | awk '$2 == "T" && $3 ~ /rust_begin_unwind$/ {print $3}')
 cat >"$OUT/exports.map" <<EOF
 {
   global:
+    __assert_fail;
+    __errno_location;
+    _Exit;
+    _exit;
+    abort;
+    exit;
+    fflush;
+    fprintf;
+    fputc;
+    fputs;
+    freelocale;
+    fwrite;
+    memchr;
+    memcmp;
     memcpy;
+    memmove;
     memset;
+    newlocale;
+    nl_langinfo;
+    printf;
+    putchar;
+    puts;
+    setlocale;
+    snprintf;
+    sprintf;
+    strcasecmp;
+    strcat;
+    strchr;
+    strcmp;
+    strcpy;
     strlen;
+    strnlen;
     strncmp;
+    strncpy;
+    strrchr;
+    uselocale;
+    vfprintf;
+    vprintf;
+    vsnprintf;
     $UNWIND;
   local:
     *;

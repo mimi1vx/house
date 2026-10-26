@@ -29,8 +29,11 @@ panic = "abort"
 # EL0 tiny libc never panics by construction (guarded decrements only,
 # pointer arithmetic is unchecked by definition); overflow checks off in
 # every profile so the debug EL0 archive stays panic-free too.
+# Single codegen unit: the audit (`el0tiny-check.sh`) and the probe link
+# (`mk-dynamic-probe.sh`) expect exactly one crate object in the archive.
 [profile.dev.package.house-el0-tiny]
 overflow-checks = false
+codegen-units = 1
 
 [profile.release]
 # opt-level = 2: size/speed balance for the MMU + virtio hot paths;
@@ -43,3 +46,4 @@ panic = "abort"
 
 [profile.release.package.house-el0-tiny]
 overflow-checks = false
+codegen-units = 1

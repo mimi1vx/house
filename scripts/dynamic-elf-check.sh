@@ -65,10 +65,45 @@ LOADER_CHECK=$(cabal list-bin exe:house-loader-check 2>/dev/null | tail -1)
 # moves with the toolchain, so audit_symbols checks its shape (exactly one)
 # separately instead of pinning the bytes here.
 cat >"$WORK/expected-exports" <<'EOF'
+__assert_fail
+__errno_location
+_Exit
+_exit
+abort
+exit
+fflush
+fprintf
+fputc
+fputs
+freelocale
+fwrite
+memchr
+memcmp
 memcpy
+memmove
 memset
+newlocale
+nl_langinfo
+printf
+putchar
+puts
+setlocale
+snprintf
+sprintf
+strcasecmp
+strcat
+strchr
+strcmp
+strcpy
 strlen
+strnlen
 strncmp
+strncpy
+strrchr
+uselocale
+vfprintf
+vprintf
+vsnprintf
 EOF
 LC_ALL=C sort -o "$WORK/expected-exports" "$WORK/expected-exports"
 
@@ -373,7 +408,9 @@ cmp "$WORK/link-a" "$WORK/link-repacked"
 cat >"$WORK/expected-link" <<'EOF'
 object=main base=0x1000000 entry=0x1010290
 object=libc-house.so.0 base=0x1030000 entry=0x1030000
-relocation object=main provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x10203f8 resolved=0x10404b4
+relocation object=main provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x10203f8 resolved=0x104175c
+relocation object=libc-house.so.0 provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1051c68 resolved=0x104175c
+relocation object=libc-house.so.0 provider=libc-house.so.0 symbol=strcpy type=R_AARCH64_JUMP_SLOT target=0x1051c70 resolved=0x10416dc
 EOF
 cmp "$WORK/expected-link" "$WORK/link-a"
 
@@ -422,10 +459,12 @@ cat >"$WORK/expected-link-deep" <<'EOF'
 object=main base=0x1000000 entry=0x1010328
 object=libmid-house.so.0 base=0x1030000 entry=0x1030000
 object=libc-house.so.0 base=0x1060000 entry=0x1060000
-relocation object=main provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1020528 resolved=0x10704b4
+relocation object=main provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1020528 resolved=0x107175c
 relocation object=main provider=libmid-house.so.0 symbol=house_pad type=R_AARCH64_JUMP_SLOT target=0x1020530 resolved=0x10402a8
 relocation object=main provider=libmid-house.so.0 symbol=house_len type=R_AARCH64_JUMP_SLOT target=0x1020538 resolved=0x10402c4
-relocation object=libmid-house.so.0 provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1050408 resolved=0x10704b4
+relocation object=libmid-house.so.0 provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1050408 resolved=0x107175c
+relocation object=libc-house.so.0 provider=libc-house.so.0 symbol=strlen type=R_AARCH64_JUMP_SLOT target=0x1081c68 resolved=0x107175c
+relocation object=libc-house.so.0 provider=libc-house.so.0 symbol=strcpy type=R_AARCH64_JUMP_SLOT target=0x1081c70 resolved=0x10716dc
 EOF
 cmp "$WORK/expected-link-deep" "$WORK/link-deep-a"
 

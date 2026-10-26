@@ -8,6 +8,8 @@ license.workspace = true
 [lib]
 # staticlib for the EL0 `ld -T userspace.ld` link; rlib keeps hosted
 # `cargo test` working. EL0-link only, never in the kernel link.
+# No cdylib: `aarch64-unknown-none` drops it as unsupported, so the B1
+# shared flavour is `ld.lld -shared` from this object (mk-dynamic-probe).
 crate-type = ["rlib", "staticlib"]
 
 [lints]
