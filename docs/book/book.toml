@@ -1,0 +1,14 @@
+[book]
+title = "hOp — House on AArch64"
+authors = ["house contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/house/"
+edit-url-template = "https://github.com/mimi1vx/house/edit/main/docs/book/{path}"
+git-repository-url = "https://github.com/mimi1vx/house"
+
+[output.linkcheck2]
+follow-web-links = false
+exclude = ["localhost.*", "127\\.0\\.0\\.1.*"]
