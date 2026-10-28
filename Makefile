@@ -49,6 +49,11 @@ MIRI_IN_CONTAINER := $(RUNNER) run --platform linux/arm64 --rm -c 4 -m 4G \
   -e XDG_CACHE_HOME=/cargo-home/cache \
   -w /work $(IMAGE)
 
+# Miri side-channel: rust-toolchain.toml selects stable (Miri is nightly-only),
+# so the miri target names the pinned nightly explicitly. Single source for the
+# pin is rust/toolchain.lock (miri_channel).
+MIRI_CHANNEL := $(shell sed -n 's/^miri_channel *= *"\([^"]*\)".*/\1/p' rust/toolchain.lock)
+
 volumes:
 	-$(RUNNER) volume create house-target >/dev/null 2>&1 || true
 	-$(RUNNER) volume create house-cabal >/dev/null 2>&1 || true
@@ -175,7 +180,7 @@ _lint-inner:
 	bash -c 'cd rust && cargo fmt --check'
 
 miri: volumes
-	$(MIRI_IN_CONTAINER) cargo miri test --manifest-path rust/Cargo.toml -p house-hal -p house-hal-aarch64 -p house-libc -p house-boot -p house-el0-tiny
+	$(MIRI_IN_CONTAINER) cargo +$(MIRI_CHANNEL) miri test --manifest-path rust/Cargo.toml -p house-hal -p house-hal-aarch64 -p house-libc -p house-boot -p house-el0-tiny
 
 house-run: initrd
 	qemu-system-aarch64 -accel hvf -cpu max -M virt,gic-version=3 \
