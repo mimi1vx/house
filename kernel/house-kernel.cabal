@@ -35,8 +35,6 @@ library
     HouseA64
     Kernel.Boot
     Kernel.Console
-    Kernel.Debug
-    Kernel.Driver
     Kernel.Driver.GIC
     Kernel.Driver.IRQ
     Kernel.Driver.Keyboard
@@ -44,7 +42,6 @@ library
     Kernel.Driver.PL011Server
     Kernel.Driver.Registry
     Kernel.Driver.Types
-    Kernel.Driver.Virtio
     Kernel.Driver.Virtio.Blk
     Kernel.Driver.Virtio.Blk.Completion
     Kernel.Driver.Virtio.Blk.Device
@@ -72,7 +69,6 @@ library
     Kernel.Initramfs
     Kernel.Initramfs.Cpio
     Kernel.Initramfs.Unpack
-    Kernel.IPC
     Kernel.IPC.Endpoint
     Kernel.IPC.Grant
     Kernel.IPC.IRQ
@@ -99,10 +95,6 @@ library
     Kernel.Userspace.Syscall
     Kernel.Userspace.Trampoline
     Kernel.Userspace.Types
-    Monad.Util
-    Util.CmdLineParser
-    Util.Grammar
-    Util.PM
     Util.Word12
   build-depends:
     base >= 4.22 && < 5

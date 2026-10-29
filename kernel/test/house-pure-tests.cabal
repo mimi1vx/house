@@ -29,7 +29,6 @@ test-suite house-pure
     H.Unsafe
     H.Utils
     H.VirtualMemory
-    Kernel.Debug
     Kernel.Console
     Kernel.Log.Dmesg
     Kernel.Shell.Commands
