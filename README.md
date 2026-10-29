@@ -174,10 +174,10 @@ EXTS = -XGHC2024
 |-- Makefile            # aarch64-only build, QEMU, lint, Miri, and test orchestration
 |-- Containerfile
 |-- .gitignore          # kernel/build/, platform/aarch64/build/, rust/target/
-|-- kernel/             # Haskell kernel (GHC import roots H./Kernel./Monad./Util. preserved)
+|-- kernel/             # Haskell kernel (GHC import roots H./Kernel./Util. preserved)
 |   |-- Makefile        # BUILD := build, EXTS = -XGHC2024
 |   |-- HouseA64.hs
-|   |-- H/  Kernel/  Monad/  Util/    # kernel closure, VFS backends, drivers, and EL0 process services
+|   |-- H/  Kernel/  Util/    # kernel closure, VFS backends, drivers, and EL0 process services
 |   `-- build/          # gitignored
 |-- platform/aarch64/   # linker script, platform entry points, and freestanding link
 |   `-- build/          # gitignored
