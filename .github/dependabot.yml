@@ -12,8 +12,9 @@ updates:
       - "deps"
       - "rust"
 
-  # Pinned nightly in rust-toolchain.toml (Miri needs nightly).
-  # Single source is rust/toolchain.lock (channel + resolved rustc commit);
+  # Pinned stable in rust-toolchain.toml (build) plus a pinned Miri nightly side-channel.
+  # Single source is rust/toolchain.lock (channel + resolved rustc commit for
+  # stable; miri_channel + miri_rustc_commit for the Miri nightly);
   # mk-dynamic-probe.sh derives its pins from there, so a bump must update
   # rust-toolchain.toml, rust/toolchain.lock, Containerfile, and
   # docs/TOOLCHAIN.md together. Dependabot stays off this ecosystem.
