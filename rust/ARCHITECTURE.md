@@ -25,8 +25,9 @@ rust/
 Link: `platform/aarch64/aarch64.ld` → `build/aarch64.ld` via `cc -E -P` (no `-DHOUSE_*`).
 Globals `__heap_base 0x42000000` / `__early_stacks_*` / `__rela_start` remain `ld`-defined.
 
-Toolchain: `rust-toolchain.toml` selects nightly with `aarch64-unknown-none`,
-Clippy, rustfmt, and Miri. The Containerfile installs the same floating nightly;
+Toolchain: `rust-toolchain.toml` selects stable 1.99.0 with `aarch64-unknown-none`,
+Clippy, and rustfmt. Miri runs on a pinned nightly-2026-09-30 side-channel.
+The Containerfile installs stable 1.99.0 by default plus the Miri nightly;
 `docs/TOOLCHAIN.md` records the resolved image version.
 Every `container run --platform linux/arm64` per `apple-container` skill;
 single sanctioned `CONTAINER_DEFAULT_PLATFORM=linux/arm64` on the
