@@ -273,11 +273,14 @@ pub unsafe extern "C" fn c_handle_sync(
                     // faulting store retries after resume (ELR as-delivered,
                     // never +4). Same trampoline path as the svc parks, so the
                     // RTS capability is freed while Haskell handles the fault.
-                    // A plain RO store (loader stub writability probe,
-                    // mprotect text) is refused by skipping it: stores have no
-                    // errno channel, and the refusal is observable by
-                    // read-back. Parking those would livelock the stub loop,
-                    // which retries at the faulting address.
+                    // A plain RO store from EL0 (loader text, mprotect text)
+                    // parks KILL: stores have no errno channel, so skipping
+                    // (elr+4) would report success for a refused write, and
+                    // parking FAULT would livelock the stub loop, which
+                    // retries at the faulting address with nothing to make it
+                    // writable. EL1 keeps the diagnostic skip below so the
+                    // `vm` shell self-test can still prove the permission
+                    // fault fired via read-back.
                     // SAFETY: PTE SW-bit read only, no locks or allocation.
                     let is_cow = unsafe { house_is_cow_page(far) } != 0;
                     if is_cow && !gpr.is_null() {
@@ -302,6 +305,47 @@ pub unsafe extern "C" fn c_handle_sync(
                                 core::arch::asm!("msr spsr_el1, {0}", in(reg) 0x3c5u64, options(nostack, preserves_flags));
                             }
                             return svc_exit_trampoline as *const () as u64;
+                        }
+                    }
+                    // EL0 plain RO: fail closed via the fault-kill path so
+                    // Haskell reaps the pid (`fault kill pid=... va=...`)
+                    // instead of resuming past a discarded store.
+                    {
+                        let spsr: u64;
+                        // SAFETY: mrs spsr_el1 at handler (EL1).
+                        unsafe {
+                            core::arch::asm!("mrs {0}, spsr_el1", out(reg) spsr, options(nostack, preserves_flags))
+                        };
+                        if (spsr & 0xF) == 0 && !gpr.is_null() {
+                            let sp_el0: u64;
+                            // SAFETY: mrs sp_el0 at EL1 handler.
+                            unsafe {
+                                core::arch::asm!("mrs {0}, sp_el0", out(reg) sp_el0, options(nostack, preserves_flags))
+                            };
+                            unsafe {
+                                uart_puts(b"[kill] EL0 RO store FAR=\0".as_ptr());
+                                puthex(far);
+                                uart_puts(b" ELR=\0".as_ptr());
+                                puthex(elr);
+                                uart_puts(b"\n\0".as_ptr());
+                            }
+                            // SAFETY: gpr is the 896B vec_sync frame; park
+                            // copies it with a bounded lock-free table scan.
+                            let parked =
+                                unsafe { house_el0_park_kill(elr, sp_el0, gpr as *const u64, far) };
+                            if parked != 0 {
+                                // SAFETY: ttbr0_l0 is kernel L0, EL1 only.
+                                unsafe {
+                                    house_set_recorded_pdir(ttbr0_l0.as_mut_ptr() as *mut u8);
+                                    core::arch::asm!("msr ttbr0_el1, {0}", in(reg) ttbr0_l0.as_ptr() as u64, options(nostack, preserves_flags));
+                                    core::arch::asm!(
+                                        "dsb ish; tlbi vmalle1is; dsb ish; isb",
+                                        options(nostack, preserves_flags)
+                                    );
+                                    core::arch::asm!("msr spsr_el1, {0}", in(reg) 0x3c5u64, options(nostack, preserves_flags));
+                                }
+                                return svc_exit_trampoline as *const () as u64;
+                            }
                         }
                     }
                     return elr.wrapping_add(4);

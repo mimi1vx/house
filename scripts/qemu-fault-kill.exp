@@ -1,7 +1,9 @@
 #!/usr/bin/expect -f
 # Fault-kill harness: an EL0 fault inside the window but unmapped is covered
 # by the pager; faults outside the window (below and above) must reap the
-# process with exit 1 while the kernel continues. EL1 wild pointers still
+# process with exit 1 while the kernel continues. A store to the process's
+# own RO text must also reap exit 1 (house-oz9.2: never elr+4); survival
+# exits 2 (skipped) or 3 (writable mapping). EL1 wild pointers still
 # halt (negative case lives in code review, not QEMU: halting QEMU would wedge
 # the harness).
 # Usage: expect scripts/qemu-fault-kill.exp <kernel.bin> [marker] [timeout] [accel] [mem] [smp]
@@ -67,6 +69,23 @@ expect {
     -re "ok exit 1" { puts "\nPASS: high fault reaped exit 1 (core alive)" }
     timeout { puts "\nFAIL: high reap timeout (core halted?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before high reap"; exit 1 }
+}
+expect {
+    -re "> " { puts "\nPASS: prompt after high reap" }
+    timeout { puts "\nFAIL: prompt after high reap timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof after high reap"; exit 1 }
+}
+send "spawn /bin/rostore\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set p3 $expect_out(1,string); puts "\nPASS: spawned rostore pid $p3" }
+    timeout { puts "\nFAIL: spawn rostore timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before spawn rostore"; exit 1 }
+}
+send "wait $p3\r"
+expect {
+    -re "ok exit 1" { puts "\nPASS: RO store reaped exit 1 (skip is gone)" }
+    timeout { puts "\nFAIL: rostore reap timeout (core halted?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before rostore reap"; exit 1 }
 }
 expect {
     -re "> " { puts "\nPASS: prompt at end" }

@@ -65,7 +65,9 @@ data PageInfo
   , cow :: Bool
   {- ^ copy-on-write sharer: HW sees RO (writable is False); an RO fault
   on a cow page parks FAULT for a Haskell copy/remap, while a plain
-  RO page (loader text, mprotect) keeps the skip semantics
+  RO store from EL0 (loader text, mprotect) parks KILL and never
+  skips (elr+4). EL1 keeps the diagnostic skip so the `vm`
+  self-test can prove the fault fired via read-back.
   -}
   }
   deriving (Eq, Show)

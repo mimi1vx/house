@@ -104,7 +104,7 @@ done
 build_one userspace/init.s userspace/userspace.ld initramfs-staging/sbin/init
 
 # Existing probes (reference sources until userspace/ supersedes them).
-for prog in argenv brk exec faultrace faultbudget faultkill fork ipc_pp spin svcmask tls_clobber yield yieldspin; do
+for prog in argenv brk exec faultrace faultbudget faultkill fork ipc_pp rostore spin svcmask tls_clobber yield yieldspin; do
 	build_one "build-probe/$prog.s" "build-probe/$prog.ld" "initramfs-staging/bin/$prog"
 done
 

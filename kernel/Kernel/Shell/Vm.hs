@@ -82,8 +82,10 @@ vmMmap = do
       isRo <- c_is_ro_page (fromIntegral (ptrToIntPtr ptr) :: Word64)
       let okRo = isRo /= (0 :: CInt)
       withCString ("vm: ro page " ++ (if okRo then "ok" else "fail") ++ "\n") c_uart_puts
-      -- Prove the perm fault fired and the store was skipped: the byte
-      -- written above (offset 0 holds 0) must be unchanged after the poke.
+      -- Prove the perm fault fired and the EL1 diagnostic store was
+      -- skipped: the byte written above (offset 0 holds 0) must be
+      -- unchanged after the poke. EL1 keeps the skip so this self-test
+      -- stays observable; EL0 plain-RO stores park KILL instead.
       old <- peek (castPtr ptr :: Ptr Word8)
       -- trigger perm fault RO write (should log [demand] perm fault RO and skip)
       poke (castPtr ptr :: Ptr Word8) 0xFF
