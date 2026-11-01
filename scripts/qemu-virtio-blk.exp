@@ -161,8 +161,9 @@ if {$blk_ok} {
     send "lsdev\r"
     expect {
         -re "virtio-blk" { fail "lsdev still lists virtio-blk after final teardown" }
-        -re {irq drops=0[^0-9]} { puts "\nPASS: irq drops=0 after 3 init/teardown cycles" }
-        -re {irq drops=([0-9]+)} { fail "irq drops=$expect_out(1,string) after 3 init/teardown cycles, want 0" }
+        -re {irq drops=([0-9]+)[^0-9]} {
+            if {$expect_out(1,string) eq "0"} { puts "\nPASS: irq drops=0 after 3 init/teardown cycles" } else { fail "irq drops=$expect_out(1,string) after 3 init/teardown cycles, want 0" }
+        }
         timeout { fail "lsdev after teardown timeout" }
     }
     sleep 1
