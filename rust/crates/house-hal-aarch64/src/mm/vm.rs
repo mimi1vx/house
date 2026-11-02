@@ -66,7 +66,12 @@ const ENOTSUP: i32 = 95;
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 
-static VM_LOCK: RawSpinLock = RawSpinLock::new();
+// Single page-table lock domain: covers the vm.rs walks (mmap/munmap/
+// mprotect, via vm_l3_entry/vm_split_slot) and the demand-pager install
+// path in userspace.rs (house_handle_user_fault/fault_locked), both over
+// RECORDED_PDIR/current_pdir(). Outer lock; BUDGET_LOCK and the buddy
+// LOCK are inner leaves (never held while acquiring this one).
+pub(crate) static VM_LOCK: RawSpinLock = RawSpinLock::new();
 static mut VM_RESV: [(*mut u8, *mut u8); 32] = [(core::ptr::null_mut(), core::ptr::null_mut()); 32];
 static mut VM_N_RESV: i32 = 0;
 static mut VM_MMAP_CUR: *mut u8 = core::ptr::null_mut();
@@ -272,8 +277,7 @@ unsafe fn vm_l3_entry(va: u64) -> *mut u64 {
 /// Already-table or invalid entries are a no-op returning true; OOM false.
 /// # Safety
 /// `slot` must be a writable table entry; caller serializes against other
-/// table writers for the same entry (VM_LOCK, or exception-context for the
-/// pager fast path as with the existing lock-free table fills).
+/// table writers for the same entry under VM_LOCK (shared with the pager).
 pub(crate) unsafe fn vm_split_slot(slot: *mut u64, level: u8) -> bool {
     if slot.is_null() || (level != 1 && level != 2) {
         return false;

@@ -1,5 +1,6 @@
 //! Userspace EL0 ASID pager — `userspace.c` transliteration.
 
+use crate::mm::vm::VM_LOCK;
 use crate::spinlock::RawSpinLock;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -385,7 +386,9 @@ pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
 // a lock word, the critical section is three page allocations and their
 // zeroing, and faults are rare, so a side table keyed by root would buy no
 // throughput and one more thing to keep in step with the allocator.
-static PDIR_WALK_LOCK: RawSpinLock = RawSpinLock::new();
+// Unification (house-oz9.1): the pager shares VM_LOCK (crate::mm::vm) with
+// the vm.rs walks (mmap/munmap/mprotect): one domain over RECORDED_PDIR.
+// Outer lock; BUDGET_LOCK and the buddy LOCK are inner leaves.
 
 // Per-pdir demand-page budget: one process cannot drain the buddy for
 // everyone. Counts data pages installed by `fault_locked` per root; tables
@@ -749,15 +752,15 @@ pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
     if pdir.is_null() || (pdir as usize & 4095) != 0 {
         return 0;
     }
-    PDIR_WALK_LOCK.lock();
+    VM_LOCK.lock();
     // SAFETY: the lock excludes a second walker; the walk only allocates from
     // the buddy and writes the levels it just allocated.
     let handled = unsafe { fault_locked(pdir, far) };
-    PDIR_WALK_LOCK.unlock();
+    VM_LOCK.unlock();
     handled
 }
 
-/// The demand-pager page-table walk, under `PDIR_WALK_LOCK`.
+/// The demand-pager page-table walk, under `VM_LOCK` (shared with vm.rs).
 unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
     const PTE_VALID: u64 = 1 << 0;
     const PTE_TABLE: u64 = 1 << 1;

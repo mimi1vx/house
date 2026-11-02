@@ -21,9 +21,10 @@ One exception exists and is documented here rather than assumed away:
 `house_vm_munmap` (`rust/crates/house-hal-aarch64/src/mm/vm.rs`) frees pages
 without consulting `cowRefs`. It is reachable only from EL1 diagnostics
 (`Kernel/Shell/Vm.hs`); no EL0 SVC maps to it. It walks `current_pdir()` under
-`VM_LOCK`, while the demand pager installs pages against `RECORDED_PDIR` under
-`PDIR_WALK_LOCK` (`rust/crates/house-hal-aarch64/src/userspace.rs`). Those are
-distinct locks over the same tables.
+`VM_LOCK`, and the demand pager installs pages against `RECORDED_PDIR` under
+the same `VM_LOCK` (`rust/crates/house-hal-aarch64/src/userspace.rs`,
+house-oz9.1): one lock domain over the shared tables. Outer lock;
+`BUDGET_LOCK` and the buddy `LOCK` are inner leaves.
 
 Precondition that makes this safe today: no EL0 process can reach `munmap`,
 so the diagnostic path never races a live shared mapping. Any future caller
