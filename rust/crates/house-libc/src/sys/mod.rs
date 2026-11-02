@@ -472,10 +472,10 @@ pub unsafe extern "C" fn epoll_wait(
     maxevents: i32,
     timeout: i32,
 ) -> i32 {
-    // SAFETY: blocking yield/wfi matches tinylibc/sys.c epoll_wait; no locks held.
+    // SAFETY: blocking yield/wfe matches tinylibc/sys.c epoll_wait; no locks held.
     unsafe extern "C" {
         fn house_sched_yield();
-        static house_thr_mode: i32;
+        fn house_thread_current() -> *mut u8;
     }
     if events.is_null() || maxevents <= 0 {
         return 0;
@@ -513,21 +513,23 @@ pub unsafe extern "C" fn epoll_wait(
             return 0;
         }
         if timeout < 0 {
-            let mode = unsafe { core::ptr::read_volatile(&raw const house_thr_mode) };
-            if mode != 0 {
-                unsafe { house_sched_yield() };
+            // RTS-owned threads have no house scheduler state, so yielding
+            // is a no-op spin for them: block on wfe instead. Any IRQ
+            // (notably the 10 ms timer) or a pipe/eventfd write wakes wfe;
+            // readiness is re-checked at the top of the loop.
+            if unsafe { house_thread_current().is_null() } {
+                unsafe { core::arch::asm!("wfe", options(nostack, preserves_flags)) };
             } else {
-                unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
+                unsafe { house_sched_yield() };
             }
         } else {
             let start = unsafe { house_uptime_ns_raw() };
             let to_ns = timeout as u64 * 1_000_000;
             loop {
-                let mode = unsafe { core::ptr::read_volatile(&raw const house_thr_mode) };
-                if mode != 0 {
-                    unsafe { house_sched_yield() };
+                if unsafe { house_thread_current().is_null() } {
+                    unsafe { core::arch::asm!("wfe", options(nostack, preserves_flags)) };
                 } else {
-                    unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
+                    unsafe { house_sched_yield() };
                 }
                 let mut n2 = 0usize;
                 let ep_n2 = unsafe { FDT[s].ep_n };
