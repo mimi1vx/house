@@ -133,7 +133,8 @@ unsafe fn house_uptime_ns_raw() -> u64 {
         core::arch::asm!("mrs {0}, cntvct_el0", out(reg) c, options(nostack, preserves_flags))
     };
     let hz = counter_hz();
-    ((c as u128 * 1000000000u128) / hz as u128) as u64
+    // u64-only: cntfrq is architecturally 32-bit so (c % hz) * 1e9 cannot overflow.
+    (c / hz) * 1000000000 + (c % hz) * 1000000000 / hz
 }
 
 const FAKE_EPOCH: u64 = 1785000000;

@@ -1625,7 +1625,9 @@ pub unsafe extern "C" fn nanosleep(rq: *const u8, rm: *mut u8) -> i32 {
     let cur = unsafe { house_current_thr[core] };
     if cur.is_null() {
         unsafe { house_sched_lock_release() };
-        unsafe { house_sched_yield() };
+        while unsafe { house_uptime_ns() } < until {
+            unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
+        }
         return 0;
     }
     unsafe {
