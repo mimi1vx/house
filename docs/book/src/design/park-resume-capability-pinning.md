@@ -1,3 +1,3 @@
 # Park/resume capability pinning
 
-TODO: filled by follow-up issues.
+{{#include ../../../design/park-resume-capability-pinning.md}}

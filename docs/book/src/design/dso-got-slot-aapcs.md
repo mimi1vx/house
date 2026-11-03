@@ -1,3 +1,3 @@
-# DSO GOT slot / AAPCS
+# DSO GOT slot: refuted AAPCS premise
 
-TODO: filled by follow-up issues.
+{{#include ../../../design/dso-got-slot-aapcs.md}}

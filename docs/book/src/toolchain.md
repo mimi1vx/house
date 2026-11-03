@@ -1,3 +1,3 @@
 # Toolchain
 
-TODO: filled by follow-up issues.
+{{#include ../../TOOLCHAIN.md}}

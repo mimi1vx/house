@@ -12,6 +12,7 @@
 # Architecture
 
 - [Architecture overview](architecture.md)
+- [Rust workspace](rust-architecture.md)
 - [Boot & runtime](boot-runtime.md)
 - [Stable C ABI map](c-abi.md)
 

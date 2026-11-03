@@ -1,3 +1,3 @@
 # TLB shootdown protocol
 
-TODO: filled by follow-up issues.
+{{#include ../../../design/tlb-shootdown-protocol.md}}

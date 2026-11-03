@@ -1,3 +1,3 @@
 # Host QEMU
 
-TODO: filled by follow-up issues.
+{{#include ../../HOST-QEMU.md}}

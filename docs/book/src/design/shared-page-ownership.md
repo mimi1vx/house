@@ -1,3 +1,3 @@
 # Shared page ownership
 
-TODO: filled by follow-up issues.
+{{#include ../../../design/shared-page-ownership.md}}
