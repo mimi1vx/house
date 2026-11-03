@@ -75,7 +75,7 @@ FFI_A  := $(UNITDIR_rts)/libCffi.a
 HAL_O := $(RUST_HAL_A)
 
 VM_HS := H/AdHocMem H/Utils H/Mutable H/Unsafe Util/Word12 \
-         H/Concurrency Kernel/Types/Console Kernel/Console Kernel/Debug \
+         H/Concurrency Kernel/Types/Console Kernel/Console \
          H/Pages H/PhysicalMemory H/VirtualMemory
 VM_OBJS := $(addprefix build/,$(addsuffix .o,$(VM_HS)))
 
