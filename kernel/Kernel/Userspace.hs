@@ -48,6 +48,7 @@ module Kernel.Userspace (
   -- * Fd table (Track O FS slice, EL1 per-pid; EL0 traps ride the ring)
   Kernel.Userspace.Fd.Fd (..),
   Kernel.Userspace.Fd.FdError (..),
+  Kernel.Userspace.Fd.consolePath,
   Kernel.Userspace.Fd.fdErrorToString,
   Kernel.Userspace.Fd.fdErrorToErrno,
   Kernel.Userspace.Fd.fdOpen,

@@ -7,7 +7,10 @@ Stability   : experimental
 
 Per-pid offsets over 'Kernel.FileSystem.Vfs'. Fds 3..34 per pid (stdio
 0-2 reserved: EL0 svc WRITE uses fd 1 for UART). All paths go through
-'Vfs.splitPath' in the opener's namespace on every call; all lengths are
+'Vfs.splitPath' in the opener's namespace on every call, except the
+reserved '/dev/console' which binds to the virtio-console endpoint via
+the IPC nameservice (no VFS node, no new svc); console reads poll bounded
+(~5s) and writes chunk to the 4K grant page. All lengths are
 capped at 64 KiB (matches the svc user-buffer bound); the RamFS page quota
 (10% of RAM, 16 MiB floor) is inherited -- backend writes return ENOSPC
 and no fd path grows it.
@@ -32,6 +35,7 @@ EL1 under pid 0.
 module Kernel.Userspace.Fd (
   Fd (..),
   FdError (..),
+  consolePath,
   fdErrorToString,
   fdErrorToErrno,
   fdOpen,
@@ -55,16 +59,19 @@ module Kernel.Userspace.Fd (
 where
 
 import Data.Bits (complement, (.&.))
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..))
-import H.Concurrency (QSem, newQSem, withQSem)
+import H.Concurrency (QSem, newQSem, threadDelay, withQSem)
 import H.Monad (H)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
+import Kernel.Driver.Virtio.Con.Server qualified as Con
 import Kernel.FileSystem.Vfs (NamespaceId, vfsEnsurePid, vfsLookup)
 import Kernel.FileSystem.Vfs qualified as Vfs
+import Kernel.IPC.Nameservice qualified as NS
 import Kernel.Userspace.Types (Pid (..))
 
 -- | File descriptor (3..34 per pid; 0-2 reserved for stdio convention).
@@ -119,6 +126,57 @@ maxFdCount = 32
 maxFdBytes :: Int
 maxFdBytes = 65536
 
+-- | Reserved console path bound to the virtio-console endpoint.
+consolePath :: FilePath
+consolePath = "/dev/console"
+
+-- | First live virtio-console slot from the IPC nameservice, if any.
+findConsoleSlot :: H (Maybe Int)
+findConsoleSlot = do
+  xs <- NS.nsList
+  let cons = filter ("virtio-con" `isPrefixOf`) xs
+  case cons of
+    [] -> return Nothing
+    (x : _) -> case reads (drop (length "virtio-con") x) of
+      [(n, "")] -> return (Just n)
+      _ -> return Nothing
+
+{- | Bounded console read: one RX completion truncated to n, polling
+with yield-friendly delay up to ~5s before reporting idle as empty.
+-}
+consoleRead :: Int -> H (Either FdError [Word8])
+consoleRead n
+  | n <= 0 = return (Right [])
+  | otherwise = do
+      mSlot <- findConsoleSlot
+      case mSlot of
+        Nothing -> return (Left (FdFs Vfs.ENOENT))
+        Just slot -> go slot (500 :: Int)
+  where
+    go _ tries | tries <= 0 = return (Right [])
+    go slot tries = do
+      r <- Con.conReadBytes slot
+      case r of
+        Left _ -> return (Left (FdFs Vfs.ENOENT))
+        Right [] -> threadDelay 10000 >> go slot (tries - 1)
+        Right bytes -> return (Right (take n bytes))
+
+-- | Console write chunked to the 4K grant page; no silent truncation.
+consoleWrite :: [Word8] -> H (Either FdError Int)
+consoleWrite content = do
+  mSlot <- findConsoleSlot
+  case mSlot of
+    Nothing -> return (Left (FdFs Vfs.ENOENT))
+    Just slot -> go slot content 0
+  where
+    go _ [] k = return (Right k)
+    go slot rest k = do
+      let (chunk, rest') = splitAt 4095 rest
+      r <- Con.conWriteBytes slot chunk
+      case r of
+        Left _ -> return (Left (FdInval "con write"))
+        Right () -> go slot rest' (k + length chunk)
+
 -- | Table entry: absolute path + offset + access mode + opener namespace.
 data Entry = Entry {
   entPath :: FilePath
@@ -165,6 +223,13 @@ O_TRUNC. Directories reject with EISDIR.
 fdOpen :: Pid -> FilePath -> Int -> H (Either FdError Fd)
 fdOpen pid@(Pid pidInt) path flags
   | not (validFlags flags) = return (Left (FdInval "bad flags"))
+  | path == consolePath = do
+      mSlot <- findConsoleSlot
+      case mSlot of
+        Nothing -> return (Left (FdFs Vfs.ENOENT))
+        Just _ -> do
+          ns <- vfsEnsurePid pidInt
+          insertEntry ns
   | otherwise = case Vfs.splitPath path of
       Left e -> return (Left (FdFs e))
       Right _ -> do
@@ -219,6 +284,7 @@ fdRead pid fd n
         Nothing -> return (Left FdBadFd)
         Just ent
           | entAcc ent == o_WRONLY -> return (Left (FdInval "not readable"))
+          | entPath ent == consolePath -> consoleRead n
           | otherwise -> do
               r <- vfsLookup (entNs ent) (entPath ent)
               case r of
@@ -251,6 +317,7 @@ fdWrite pid fd content
         Nothing -> return (Left FdBadFd)
         Just ent
           | entAcc ent == o_RDONLY -> return (Left (FdInval "not writable"))
+          | entPath ent == consolePath -> consoleWrite content
           | otherwise -> do
               r <- vfsLookup (entNs ent) (entPath ent)
               case r of
@@ -302,36 +369,38 @@ fdSeek pid fd off whence = do
   mEnt <- lookupEntry pid fd
   case mEnt of
     Nothing -> return (Left FdBadFd)
-    Just ent -> do
-      base <- case whence of
-        0 -> return (Right 0)
-        1 -> return (Right (entOff ent))
-        2 -> do
-          r <- vfsLookup (entNs ent) (entPath ent)
-          case r of
-            Left e -> return (Left (FdFs e))
-            Right (ops, rel) -> do
-              sr <- Vfs.opsStat ops rel
-              case sr of
-                Right s -> return (Right (Vfs.fsSize s))
-                Left Vfs.ENOENT -> return (Right 0)
-                Left Vfs.ENOSPC -> return (Left FdNoSpace)
+    Just ent
+      | entPath ent == consolePath -> return (Left (FdInval "not seekable"))
+      | otherwise -> do
+          base <- case whence of
+            0 -> return (Right 0)
+            1 -> return (Right (entOff ent))
+            2 -> do
+              r <- vfsLookup (entNs ent) (entPath ent)
+              case r of
                 Left e -> return (Left (FdFs e))
-        _ -> return (Left (FdInval "bad whence"))
-      case base of
-        Left e -> return (Left e)
-        Right b ->
-          let newOff = b + off
-           in if newOff < 0
-                then return (Left (FdInval "negative offset"))
-                else withQSem fdSem $ do
-                  m <- readRef fdTable
-                  case Map.lookup pid m >>= Map.lookup fd of
-                    Nothing -> return (Left FdBadFd)
-                    Just e2 -> do
-                      let per = Map.findWithDefault Map.empty pid m
-                      writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = newOff} per) m)
-                      return (Right newOff)
+                Right (ops, rel) -> do
+                  sr <- Vfs.opsStat ops rel
+                  case sr of
+                    Right s -> return (Right (Vfs.fsSize s))
+                    Left Vfs.ENOENT -> return (Right 0)
+                    Left Vfs.ENOSPC -> return (Left FdNoSpace)
+                    Left e -> return (Left (FdFs e))
+            _ -> return (Left (FdInval "bad whence"))
+          case base of
+            Left e -> return (Left e)
+            Right b ->
+              let newOff = b + off
+               in if newOff < 0
+                    then return (Left (FdInval "negative offset"))
+                    else withQSem fdSem $ do
+                      m <- readRef fdTable
+                      case Map.lookup pid m >>= Map.lookup fd of
+                        Nothing -> return (Left FdBadFd)
+                        Just e2 -> do
+                          let per = Map.findWithDefault Map.empty pid m
+                          writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = newOff} per) m)
+                          return (Right newOff)
 
 -- | Inherit entries+offsets on fork (fresh map, shared nothing mutable).
 fdFork :: Pid -> Pid -> H ()
