@@ -10,6 +10,7 @@
 .type _start, %function
 _start:
     movz    x19, #0x0100, lsl #16       // 0x01000000 window base
+    add     x19, x19, #0x2000           // skip this probe's own text/data pages
     mov     x20, #0                     // i = 0
     // Do 150000 stores, 4096 apart (covers ~600 MiB, exceeds the 10% cap at
     // 4 GiB while staying quick under TCG; at 512 MiB the cap trips after

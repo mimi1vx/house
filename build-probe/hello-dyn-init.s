@@ -27,18 +27,7 @@ _start:
 3:  adrp    x0, clobber_missing
     add     x0, x0, :lo12:clobber_missing
     bl      print
-4:  adrp    x0, stub_ro
-    add     x0, x0, :lo12:stub_ro
-    ldrb    w1, [x0]
-    cbz     w1, 5f
-    adrp    x0, stub_ro_ok
-    add     x0, x0, :lo12:stub_ro_ok
-    bl      print
-    b       6f
-5:  adrp    x0, stub_ro_bad
-    add     x0, x0, :lo12:stub_ro_bad
-    bl      print
-6:  mov     x0, #0
+4:  mov     x0, #0
     svc     #0x02
 
 // print writes the NUL-terminated string named by x0 to fd 1. It calls, so it
@@ -104,30 +93,7 @@ clobber_caller_saved:
     mov     x18, #0xe0
     ret
 
-// The loader's stub page must be read-only while a constructor is running on
-// it: x30 is the return into the stub, so [x30, #-4] is an instruction word
-// the loop is about to re-enter. The store is expected to be refused, and the
-// word is put back either way so a wrong answer cannot wedge the loop.
-.type ctor_stub_ro, %function
-ctor_stub_ro:
-    stp     x29, x30, [sp, #-32]!
-    ldr     x9, [x30, #-4]
-    mov     x10, #0x5a5a
-    str     x10, [x30, #-4]
-    ldr     x11, [x30, #-4]
-    str     x9, [x30, #-4]
-    adrp    x0, stub_ro
-    add     x0, x0, :lo12:stub_ro
-    cmp     x11, x9
-    b.eq    1f
-    mov     w1, #0
-    b       2f
-1:  mov     w1, #1
-2:  strb    w1, [x0]
-    ldp     x29, x30, [sp], #32
-    ret
-
-// Two fini entries on purpose: the first sets the flag and the second reports
+// Three fini entries on purpose: the first sets the flag, the second reports
 // it, so the exit phase also proves the array was expanded in order.
 .type fctor_set, %function
 fctor_set:
@@ -156,16 +122,40 @@ fctor_report:
 2:  ldp     x29, x30, [sp], #16
     ret
 
+// The last fini entry stores through the return address into the loader's
+// trampoline page while the loop is running on it: x30 is just past the loop's
+// blr, so [x30, #-4] is the instruction word it re-enters. The page is mapped
+// read-only before EL0, so the store must park KILL and leave the [kill]
+// marker; the exit status was recorded before fini, so only the marker proves
+// it. A skipped store would return here with no marker; a writable stub prints
+// the line. The word is restored before the print so a writable mapping cannot
+// wedge the loop.
+.type fctor_stub_ro, %function
+fctor_stub_ro:
+    stp     x29, x30, [sp, #-32]!
+    ldr     x9, [x30, #-4]
+    mov     x10, #0x5a5a
+    str     x10, [x30, #-4]
+    ldr     x11, [x30, #-4]
+    str     x9, [x30, #-4]
+    cmp     x11, x10
+    b.ne    1f
+    adrp    x0, stub_writable
+    add     x0, x0, :lo12:stub_writable
+    bl      print
+1:  ldp     x29, x30, [sp], #32
+    ret
+
 .section .init_array,"aw",%init_array
 .align 3
 .quad   ctor
 .quad   ctor_clobber
-.quad   ctor_stub_ro
 
 .section .fini_array,"aw",%fini_array
 .align 3
 .quad   fctor_set
 .quad   fctor_report
+.quad   fctor_stub_ro
 
 .section .rodata
 init_ok:
@@ -176,9 +166,7 @@ clobber_ok:
     .asciz "init clobber ok\n"
 clobber_missing:
     .asciz "init clobber MISSING\n"
-stub_ro_ok:
-    .asciz "stub page read-only\n"
-stub_ro_bad:
+stub_writable:
     .asciz "stub page WRITABLE\n"
 fini_ok:
     .asciz "fini array ok\n"
@@ -195,6 +183,4 @@ clobber_ran:
     .byte   0
 fini_ran:
     .byte   0
-stub_ro:
-    .byte   1
 .section .note.GNU-stack,"",%progbits
