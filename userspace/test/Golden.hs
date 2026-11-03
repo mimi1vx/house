@@ -14,6 +14,7 @@ import Userspace.Tool.Hello (helloText)
 import Userspace.Tool.Ls (lsText)
 import Userspace.Tool.Mkdir (mkdirText)
 import Userspace.Tool.Rm (rmText)
+import Userspace.Tool.Sh (shText)
 import Userspace.Tool.Stat (statText)
 import Userspace.Tool.Write (writeText)
 
@@ -71,3 +72,4 @@ main = do
   checkGolden "stat" statText
   checkGolden "write" writeText
   checkGolden "cat" catText
+  checkGolden "sh" shText

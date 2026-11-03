@@ -28,7 +28,7 @@ PYTHON3=${PYTHON3:-python3}
 # Tools with a Haskell builder behind `house-gen` (parity-proven, one per
 # line as step 5 migrates hello -> echo -> mkdir/rm -> ls/stat/write ->
 # cat -> init/sh). assemblies for other tools skip the drift gate.
-EDSL_TOOLS="hello echo mkdir rm ls stat write cat"
+EDSL_TOOLS="hello echo mkdir rm ls stat write cat sh"
 
 build_one() {
 	src="$1" ldfile="$2" out="$3"
@@ -85,7 +85,7 @@ GEN=$(cabal list-bin exe:house-gen 2>/dev/null | tail -1)
 }
 
 # New pid1 toolchain (userspace.ld shared; init -> sbin).
-for prog in hello ls cat echo mkdir rm stat write; do
+for prog in hello ls cat echo mkdir rm stat write sh; do
 	case " $EDSL_TOOLS " in
 	*" $prog "*)
 		tmpgen=$(mktemp)

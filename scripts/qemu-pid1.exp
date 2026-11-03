@@ -20,7 +20,7 @@ expect {
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
 expect {
-    -re "initramfs: 33 files" { puts "\nPASS: initramfs unpacked" }
+    -re "initramfs: 34 files" { puts "\nPASS: initramfs unpacked" }
     timeout { puts "\nFAIL: initramfs marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before initramfs marker"; exit 1 }
 }
@@ -85,6 +85,21 @@ expect {
 expect {
     -re "> " {}
     timeout { puts "\nFAIL: prompt after cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+send "run /bin/sh\r"
+expect {
+    -re "sh: ENOENT" { puts "\nPASS: sh no-device ENOENT (EL0 open of reserved path)" }
+    timeout { puts "\nFAIL: sh output timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before sh output"; exit 1 }
+}
+expect {
+    -re "ok exit 1" { puts "\nPASS: sh ok exit 1" }
+    timeout { puts "\nFAIL: sh exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before sh exit"; exit 1 }
+}
+expect {
+    -re "> " {}
+    timeout { puts "\nFAIL: prompt after sh timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 send "spawn /bin/hello\r"
 expect {

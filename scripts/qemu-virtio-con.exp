@@ -188,6 +188,23 @@ expect {
 }
 sock_drain $s
 sleep 1
+# dx7.2: EL0 /bin/sh prompt + echo over the same console (no new svc).
+send "spawn /bin/sh\r"
+expect {
+    -re {spawned pid ([0-9]+)} { set shpid $expect_out(1,string); puts "\nPASS: sh spawned pid $shpid" }
+    timeout { fail "sh spawn timeout" }
+}
+expect {
+    -re {sh\$ } { puts "\nPASS: EL0 sh prompt" }
+    timeout { fail "sh prompt timeout" }
+}
+sock_drain $s
+puts -nonewline $s "sh-probe-line\n"
+flush $s
+expect {
+    -re "sh-probe-line" { puts "\nPASS: EL0 sh echoed host line" }
+    timeout { fail "sh echo timeout" }
+}
 # burst 5 scans without deadlock
 for {set i 0} {$i < 5} {incr i} {
     send "virtio scan\r"

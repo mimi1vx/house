@@ -31,6 +31,7 @@ library
     Userspace.Tool.Stat
     Userspace.Tool.Write
     Userspace.Tool.Cat
+    Userspace.Tool.Sh
   build-depends:
     base >= 4.22 && < 5
 
@@ -131,6 +132,7 @@ executable house-gen
     Userspace.Tool.Stat
     Userspace.Tool.Write
     Userspace.Tool.Cat
+    Userspace.Tool.Sh
   build-depends:
     base >= 4.22 && < 5
     , house-userspace
@@ -151,6 +153,7 @@ test-suite house-userspace-test
     Userspace.Tool.Stat
     Userspace.Tool.Write
     Userspace.Tool.Cat
+    Userspace.Tool.Sh
   build-depends:
     base >= 4.22 && < 5
     , house-userspace

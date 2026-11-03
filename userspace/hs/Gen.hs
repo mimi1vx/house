@@ -11,6 +11,7 @@ import Userspace.Tool.Hello (helloText)
 import Userspace.Tool.Ls (lsText)
 import Userspace.Tool.Mkdir (mkdirText)
 import Userspace.Tool.Rm (rmText)
+import Userspace.Tool.Sh (shText)
 import Userspace.Tool.Stat (statText)
 import Userspace.Tool.Write (writeText)
 
@@ -26,6 +27,7 @@ main = do
     ["stat"] -> putStr statText
     ["write"] -> putStr writeText
     ["cat"] -> putStr catText
+    ["sh"] -> putStr shText
     _ -> do
-      hPutStrLn stderr "usage: house-gen hello|echo|mkdir|rm|ls|stat|write|cat"
+      hPutStrLn stderr "usage: house-gen hello|echo|mkdir|rm|ls|stat|write|cat|sh"
       exitFailure
