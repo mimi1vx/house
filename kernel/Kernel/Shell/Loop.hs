@@ -35,6 +35,7 @@ import GHC.Conc (
   setNumCapabilities,
  )
 import H.Concurrency (forkSupervisedIO)
+import H.Interrupts qualified as Interrupts
 import H.Monad (liftIO, runH)
 import H.VirtualMemory qualified as VM
 import Kernel.Driver.PL011 qualified as PL011
@@ -363,9 +364,10 @@ loop = do
     handleLsdev = do
       ds <- runH DrvReg.listDrivers
       drops <- runH IRQ.readIrqDrops
+      ringDrops <- Interrupts.ringDrops
       linesOut <- runH (mapM fmtDriver ds)
       let body = if null ds then "(empty)\n" else unlines linesOut
-      withCString (body ++ "irq drops=" ++ show drops ++ "\n") c_uart_puts
+      withCString (body ++ "irq drops=" ++ show drops ++ " ring drops=" ++ show ringDrops ++ "\n") c_uart_puts
     fmtDriver di = do
       qd <- IPC.endpointQueueDepth (diEndpoint di)
       return (showDriverInfo di ++ " qdepth=" ++ either (const "?") show qd)

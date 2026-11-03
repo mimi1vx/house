@@ -5,6 +5,8 @@
     reason = "transliterated C surface keeps entries for ABI parity"
 )]
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::virtio_transport::{virtio_transport_ack, virtio_transport_interrupt_status};
 
 const RING_SZ: usize = 256;
@@ -15,6 +17,8 @@ static mut RING_HEAD: u32 = 0;
 static mut RING_TAIL: u32 = 0;
 static mut PIPE_R: i32 = -1;
 static mut PIPE_W: i32 = -1;
+// Monotonic push-side loss count: an ISR found the 256-entry ring full.
+static RING_DROPS: AtomicU32 = AtomicU32::new(0);
 
 unsafe extern "C" {
     fn pipe(fds: *mut i32) -> i32;
@@ -71,6 +75,7 @@ pub unsafe extern "C" fn house_irq_push(intid: u32) {
         let h = RING_HEAD;
         let t = RING_TAIL;
         if h.wrapping_sub(t) >= RING_SZ as u32 {
+            RING_DROPS.fetch_add(1, Ordering::Relaxed);
             return;
         }
         RING_BUF[(h as usize) & RING_MASK] = intid;
@@ -106,6 +111,11 @@ pub unsafe extern "C" fn house_irq_pipe_fd() -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_irq_ring_drops() -> u32 {
+    RING_DROPS.load(Ordering::Relaxed)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pipe_drain() {
     unsafe {
         if PIPE_R < 0 {
@@ -121,4 +131,32 @@ pub unsafe extern "C" fn house_irq_pipe_drain() {
 pub unsafe extern "C" fn house_irq_pipe_readable(fd: i32) -> i32 {
     // SAFETY: house_fd_pipe_readable is poll-like check.
     unsafe { house_fd_pipe_readable(fd) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Miri cannot execute the `dmb` barriers in push/pop.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn ring_full_counts_drops() {
+        // SAFETY: single test thread (--test-threads=1), no IRQ source.
+        unsafe {
+            RING_HEAD = 0;
+            RING_TAIL = 0;
+            RING_DROPS.store(0, Ordering::Relaxed);
+            for _ in 0..RING_SZ {
+                house_irq_push(27);
+            }
+            assert_eq!(house_irq_ring_drops(), 0);
+            house_irq_push(27);
+            assert_eq!(house_irq_ring_drops(), 1);
+            for _ in 0..RING_SZ {
+                assert_eq!(house_irq_pop(), 27);
+            }
+            assert_eq!(house_irq_pop(), -1);
+            assert_eq!(house_irq_ring_drops(), 1);
+        }
+    }
 }

@@ -33,6 +33,21 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
+# The dispatcher starts at boot now, so the ring has a consumer from the first
+# Haskell instruction. Any IRQ lost before that is counted; this boot path
+# arms virtio SPIs only later, so the pre-dispatch count must be zero.
+expect {
+    -re {pre-dispatch ring drops=(\d+)} {
+        if {$expect_out(1,string) != 0} {
+            puts "\nFAIL: $expect_out(1,string) IRQ ring drops before dispatcher start"
+            catch {exec kill -9 [exp_pid]}
+            exit 1
+        }
+        puts "\nPASS: no IRQ ring drops before dispatcher start"
+    }
+    timeout { puts "\nFAIL: pre-dispatch ring drops timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before pre-dispatch report"; exit 1 }
+}
 # Unbraced on purpose: -re {"> "} searches for the literal "> " and matches
 # nothing, which looks exactly like a hang.
 expect {

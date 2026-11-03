@@ -8,6 +8,7 @@ import GHC.Conc (
   getNumCapabilities,
   getNumProcessors,
  )
+import H.Interrupts qualified as Interrupts
 import H.Monad (runH)
 import Kernel.Boot qualified as Boot
 import Kernel.Driver.GIC qualified as DGIC
@@ -25,7 +26,12 @@ house_main = do
   procs0 <- getNumProcessors
   mask0 <- SMP.onlineSet
   withCString ("[house] rts caps=" ++ show caps0 ++ " procs=" ++ show procs0 ++ " online=" ++ show mask0 ++ "\n") c_uart_puts
+  -- Drain from the first Haskell instruction: before this, nothing consumed
+  -- the SPSC ring, so a pushed IRQ could only overflow it silently.
+  Interrupts.startDispatcher
   withCString "Welcome to the House shell! Enter help to see a list of commands.\n\n" c_uart_puts
+  ringDrops0 <- Interrupts.ringDrops
+  withCString ("[house] irq: pre-dispatch ring drops=" ++ show ringDrops0 ++ "\n") c_uart_puts
   -- initramfs via QEMU -initrd: sole /bin/* source (see scripts/mk-userspace.sh)
   Boot.boot
   Init.launchPid1

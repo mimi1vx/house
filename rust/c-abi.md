@@ -171,6 +171,7 @@ IRQ→Endpoint push path (`house_irq_push`, `ba5acfa` livelock fix) is frozen;
 | `house-hal-aarch64` | `house_irq_pipe_fd` | `int house_irq_pipe_fd(void)` | `irq.c` |
 | `house-hal-aarch64` | `house_irq_pipe_drain` | `void house_irq_pipe_drain(void)` | `irq.c` |
 | `house-hal-aarch64` | `house_irq_pipe_readable` | `int house_irq_pipe_readable(int fd)` | `irq.c` |
+| `house-hal-aarch64` | `house_irq_ring_drops` | `uint32_t house_irq_ring_drops(void)` | `irq.c` |
 
 ### `userspace.rs` — `userspace.c` / `userspace.h`
 

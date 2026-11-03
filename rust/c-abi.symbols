@@ -178,6 +178,7 @@ house_irq_pipe_fd
 house_irq_pipe_readable
 house_irq_pop
 house_irq_push
+house_irq_ring_drops
 house_is_cow_page
 house_is_exited
 house_is_ro_page

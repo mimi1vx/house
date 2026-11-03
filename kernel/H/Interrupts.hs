@@ -15,6 +15,8 @@ module H.Interrupts (
   installHandler,
   removeHandler,
   handlerInstalled,
+  startDispatcher,
+  ringDrops,
   enableInterrupts,
   disableInterrupts,
 )
@@ -61,6 +63,8 @@ foreign import ccall unsafe "house_irq_pipe_fd" c_irqPipeFd :: IO Int
 
 foreign import ccall unsafe "house_irq_pipe_readable" c_irqPipeReadable :: Int -> IO Int
 
+foreign import ccall unsafe "house_irq_ring_drops" c_irqRingDrops :: IO Word32
+
 enableInt :: IntId -> H ()
 enableInt (IntId n) = liftIO $ c_enableInt n
 
@@ -104,7 +108,15 @@ installHandler (IntId n) handler = liftIO $ do
     old <- readArray handlerTable idx
     writeArray handlerTable idx (Just sptr)
     mapM_ freeStablePtr old
-  -- start dispatcher once
+  startDispatcher
+  return ()
+
+{- | Start the dispatcher thread once. Called at boot so the SPSC ring is
+drained from the first Haskell instruction, not from the first handler
+install; anything lost before that is counted by 'ringDrops'.
+-}
+startDispatcher :: IO ()
+startDispatcher = do
   started <- readIORef dispatcherStarted
   if started
     then return ()
@@ -115,7 +127,10 @@ installHandler (IntId n) handler = liftIO $ do
       -- kill the dispatcher or leave the machine in an undefined state.
       _ <- forkSupervisedIO dispatcherLoop
       return ()
-  return ()
+
+-- | Entries the ISR could not enqueue because the ring was full.
+ringDrops :: IO Word32
+ringDrops = c_irqRingDrops
 
 {- | Remove the handler for an INTID, freeing its 'StablePtr'. Clearing the
 table before the owning endpoint is freed is what keeps a late IRQ from
