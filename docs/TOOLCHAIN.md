@@ -73,6 +73,10 @@ single source `rust/toolchain.lock` `miri_channel`).
   pass `virtio-mmio-transports=`, so they work on Ubuntu noble's QEMU 8.2 too;
   whether they move into `check-tcg` is a gate-suite decision, not a QEMU-version
   one.
+- Block-path coverage: `house-virtio-blk-check` drives the raw `blk read`/`write`
+  verbs (direct submit/poll) and `blk mount` (filesystem `BlockDev` through the
+  virtio-blk request endpoint); `house-dynamic-root-check` mounts a block root
+  (`blk root`) through the same endpoint path.
 - Gate flake policy (`docs/design/gate-flake-policy.md`): a gate needing a
   second stabilization commit is a kernel bug report, not a harness tweak;
   probes never emit UART in a retry loop and a harness never deletes a
