@@ -19,9 +19,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
 }
 
 proc fail_stage {stage} {
-    puts "\nFAIL: $stage"
-    catch {exec kill -9 [exp_pid]}
-    exit 1
+    house_fail $stage
 }
 
 proc expect_stage {pattern stage} {
@@ -33,10 +31,11 @@ proc expect_stage {pattern stage} {
 }
 
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect_stage "Welcome to the House shell" "welcome"
-expect_stage "> " "prompt"
+house_prompt "prompt"
 
 # Two live demand-pager walkers at once. A walk with no lock lets both allocate
 # and link the same missing level, which shows up as a lost process or a fatal
@@ -48,7 +47,7 @@ proc spawn_racer {stage} {
         timeout {fail_stage "$stage timeout"}
         eof {fail_stage "$stage eof"}
     }
-    expect_stage "> " "prompt after $stage"
+    house_prompt "prompt after $stage"
     return $pid
 }
 set p1 [spawn_racer spawn1]
@@ -60,12 +59,12 @@ puts "\nPASS: two fault racers live ($p1, $p2)"
 # would show up here as a hang rather than as a lost process.
 send "jobs\r"
 expect_stage "jobs:" "jobs with two racers"
-expect_stage "> " "prompt after jobs"
+house_prompt "prompt after jobs"
 
 send "wait\r"
 expect_stage "reaped pid $p1 exit 0" "reap $p1"
 expect_stage "reaped pid $p2 exit 0" "reap $p2"
-expect_stage "> " "prompt after wait"
+house_prompt "prompt after wait"
 puts "\nPASS: both fault racers reaped exit 0"
 
 send "shutdown -h\r"

@@ -24,6 +24,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
     set timeout $timeout_arg
 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -31,21 +32,14 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 send "fdtest\r"
 expect {
     -re "fdtest ok" { puts "\nPASS: EL1 per-pid fdtest ok (incl. cross-pid EBADF)" }
     timeout { puts "\nFAIL: fdtest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before fdtest ok"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after fdtest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after fdtest"
 send "run /bin/cat\r"
 expect {
     -re "hello fd el0" { puts "\nPASS: EL0 cat echoed /probe.txt" }
@@ -62,10 +56,7 @@ expect {
     timeout { puts "\nFAIL: cat exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before cat exit"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after cat"
 send "run /bin/brk\r"
 expect {
     -re "brk ok" { puts "\nPASS: EL0 brk grew 2 pages and touched them" }
@@ -77,11 +68,7 @@ expect {
     timeout { puts "\nFAIL: brk exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before brk exit"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt at end" }
-    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof at end"; exit 1 }
-}
+house_prompt "prompt at end"
 puts "\nPASS: $marker"
 catch {exec kill -9 [exp_pid]}
 exit 0

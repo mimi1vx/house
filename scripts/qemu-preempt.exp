@@ -36,6 +36,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
 # reproduced clean on immediate rerun).
 if {$accel eq "tcg"} { set iters "1600000000" } else { set iters "6000000000" }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -43,11 +44,7 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 send "spawn /bin/spin A $iters\r"
 expect {
     -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spin1 pid $p1" }
@@ -70,11 +67,7 @@ puts "\nPASS: pids distinct ($p1 != $p2)"
 # blocked on UART read and prints nothing until poked, so any later bare
 # "> " expect would either match this stale prompt (false responsive) or
 # (after a dot match discards it) hang forever (false stall).
-expect {
-    -re "> " { puts "\nPASS: prompt synced before stream" }
-    timeout { puts "\nFAIL: pre-stream prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before stream"; exit 1 }
-}
+house_prompt "prompt synced before stream"
 # Interleave proof over the concurrent-phase stream: a single expect consumes
 # dots and completions (exp_continue) until both "spin done" arrive, so no
 # dot is eaten by an intervening roundtrip and UART buffering cannot forge
@@ -146,11 +139,7 @@ expect {
     timeout { puts "\nFAIL: reap $p2 timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before reap $p2"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt at end" }
-    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof at end"; exit 1 }
-}
+house_prompt "prompt at end"
 puts "\nPASS: $marker"
 catch {exec kill -9 [exp_pid]}
 exit 0

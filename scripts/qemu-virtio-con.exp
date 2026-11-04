@@ -53,6 +53,7 @@ proc sock_drain {s} {
     set ::sockbuf ""
 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 # Plain `-M virt` on purpose: the guest probes all 32 virtio-mmio transports, so
 # no machine property is needed and this harness works on QEMU 8.2 through 11+
 # (virtio-mmio-transports= is QEMU 10+, and existed only to squeeze the serial
@@ -69,11 +70,7 @@ expect {
     timeout { fail "welcome timeout" }
     eof { fail "eof before welcome" }
 }
-expect {
-    -re ">" { puts "\nPASS: saw prompt" }
-    timeout { fail "prompt timeout" }
-    eof { fail "eof before prompt" }
-}
+house_prompt "saw prompt"
 send "dmesg\r"
 expect {
     -re "House driver framework online" { puts "\nPASS: dmesg framework online" }
@@ -81,7 +78,7 @@ expect {
 }
 sleep 1
 send "lsdev\r"
-expect { -re ">" { puts "\nPASS: lsdev" } timeout { fail "lsdev timeout" } }
+house_prompt "lsdev"
 send "virtio scan\r"
 expect {
     -re "virtio slot 0" { puts "\nPASS: virtio scan slot 0" }
@@ -176,10 +173,7 @@ expect {
 }
 sock_drain $s
 send "echo mirror-probe-xyz\r"
-expect {
-    -re ">" { puts "\nPASS: echo after mirror on" }
-    timeout { fail "echo timeout" }
-}
+house_prompt "echo after mirror on"
 if {[sock_expect $s "mirror-probe-xyz" 20]} { puts "\nPASS: host saw mirror-probe-xyz" } else { fail "host never saw mirror output" }
 send "con mirror off\r"
 expect {

@@ -25,6 +25,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
     set timeout $timeout_arg
 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -32,21 +33,13 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 send "run /bin/tls_clobber\r"
 expect {
     -re "tls-ok" { puts "\nPASS: tls-ok printed after TPIDR clobber + park" }
     timeout { puts "\nFAIL: tls-ok timeout (kernel TLS clobbered?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before tls-ok"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt after tls probe (kernel survived)" }
-    timeout { puts "\nFAIL: prompt after tls probe timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after tls probe"; exit 1 }
-}
+house_prompt "prompt after tls probe (kernel survived)"
 catch {exec kill -9 [exp_pid]}
 exit 0

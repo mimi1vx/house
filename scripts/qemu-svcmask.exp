@@ -24,6 +24,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
     set timeout $timeout_arg
 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -31,11 +32,7 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 send "spawn /bin/svcmask\r"
 expect {
     -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spawned svcmask pid $p1" }
@@ -48,33 +45,21 @@ expect {
     timeout { puts "\nFAIL: svcmask verb timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before svcmask ok"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after svcmask timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after svcmask"; exit 1 }
-}
+house_prompt "prompt after svcmask"
 send "wait $p1\r"
 expect {
     -re "ok exit 0" { puts "\nPASS: revoked write reaped exit 0 (ENOSYS observed)" }
     timeout { puts "\nFAIL: wait timeout (probe hung?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before wait"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after wait timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after wait"; exit 1 }
-}
+house_prompt "prompt after wait"
 send "uname\r"
 expect {
     -re "House" { puts "\nPASS: shell still lives after revoke" }
     timeout { puts "\nFAIL: shell dead after revoke"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before uname"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof at end"; exit 1 }
-}
+house_prompt "final prompt"
 puts "\nPASS: $marker"
 catch {exec kill -9 [exp_pid]}
 exit 0

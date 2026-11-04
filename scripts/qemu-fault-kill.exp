@@ -29,6 +29,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
     set timeout $timeout_arg
 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -36,11 +37,7 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 send "spawn /bin/faultkill low\r"
 expect {
     -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spawned low-faulter pid $p1" }
@@ -53,11 +50,7 @@ expect {
     timeout { puts "\nFAIL: low reap timeout (core halted?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before low reap"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt after low reap" }
-    timeout { puts "\nFAIL: prompt after low reap timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after low reap"; exit 1 }
-}
+house_prompt "prompt after low reap"
 send "spawn /bin/faultkill high\r"
 expect {
     -re {spawned pid ([0-9]+)} { set p2 $expect_out(1,string); puts "\nPASS: spawned high-faulter pid $p2" }
@@ -70,11 +63,7 @@ expect {
     timeout { puts "\nFAIL: high reap timeout (core halted?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before high reap"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt after high reap" }
-    timeout { puts "\nFAIL: prompt after high reap timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof after high reap"; exit 1 }
-}
+house_prompt "prompt after high reap"
 send "spawn /bin/rostore\r"
 expect {
     -re {spawned pid ([0-9]+)} { set p3 $expect_out(1,string); puts "\nPASS: spawned rostore pid $p3" }
@@ -87,11 +76,7 @@ expect {
     timeout { puts "\nFAIL: rostore reap timeout (core halted?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before rostore reap"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt at end" }
-    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof at end"; exit 1 }
-}
+house_prompt "prompt at end"
 puts "\nPASS: $marker"
 catch {exec kill -9 [exp_pid]}
 exit 0

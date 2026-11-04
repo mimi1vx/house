@@ -25,6 +25,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
     set timeout $timeout_arg
 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -32,20 +33,13 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 send "ns reg pp\r"
 expect {
     -re "registered pp|pp" { puts "\nPASS: ns reg pp" }
     timeout { puts "\nFAIL: ns reg pp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after ns reg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after ns reg"
 send "ipc el0pp pp\r"
 expect {
     -re "served ok" { puts "\nPASS: EL0 server served + replied" }
@@ -62,10 +56,7 @@ expect {
     timeout { puts "\nFAIL: el0pp ok timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before el0pp ok"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after el0pp timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after el0pp"
 send "run /bin/ipc_pp guess 0\r"
 expect {
     -re "guess denied" { puts "\nPASS: ungranted guess denied EPERM" }
@@ -77,10 +68,7 @@ expect {
     timeout { puts "\nFAIL: guesser exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before guesser exit"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after guess timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after guess"
 send "ipc el0pp pp\r"
 expect {
     -re "served ok" { puts "\nPASS: owner rendezvous undisturbed after denied guess" }
@@ -97,11 +85,7 @@ expect {
     timeout { puts "\nFAIL: second el0pp ok timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before second el0pp ok"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt at end" }
-    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof at end"; exit 1 }
-}
+house_prompt "prompt at end"
 puts "\nPASS: $marker"
 catch {exec kill -9 [exp_pid]}
 exit 0

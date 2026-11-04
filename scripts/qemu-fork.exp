@@ -25,6 +25,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
     set timeout $timeout_arg
 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -32,11 +33,7 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 send "run /bin/fork\r"
 expect {
     -re "fork parent" { puts "\nPASS: fork parent printed (parent x0 = child pid)" }
@@ -58,10 +55,7 @@ expect {
     timeout { puts "\nFAIL: fork exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before fork exit"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after fork timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after fork"
 send "run /bin/exec\r"
 expect {
     -re "Hello from EL0" { puts "\nPASS: exec replaced image with /bin/hello" }
@@ -73,11 +67,7 @@ expect {
     timeout { puts "\nFAIL: exec exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before exec exit"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt at end" }
-    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof at end"; exit 1 }
-}
+house_prompt "prompt at end"
 puts "\nPASS: $marker"
 catch {exec kill -9 [exp_pid]}
 exit 0

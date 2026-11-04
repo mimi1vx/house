@@ -48,6 +48,7 @@ if {$timeout_arg eq "" || $timeout_arg == 0} {
 }
 if {$accel eq "tcg"} { set iters "55000000000" } else { set iters "240000000000" }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
     -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
 expect {
@@ -55,11 +56,7 @@ expect {
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before welcome"; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt" }
-    timeout { puts "\nFAIL: prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before prompt"; exit 1 }
-}
+house_prompt "prompt"
 # Ride-along counters, valid in every body below: dots (liveness) and dones
 # (completion) consume-and-continue, so burst output is counted in passing.
 set dones 0

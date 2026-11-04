@@ -11,6 +11,7 @@ if {$accel eq ""} { set accel hvf }
 if {$mem eq ""} { set mem 4G }
 if {$smp eq ""} { set smp 2 }
 log_user 1
+source [file join [file dirname [info script]] house.exp]
 set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -smp $smp -m $mem -nographic -kernel $kernel"
 foreach a $qemu_extra {
     if {$a eq "--"} { continue }
@@ -41,39 +42,26 @@ while {!$saw_pid || !$saw_up || !$saw_prompt} {
     }
 }
 send "\r"
-expect {
-    -re "> " { puts "\nPASS: re-synced prompt" }
-    timeout { puts "\nFAIL: resync timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-    eof { puts "\nFAIL: eof before resync"; exit 1 }
-}
+house_prompt "re-synced prompt"
 send "ns ls\r"
 expect {
     -re "empty" { puts "\nPASS: ns empty at boot (no demo servers)" }
     timeout { puts "\nFAIL: ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after ns ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after ns ls"
 send "run /bin/ls /bin\r"
 expect {
     -re "hello" { puts "\nPASS: /bin/ls lists hello" }
     timeout { puts "\nFAIL: ls output timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before ls output"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after ls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after ls"
 send "cat /etc/house-servers\r"
 expect {
     -re "endpoint-arg" { puts "\nPASS: manifest file intact" }
     timeout { puts "\nFAIL: cat manifest timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after cat timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after cat"
 # No block device is attached: a root-only dependency must fail closed.
 send "run /bin/hello-dyn-missing\r"
 expect {
@@ -81,19 +69,13 @@ expect {
     timeout { puts "\nFAIL: no-block dependency timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before no-block dependency"; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after no-block dependency timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after no-block dependency"
 send "dmesg\r"
 expect {
     -re "needed libc-missing.so.0: no initramfs or mounted-root candidate" { puts "\nPASS: no-block dependency logged" }
     timeout { puts "\nFAIL: no-block dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
-expect {
-    -re "> " {}
-    timeout { puts "\nFAIL: prompt after no-block dmesg timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after no-block dmesg"
 send "run /bin/hello\r"
 expect {
     -re "Hello from EL0" { puts "\nPASS: static hello survives no-block miss" }
@@ -104,10 +86,7 @@ expect {
     -re "ok exit 0" { puts "\nPASS: static hello exit 0" }
     timeout { puts "\nFAIL: static hello exit timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
-expect {
-    -re "> " { puts "\nPASS: prompt after static hello" }
-    timeout { puts "\nFAIL: final prompt timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
-}
+house_prompt "prompt after static hello"
 puts "\nPASS: initramfs ok"
 catch {exec kill -9 [exp_pid]}
 exit 0

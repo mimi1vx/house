@@ -1,0 +1,61 @@
+#!/usr/bin/expect -f
+# Shared Expect helpers for House QEMU harnesses (Phase 4 Step 15).
+#
+# The kernel writes dmesg lines and EL1 fault-kill logs ([kill] ...) to the
+# same UART stream the shell prompt lives on, so a bare `-re "> "` prompt
+# wait is ambiguous: it matches the `> ` inside a `echo hello > /a` command
+# echo, the line-editor redraw during typing, or a stale prompt left by the
+# previous command (0 ms false pass); and a kill log spliced between `>` and
+# ` ` garbles the prompt into `>[kill]` (hang, see 03b1066).
+#
+# house_prompt matches the prompt by its TWO trailing spaces: the shell
+# prints "> " then a cursor cell (" " + ESC[K + BS), so a real prompt is
+# always ">  \x1b[K\x08" on the wire. A ">" inside a command echo (e.g. the
+# ">" of "echo hello > /a") is followed by only ONE space before its cursor
+# cell, so the two-space signature can never match a command echo — while a
+# line anchor cannot be used at all: EL0 spinner dots (".A") and dmesg/kill
+# lines share the UART with no newline discipline, and the preempt gate
+# observably prints ".A>  \x1b[K\x08", i.e. the prompt mid-line after a dot.
+# Expect's search skips (drains) any interleaved output before the prompt
+# instead of failing on it. A kill log spliced between ">" and " " (the
+# 03b1066 ">[kill]" garble) still times out loudly instead of hanging
+# silently; that race is avoided by ordering (send wait immediately after
+# spawn), not by prompt matching.
+#
+# Per-command discipline (see qemu-irq-dispatch.exp): match each command's
+# OUTPUT pattern with house_expect (or a raw expect when captures are needed)
+# and use house_prompt only to consume the next prompt. Never time a command
+# by waiting for the prompt: the echo can contain `> ` and reports 0 ms.
+#
+# house_expect cannot return captures: `expect` inside a proc scopes
+# expect_out to the proc. Expects that capture `(...)` (spawned pids, slots)
+# must stay raw expects. All three helpers kill QEMU and exit 1 on timeout
+# or eof, so no harness repeats that boilerplate.
+#
+# Usage: source [file join [file dirname [info script]] house.exp]
+
+proc house_fail {msg} {
+    puts "\nFAIL: $msg"
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+
+proc house_prompt {label} {
+    expect {
+        -re ">  " { puts "\nPASS: $label" }
+        timeout { house_fail "$label timeout" }
+        eof { house_fail "eof before $label" }
+    }
+}
+
+proc house_send {cmd} {
+    send "$cmd\r"
+}
+
+proc house_expect {re label} {
+    expect {
+        -re $re { puts "\nPASS: $label" }
+        timeout { house_fail "$label timeout" }
+        eof { house_fail "eof before $label" }
+    }
+}
