@@ -1,0 +1,56 @@
+# Action SHAs resolved 2026-11-04 via
+# `git ls-remote https://github.com/actions/<repo>.git`
+# (cross-checked against the releases page: configure-pages v6.0.0 = 45bfe01):
+#   actions/checkout@v7               3d3c42e5aac5ba805825da76410c181273ba90b1
+#   actions/configure-pages@v6         45bfe0192ca1faeb007ade9deae92b16b8254a0d
+#   actions/upload-pages-artifact@v5   fc324d3547104276b827a68afc52ff2a11cc49c9
+#   actions/deploy-pages@v5            368f82528645a54fb793d4d04e342629a3f51346
+name: pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install mdBook
+        run: |
+          cargo install --locked mdbook --version 0.5.4
+          cargo install --locked mdbook-linkcheck2
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build book
+        # docs/book/book.toml wires [output.linkcheck2], so this single step
+        # both builds and linkchecks; broken intra-book links fail the job.
+        run: mdbook build docs/book
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'mimi1vx/house'
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'mimi1vx/house'
+        with:
+          path: docs/book/book/html
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'mimi1vx/house'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        id: deployment

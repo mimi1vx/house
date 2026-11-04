@@ -9,3 +9,4 @@ initramfs-staging/lib/
 .ruff_cache/
 __pycache__/
 *.pyc
+docs/book/book/

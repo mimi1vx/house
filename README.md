@@ -6,6 +6,14 @@ The RTS of GHC is a standalone runtime. With the system-specific bits removed an
 
 History: the original i386/GRUB implementation (GHC 6.8.2, 32 MB flat memory model) is preserved in git history.
 
+### Documentation
+
+Full browsable docs: **https://mimi1vx.github.io/house/** (built from [`docs/book/`](docs/book/)
+with mdBook, deployed by `.github/workflows/pages.yml`).
+Canonical sources live in [`docs/`](docs/), [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md), and
+[`rust/c-abi.md`](rust/c-abi.md); `docs/book/src/` only wraps them via `{{#include}}` plus three
+native pages (installation, architecture, boot-runtime).
+
 ## aarch64 port (GHC 9.14, QEMU virt)
 
 A freestanding aarch64 build that runs under QEMU `virt` (`-M virt,gic-version=3`) on Apple silicon. Stock threaded RTS, no GHC patches. The freestanding constraint is "unsafe FFI only" — safe `ccall` would require scheduler-backed worker threads.
