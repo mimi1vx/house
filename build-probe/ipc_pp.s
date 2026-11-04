@@ -5,9 +5,13 @@
 // Endpoint id (decimal) comes from argv[2]. Payload is verified both ways:
 // client sends [0x22221111, 0x44443333] tag 0x70, server checks them and
 // replies [0x5a5abeee] tag 0x71, client checks the reply word.
+// RECV and CALL retry on -11 (EAGAIN, peer not yet scheduled) up to 8
+// attempts: under TCG the lagging peer's spawn-to-trap gap can exceed the
+// kernel's 5s pairing bound, which is a slow peer, not a broken rendezvous.
+// Any other errno, a wrong tag/payload, or an exhausted budget prints
+// `pp fail` + exits 1, so a genuinely wedged peer still fails honestly.
 // Success: server prints `served ok` + exits 0, client prints `pong ok` +
-// exits 0, guess prints `guess denied` + exits 0 on EPERM. Any mismatch
-// prints `pp fail` + exits 1.
+// exits 0, guess prints `guess denied` + exits 0 on EPERM.
 .arch armv8-a
 .text
 .global _start
@@ -59,6 +63,8 @@ guess:
     svc     #2                      // EXIT(0)
 
 client:
+    mov     x20, #8                 // pairing attempts (5s kernel bound each)
+client_try:
     adrp    x1, msgbuf
     add     x1, x1, :lo12:msgbuf
     mov     x2, #0x1111
@@ -71,7 +77,13 @@ client:
     mov     x2, #2                  // nwords
     mov     x3, #0x70               // tag
     svc     #0x12                   // CALL -> x0 = 0, reply words in buf
-    cbnz    x0, fail
+    cbz     x0, client_ok
+    cmn     x0, #11                 // -11 EAGAIN (peer slow, not wedged)?
+    b.ne    fail                    // any other errno fails honestly
+    subs    x20, x20, #1
+    b.ne    client_try
+    b       fail                    // budget exhausted: peer genuinely wedged
+client_ok:
     ldr     x2, [x1]                // reply word0 must be 0x5a5abeee
     mov     x3, #0xbeee
     movk    x3, #0x5a5a, lsl #16
@@ -86,6 +98,8 @@ client:
     svc     #2                      // EXIT(0)
 
 server:
+    mov     x20, #8                 // pairing attempts (5s kernel bound each)
+server_try:
     adrp    x1, msgbuf
     add     x1, x1, :lo12:msgbuf
     mov     x0, x19                 // ep
@@ -93,7 +107,13 @@ server:
     mov     x3, #0
     svc     #0x11                   // RECV -> x0 = sender tag
     cmp     x0, #0x70
-    b.ne    fail
+    b.eq    server_got
+    cmn     x0, #11                 // -11 EAGAIN (peer slow, not wedged)?
+    b.ne    fail                    // any other errno fails honestly
+    subs    x20, x20, #1
+    b.ne    server_try
+    b       fail                    // budget exhausted: peer genuinely wedged
+server_got:
     ldr     x2, [x1]                // word0 must be 0x22221111
     mov     x3, #0x1111
     movk    x3, #0x2222, lsl #16
