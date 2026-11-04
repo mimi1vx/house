@@ -35,6 +35,7 @@ RUN_IN_CONTAINER := $(RUNNER) run --platform linux/arm64 --rm \
   -v house-target:/work/rust/target \
   -v house-cabal:/root/.cabal \
   -v house-cargo:/cargo-home \
+  -v house-ghc-build:/ghc-build \
   -e CARGO_HOME=/cargo-home \
   -w /work $(IMAGE)
 
@@ -58,6 +59,7 @@ volumes:
 	-$(RUNNER) volume create house-target >/dev/null 2>&1 || true
 	-$(RUNNER) volume create house-cabal >/dev/null 2>&1 || true
 	-$(RUNNER) volume create house-cargo >/dev/null 2>&1 || true
+	-$(RUNNER) volume create house-ghc-build >/dev/null 2>&1 || true
 
 container-image:
 ifeq ($(RUNNER),container)

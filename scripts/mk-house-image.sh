@@ -118,18 +118,19 @@ CLOSURE_DIRS=$(ls -d "$GHC_LIB_ROOT"/aarch64-linux-ghc-"$EXPECTED_GHC"-* 2>/dev/
 	exit 1
 }
 
-# B2 provenance (ii): the house overlay. house-libs/ carries the objects the
-# loader can already parse: libc-house.so.0 (the el0tiny shared flavour;
-# since house-q0g.4 S4 its export set is the el0tiny allowlist plus the EL0
-# gap shims, a superset of mk-dynamic-probe.sh's set) and a rebuilt
-# libHSghc-prim
-# (the bindist archive re-linked sysv/bind-now/RELRO, NEEDED on house-libc
-# plus the B3-owned internal object). libHSbase and libHSghc-internal stay
-# stock: bindist archives are vanilla non-PIC objects (ld.lld refuses them
-# with R_AARCH64_ADR_PREL_PG_HI21, and TEXTREL output is loader-refused), so
-# their rebuild needs dynamic objects from a source-built GHC, not this
-# recipe. The main link below takes -Lhouse-libs first, so the rebuilt prim
-# shadows the stock file; --trace proves it in build.log.
+# B2/B3 provenance (ii)+(iii): the house overlay. house-libs/ carries the
+# objects the loader can already parse: libc-house.so.0 (the el0tiny shared
+# flavour; since house-q0g.4 S4 its export set is the el0tiny allowlist plus
+# the EL0 gap shims, a superset of mk-dynamic-probe.sh's set), a rebuilt
+# libHSghc-prim (the bindist archive re-linked sysv/bind-now/RELRO, NEEDED on
+# house-libc plus the B3-owned internal object), and rebuilt libHSbase and
+# libHSghc-internal (source-built -fPIC archives from the house-ghc-build
+# volume, house-q0g.4 S1+S2, re-linked with the same recipe plus -Bsymbolic;
+# the bindist archives are vanilla non-PIC objects (ld.lld refuses them with
+# R_AARCH64_ADR_PREL_PG_HI21, and TEXTREL output is loader-refused), so the
+# volume archives are required, not optional). The main link below takes
+# -Lhouse-libs first, so the rebuilt objects shadow the stock files; --trace
+# proves it in build.log.
 HOUSE_LIBS="$OUT/house-libs"
 HOUSE_ABS="$PWD/$HOUSE_LIBS"
 mkdir -p "$HOUSE_LIBS"
@@ -321,6 +322,26 @@ first_nonprof() {
 	[ -n "$found" ] || return 1
 	printf '%s\n' "$found"
 }
+# Version script pinning exactly the archive's globals (same shape as the
+# prim block below, factored for the two B3 objects).
+mkvers() {
+	vers_archive=$1
+	vers_map=$2
+	vers_globals=$3
+	nm --format=posix "$vers_archive" | awk '$2 ~ /^[TDRBGC]$/ {print $1}' | LC_ALL=C sort -u >"$vers_globals"
+	[ -s "$vers_globals" ] || {
+		echo "mk-house-image: no global symbols in $vers_archive" >&2
+		exit 1
+	}
+	{
+		echo "{"
+		echo "  global:"
+		sed 's/.*/    &;/' "$vers_globals"
+		echo "  local:"
+		echo "    *;"
+		echo "};"
+	} >"$vers_map"
+}
 PRIM_A=$(first_nonprof "$PRIM_PKG_DIR/libHSghc-prim-*.a") || {
 	echo "mk-house-image: expected exactly one non-profiling ghc-prim archive" >&2
 	exit 1
@@ -336,6 +357,97 @@ PRIM_SO=$(first_nonprof "$CLOSURE_DIRS/libHSghc-prim-*-ghc$EXPECTED_GHC.so") || 
 PRIM_SONAME=$(basename "$PRIM_SO")
 INTERNAL_SO=$(first_nonprof "$CLOSURE_DIRS/libHSghc-internal-*-ghc$EXPECTED_GHC.so") || {
 	echo "mk-house-image: expected exactly one non-profiling ghc-internal shared object" >&2
+	exit 1
+}
+# B3 provenance (iii): rebuilt libHSghc-internal from the source-built -fPIC
+# archive (house-q0g.4 S1) with the S2 C objects swapped in. The volume
+# archives are required, not optional: the bindist .a is vanilla non-PIC and
+# plain -shared refuses it at scale, so -Bsymbolic rides along (the S1
+# finding; Hadrian's own .so link carries it via the driver too).
+# Resolution-only inputs are the stock libHSrts and the system libgmp;
+# house-libc (with the S4 gap shims) interposes first.
+PIC_ARCHIVES=${HOUSE_GHC_PIC:-/ghc-build/pic-archives}
+S2_OBJS=${HOUSE_GHC_S2:-/ghc-build/s2/objs}
+[ -f "$PIC_ARCHIVES/libHSghc-internal-pic.a" ] || {
+	echo "mk-house-image: missing source-built internal archive; provision the house-ghc-build volume (house-q0g.4 S1+S2)" >&2
+	exit 1
+}
+[ -f "$PIC_ARCHIVES/libHSbase-pic.a" ] || {
+	echo "mk-house-image: missing source-built base archive; provision the house-ghc-build volume (house-q0g.4 S1+S2)" >&2
+	exit 1
+}
+[ -n "$(ls "$S2_OBJS"/*.dyn_o 2>/dev/null)" ] || {
+	echo "mk-house-image: missing S2 C objects; provision the house-ghc-build volume (house-q0g.4 S2)" >&2
+	exit 1
+}
+INTERNAL_A=$OUT/internal-house.a
+cp "$PIC_ARCHIVES/libHSghc-internal-pic.a" "$INTERNAL_A"
+[ "$(ar t "$INTERNAL_A" | wc -l | tr -d ' ')" -eq 285 ] || {
+	echo "mk-house-image: internal archive member count is not 285" >&2
+	exit 1
+}
+nm --format=posix "$INTERNAL_A" | awk '$2 ~ /^[TDRBGC]$/ {print $1}' | LC_ALL=C sort -u >"$OUT/internal-pre-globals"
+ar r "$INTERNAL_A" "$S2_OBJS"/*.dyn_o
+[ "$(ar t "$INTERNAL_A" | wc -l | tr -d ' ')" -eq 285 ] || {
+	echo "mk-house-image: internal archive member count moved after the S2 swap" >&2
+	exit 1
+}
+nm --format=posix "$INTERNAL_A" | awk '$2 ~ /^[TDRBGC]$/ {print $1}' | LC_ALL=C sort -u >"$OUT/internal-post-globals"
+diff "$OUT/internal-pre-globals" "$OUT/internal-post-globals" || {
+	echo "mk-house-image: the S2 swap changes the internal T/U set" >&2
+	exit 1
+}
+mkvers "$INTERNAL_A" "$OUT/internal.map" "$OUT/internal-globals"
+INTERNAL_SONAME=$(basename "$INTERNAL_SO")
+RTS_SO=""
+for rts_cand in "$CLOSURE_DIRS"/libHSrts-*-ghc"$EXPECTED_GHC".so; do
+	[ -e "$rts_cand" ] || continue
+	case "$rts_cand" in
+	*_debug* | *_thr* | *_p*) continue ;;
+	esac
+	[ -z "$RTS_SO" ] || {
+		echo "mk-house-image: expected exactly one vanilla libHSrts shared object" >&2
+		exit 1
+	}
+	RTS_SO="$rts_cand"
+done
+[ -n "$RTS_SO" ] || {
+	echo "mk-house-image: no vanilla libHSrts shared object" >&2
+	exit 1
+}
+RTS_SONAME=$(basename "$RTS_SO")
+# Keep in sync with SEARCH_DIRS below: the system libgmp the stock closure
+# resolves.
+GMP_SO=""
+for gmp_dir in /lib/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib; do
+	if [ -f "$gmp_dir/libgmp.so.10" ]; then
+		GMP_SO="$gmp_dir/libgmp.so.10"
+		break
+	fi
+done
+[ -n "$GMP_SO" ] || {
+	echo "mk-house-image: no system libgmp.so.10" >&2
+	exit 1
+}
+GMP_SONAME=$(basename "$GMP_SO")
+ld.lld -shared --gc-sections --fatal-warnings -Bsymbolic \
+	--soname="$INTERNAL_SONAME" --hash-style=sysv \
+	-z now -z relro -z noseparate-code \
+	--no-undefined --build-id=none \
+	--version-script="$OUT/internal.map" \
+	--no-as-needed -L"$HOUSE_LIBS" -l:libc-house.so.0 --as-needed "$RTS_SO" "$GMP_SO" \
+	-o "$HOUSE_LIBS/$INTERNAL_SONAME" --whole-archive "$INTERNAL_A" --no-whole-archive
+# Fidelity, same shape as prim: the dynamic scope is exactly the archive's
+# globals. The NEEDED set is asserted, not incidental: libc-house first so
+# house symbols interpose, then the RTS/GMP resolution inputs in link order.
+nm -D --defined-only "$HOUSE_LIBS/$INTERNAL_SONAME" | awk '{print $3}' | LC_ALL=C sort -u >"$OUT/internal-new.def"
+diff "$OUT/internal-globals" "$OUT/internal-new.def" || {
+	echo "mk-house-image: rebuilt internal defined-set drift" >&2
+	exit 1
+}
+INTERNAL_NEEDED=$(readelf -dW "$HOUSE_LIBS/$INTERNAL_SONAME" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')
+[ "$INTERNAL_NEEDED" = "libc-house.so.0 $RTS_SONAME $GMP_SONAME " ] || {
+	echo "mk-house-image: rebuilt internal NEEDED is '$INTERNAL_NEEDED'" >&2
 	exit 1
 }
 nm --format=posix "$PRIM_A" | awk '$2 ~ /^[TDRBGC]$/ {print $1}' | LC_ALL=C sort -u >"$OUT/prim-globals"
@@ -375,6 +487,42 @@ comm -23 "$OUT/prim-new.u" "$OUT/prim-old.u" >"$OUT/prim-novel.u"
 	cat "$OUT/prim-novel.u" >&2
 	exit 1
 }
+# Rebuilt libHSbase from the source-built -fPIC archive (base has no C
+# sources, so no S2 swap). No --as-needed anywhere: the fresh archive holds
+# no references on prim's globals, so --as-needed elides the prim edge (S3
+# diagnosis); forcing --no-as-needed restores the manifest precedent
+# [libc-house, prim, internal].
+BASE_A=$OUT/base-house.a
+cp "$PIC_ARCHIVES/libHSbase-pic.a" "$BASE_A"
+[ "$(ar t "$BASE_A" | wc -l | tr -d ' ')" -eq 241 ] || {
+	echo "mk-house-image: base archive member count is not 241" >&2
+	exit 1
+}
+mkvers "$BASE_A" "$OUT/base.map" "$OUT/base-globals"
+BASE_SO=$(first_nonprof "$CLOSURE_DIRS/libHSbase-*-ghc$EXPECTED_GHC.so") || {
+	echo "mk-house-image: expected exactly one non-profiling ghc-base shared object" >&2
+	exit 1
+}
+BASE_SONAME=$(basename "$BASE_SO")
+ld.lld -shared --gc-sections --fatal-warnings -Bsymbolic \
+	--soname="$BASE_SONAME" --hash-style=sysv \
+	-z now -z relro -z noseparate-code \
+	--no-undefined --build-id=none \
+	--version-script="$OUT/base.map" \
+	-L"$HOUSE_LIBS" -l:libc-house.so.0 "$HOUSE_LIBS/$PRIM_SONAME" "$HOUSE_LIBS/$INTERNAL_SONAME" "$RTS_SO" \
+	-o "$HOUSE_LIBS/$BASE_SONAME" --whole-archive "$BASE_A" --no-whole-archive
+# Fidelity, same shape as prim and internal: exactly the archive's globals,
+# with the NEEDED order asserted.
+nm -D --defined-only "$HOUSE_LIBS/$BASE_SONAME" | awk '{print $3}' | LC_ALL=C sort -u >"$OUT/base-new.def"
+diff "$OUT/base-globals" "$OUT/base-new.def" || {
+	echo "mk-house-image: rebuilt base defined-set drift" >&2
+	exit 1
+}
+BASE_NEEDED=$(readelf -dW "$HOUSE_LIBS/$BASE_SONAME" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')
+[ "$BASE_NEEDED" = "libc-house.so.0 $PRIM_SONAME $INTERNAL_SONAME $RTS_SONAME " ] || {
+	echo "mk-house-image: rebuilt base NEEDED is '$BASE_NEEDED'" >&2
+	exit 1
+}
 # Note: lld emits RELA/RELASZ/RELAENT but not the DT_RELACOUNT ornament that
 # GNU ld adds, so the manifest relacount field reads 0 on house-linked
 # objects. The loader skips that tag (Loader.hs SkipRelocationHint) and
@@ -394,6 +542,14 @@ LINK="$LINK -optl-Wl,-rpath-link,$HOUSE_ABS -optl-Wl,--trace"
 }
 grep -q "house-libs/$PRIM_SONAME" "$OUT/build.log" || {
 	echo "mk-house-image: the main link did not take the rebuilt $PRIM_SONAME from the overlay" >&2
+	exit 1
+}
+grep -q "house-libs/$BASE_SONAME" "$OUT/build.log" || {
+	echo "mk-house-image: the main link did not take the rebuilt $BASE_SONAME from the overlay" >&2
+	exit 1
+}
+grep -q "house-libs/$INTERNAL_SONAME" "$OUT/build.log" || {
+	echo "mk-house-image: the main link did not take the rebuilt $INTERNAL_SONAME from the overlay" >&2
 	exit 1
 }
 # The house probe: a minimal PIE main whose only import is one prim data

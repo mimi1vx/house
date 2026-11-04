@@ -1404,6 +1404,16 @@ main = do
       , check "elf maxElfBytes cap" (Ldr.loadElf (BS.replicate (Ldr.maxElfBytes + 1) 0) == Left Ldr.OverlapSize)
       , assertLoadLeft "elf segmem cap" elfSegMemCap Ldr.NoSpace
       , assertLoadLeft "elf loader total pages cap" elfLoaderTotalPages Ldr.NoSpace
+      , -- The rebuilt B3 objects (house-q0g.4 S5): manifest lines 3/5 scale
+        -- must stay under the retuned caps, or the loader stops placing the
+        -- real DSOs. Counts re-measured live from the recipe-built objects,
+        -- not copied from the S4 demo.
+        check
+          "rebuilt internal scale fits retuned caps"
+          (164541 <= Ldr.maxRelaCount && 59892 <= Ldr.maxDynSymbols && 59892 <= Ldr.maxDynHashBuckets && 4900 <= Ldr.maxTotalPages && 4900 <= Linker.maxObjectPages && 10128092 <= Ldr.maxSegMemSz && 3932492 <= Ldr.maxDynStrSz)
+      , check
+          "rebuilt base scale fits retuned caps"
+          (12978 <= Ldr.maxRelaCount && 9714 <= Ldr.maxDynSymbols && 9714 <= Ldr.maxDynHashBuckets && 649 <= Ldr.maxTotalPages && 649 <= Linker.maxObjectPages && 1326240 <= Ldr.maxSegMemSz && 681707 <= Ldr.maxDynStrSz)
       , check "elf size-bearing segment cap" (loadFixture elfManySegments == Left Ldr.TooManySegments)
       , check "elf total phdr cap" (loadFixture elfManyPhdrs == Left Ldr.TooManyPhdrs)
       , check "elf gcc-shaped header count parses" (isDynRight elfGccShaped False)
@@ -1846,6 +1856,19 @@ main = do
               elfLinkMain
               (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
               [("liba.so.0", elfLinkDep, validDependency "liba.so.0" ["libmissing.so.0"] [])]
+          )
+          (Ldr.DependencyMissing "libmissing.so.0")
+      , -- The S4 demo placement outcome at one more hop: the loader walks the
+        -- whole present chain (probe, prim, internal, base) and names the
+        -- missing RTS leaf, instead of stopping at a cap.
+        assertLinkError
+          "link names the leaf past two present intermediates"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [] . setMainNeeded ["liba.so.0"])
+              [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" ["libb.so.0"] [])
+              , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" ["libmissing.so.0"] [])
+              ]
           )
           (Ldr.DependencyMissing "libmissing.so.0")
       , check
