@@ -17,6 +17,10 @@ module Kernel.Userspace.Process (
   breakCow,
   CowBreak (..),
   cowLiveCount,
+  cowShareTotal,
+  procPageCount,
+  procHasExited,
+  waitBothExited,
   libVersionPin,
   libVersionSkewLine,
   grantEndpoint,
@@ -63,7 +67,7 @@ import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf,
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Sched qualified as Sched
 import Kernel.Userspace.Trampoline qualified as Tramp
-import Kernel.Userspace.Types (Pid (..), Process (..), SharedObject (..), StopAck, pidNext, procExitMap, procMap, procStopMap, userSem)
+import Kernel.Userspace.Types (DemandObject (..), DemandTable, Pid (..), Process (..), SharedObject (..), StopAck, pidNext, procExitMap, procMap, procStopMap, userSem)
 import Numeric (showHex)
 import System.Timeout qualified as T
 
@@ -181,9 +185,11 @@ installStackPage :: VM.PageMap -> Ptr Word8 -> H Bool
 installStackPage pdir stk = do
   let stackBase = stackTop - 4096
   occupied <- VM.getPage pdir stackBase
-  case occupied of
-    Just _ -> return False
-    Nothing ->
+  marked <- VM.getDemandPage pdir stackBase
+  case (occupied, marked) of
+    (Just _, _) -> return False
+    (_, Just _) -> return False
+    (Nothing, Nothing) ->
       VM.setPage pdir stackBase (Just (VM.PageInfo {VM.physPage = toPhysPage (castPtr stk), VM.writable = True, VM.dirty = False, VM.accessed = False, VM.cow = False}))
 
 unmapStackPage :: VM.PageMap -> Ptr Word8 -> H ()
@@ -285,9 +291,24 @@ share/drop pairs stay exact.
 cowRefs :: Ref (Map.Map Word64 Int)
 cowRefs = unsafePerformH (newRef Map.empty)
 
+{- | Monotonic count of share events (every 'shareBump', fork or dynamic
+rewire). The live level ('cowLiveCount') includes transient shares from
+already-exited processes (pid1's fork at boot), so a level delta across a
+verb is racy; the event delta is not: only live sharing bumps it.
+-}
+{-# NOINLINE cowShareTotalRef #-}
+cowShareTotalRef :: Ref Int
+cowShareTotalRef = unsafePerformH (newRef 0)
+
+-- | Total share events so far (loaderrefs determinism probe, house-q0g.12).
+cowShareTotal :: H Int
+cowShareTotal = readRef cowShareTotalRef
+
 -- | Fork-share bump: absent (parent was private) counts both mappings.
 shareBump :: Word64 -> H ()
-shareBump key = liftIO (atomicModifyIORef' cowRefs bump)
+shareBump key = do
+  liftIO (atomicModifyIORef' cowRefs bump)
+  liftIO (atomicModifyIORef' cowShareTotalRef (\n -> (n + 1, ())))
   where
     bump m = case Map.lookup key m of
       Nothing -> (Map.insert key 2 m, ())
@@ -313,9 +334,79 @@ dropShare key = liftIO (atomicModifyIORef' cowRefs release)
       Just n | n <= 1 -> (Map.delete key m, True)
       Just n -> (Map.insert key (n - 1) m, False)
 
+{- | Non-reaping exit poll for one live pid: True once the EL0 session has
+exited (or the pid is already reaped). Used to quiesce concurrent processes
+before measuring residency, so both touched sets are final while both page
+maps are still alive.
+-}
+procHasExited :: Pid -> H Bool
+procHasExited pid = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup pid mp of
+    Nothing -> return True
+    Just pr -> do
+      mCode <- tryReadExitOnce (VM.fromPageMap (procPdir pr))
+      return (isJust mCode)
+
+{- | Wait (up to 5s) for two pids to exit without reaping either. False on
+timeout; the caller decides whether a wedged process fails the load.
+-}
+waitBothExited :: Pid -> Pid -> H Bool
+waitBothExited pa pb = go (50 :: Int)
+  where
+    go n
+      | n <= 0 = return False
+      | otherwise = do
+          a <- procHasExited pa
+          b <- procHasExited pb
+          if a && b
+            then return True
+            else do threadDelay 100000; go (n - 1)
+
 -- | Live COW ref entries (forktest leak check: 0 when nothing is shared).
 cowLiveCount :: H Int
 cowLiveCount = Map.size <$> readRef cowRefs
+
+{- | Mapped user pages for one live pid, for the demand-pager residency
+measure (house-q0g.12): counts every presently-mapped page in
+@[minVAddr, max (brk, stackTop))@, which is exactly the set the pager
+faulted in plus stack and brk growth. Nothing when reaped underfoot.
+-}
+procPageCount :: Pid -> H (Maybe Int)
+procPageCount pid = withQSem userSem $ do
+  mp <- readRef procMap
+  case Map.lookup pid mp of
+    Nothing -> return Nothing
+    Just pr -> do
+      let pdir = procPdir pr
+          hi = max (procBrk pr) stackTop
+      n <- countPages pdir hi
+      return (Just n)
+  where
+    l1i va = fromIntegral ((va `shiftR` 30) .&. 0x1FF) :: Int
+    l2i va = fromIntegral ((va `shiftR` 21) .&. 0x1FF) :: Int
+    countPages pdir hi = do
+      d0 <- peekElemOff (VM.fromPageMap pdir) 0
+      case userTable d0 of
+        Nothing -> return 0
+        Just l1 -> go l1 VM.minVAddr
+      where
+        go l1 va
+          | va >= hi = return 0
+          | otherwise = do
+              d1 <- peekElemOff l1 (l1i va)
+              case userTable d1 of
+                Nothing -> go l1 (nextL1 va)
+                Just l2 -> do
+                  d2 <- peekElemOff l2 (l2i va)
+                  case userTable d2 of
+                    Nothing -> go l1 (nextL2 va)
+                    Just _ -> do
+                      mInfo <- VM.getPage pdir va
+                      rest <- go l1 (va + 4096)
+                      return ((if isJust mInfo then 1 else 0) + rest)
+        nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
+        nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
 
 pfW :: Word32
 pfW = 2
@@ -334,15 +425,17 @@ data DynamicPage = DynamicPage {
 collectDynamicRO :: VM.PageMap -> [(Word64, Linker.PageAccess)] -> H (Either LoadError [DynamicPage])
 collectDynamicRO pdir accesses = do
   collected <- mapM collect [address | (address, Linker.PageRO) <- accesses]
-  return (sequence collected)
+  return (Right (catMaybes collected))
   where
     collect address = do
       mapped <- VM.getPage pdir address
       case mapped of
+        -- A page the loader never touched stays a demand marker here: it
+        -- cannot be shared yet, so it is skipped, not an error.
         Just info
           | not (VM.writable info) && not (VM.cow info) ->
-              return (Right (DynamicPage address info))
-        _ -> return (Left (BadDyn "dynamic share page is not finalized read-only"))
+              return (Just (DynamicPage address info))
+        _ -> return Nothing
 
 sameDynamicPage :: DynamicPage -> VM.PageInfo -> H Bool
 sameDynamicPage current source =
@@ -478,6 +571,7 @@ data MappedImage = MappedImage {
   , mappedInitSteps :: [Linker.LinkStep]
   , mappedFiniSteps :: [Linker.LinkStep]
   , mappedLoadBounds :: LoadBounds
+  , mappedDemand :: DemandTable
   }
 
 -- | Dynamic mappings are writable only while unpublished in the page map.
@@ -708,7 +802,7 @@ runPreparedBound pidInt image argv envp = do
                           startPc <- case mappedInitSteps mappedImage of
                             [] -> return (Right entry)
                             steps -> do
-                              prepared <- prepareConstructorPhase pdir (mappedLoadBounds mappedImage) steps entry sp Tramp.BranchToEntry
+                              prepared <- prepareConstructorPhase pdir (mappedLoadBounds mappedImage) (mappedDemand mappedImage) steps entry sp Tramp.BranchToEntry
                               return (case prepared of Left err -> Left err; Right () -> Right Tramp.trampolinePage)
                           case startPc of
                             Left err -> do
@@ -721,7 +815,7 @@ runPreparedBound pidInt image argv envp = do
                               stopVar <- newEmptyMVar
                               modifyRef procExitMap (Map.insert pid exitVar)
                               modifyRef procStopMap (Map.insert pid stopVar)
-                              modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage)))
+                              modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage) (mappedDemand mappedImage)))
                               modifyRef procGrants (Map.insert pid [])
                               Sched.schedRegister pid
                               let finiSteps = mappedFiniSteps mappedImage
@@ -744,6 +838,29 @@ additionally wires the trap frame + EL0 session so the child starts runnable
 (x0 = 0, parent resumes with the child pid). Exit codes keep flowing through
 the existing 'waitPid' path. Runs under 'userSem'.
 -}
+
+{- | Inherit demand commitments across fork: every loader-committed page the
+parent has not materialized is planted as a marker in the child with the
+parent's current perms, so the child's first touch faults and serves from
+the shared retained bytes. Materialized pages are already shared by
+'shareAddrSpace' and skipped here.
+-}
+inheritDemand :: VM.PageMap -> VM.PageMap -> DemandTable -> H (Either LoadError ())
+inheritDemand src dst table = go (concatMap demandObjectPages table)
+  where
+    go [] = return (Right ())
+    go (va : rest) = do
+      present <- VM.getPage dst va
+      case present of
+        Just _ -> go rest
+        Nothing -> do
+          mWritable <- VM.getDemandPage src va
+          case mWritable of
+            Nothing -> go rest
+            Just writable -> do
+              ok <- VM.setDemandPage dst va writable
+              if ok then go rest else return (Left NoSpace)
+
 forkProc :: Pid -> H (Either LoadError Pid)
 forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
   mp <- readRef procMap
@@ -754,29 +871,38 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
       case mChild of
         Nothing -> return (Left NoSpace)
         Just childPdir -> do
-          r <- shareAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
-          case r of
-            Left e -> return (Left e)
+          -- Plant the child's markers before sharing: planting touches only
+          -- the fresh child, while 'shareAddrSpace' flips the parent, so a
+          -- plant failure leaves nothing to unwind.
+          inherited <- inheritDemand (procPdir parent) childPdir (procDemand parent)
+          case inherited of
+            Left e -> do
+              freePDir childPdir
+              return (Left e)
             Right () -> do
-              pidInt <- readRef pidNext
-              writeRef pidNext (pidInt + 1)
-              let child = Pid pidInt
-              modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
-              grants <- readRef procGrants
-              writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants) grants)
-              maskOk <- inheritSvcMask (procPdir parent) childPdir
-              if not maskOk
-                then do
-                  modifyRef procMap (Map.delete child)
-                  grants1 <- readRef procGrants
-                  writeRef procGrants (Map.delete child grants1)
-                  writeRef pidNext pidInt
-                  freePDir childPdir
-                  return (Left NoSpace)
-                else do
-                  Vfs.vfsForkPid parentInt pidInt
-                  Fd.fdFork parentPid child
-                  return (Right child)
+              r <- shareAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
+              case r of
+                Left e -> return (Left e)
+                Right () -> do
+                  pidInt <- readRef pidNext
+                  writeRef pidNext (pidInt + 1)
+                  let child = Pid pidInt
+                  modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent) (procDemand parent)))
+                  grants <- readRef procGrants
+                  writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants) grants)
+                  maskOk <- inheritSvcMask (procPdir parent) childPdir
+                  if not maskOk
+                    then do
+                      modifyRef procMap (Map.delete child)
+                      grants1 <- readRef procGrants
+                      writeRef procGrants (Map.delete child grants1)
+                      writeRef pidNext pidInt
+                      freePDir childPdir
+                      return (Left NoSpace)
+                    else do
+                      Vfs.vfsForkPid parentInt pidInt
+                      Fd.fdFork parentPid child
+                      return (Right child)
 
 {- | Share [minVAddr, hi) page by page (capped at 8192 pages), descending
 only into user tables: the fresh 'allocPageMap' L1 carries cloned kernel
@@ -914,64 +1040,73 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
       case mChild of
         Nothing -> return (Left NoSpace)
         Just childPdir -> do
-          r <- shareAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
-          case r of
+          -- Plant the child's markers before sharing: planting touches only
+          -- the fresh child, while 'shareAddrSpace' flips the parent, so a
+          -- plant failure leaves nothing to unwind.
+          inherited <- inheritDemand (procPdir parent) childPdir (procDemand parent)
+          case inherited of
             Left e -> return (Left e)
             Right () -> do
-              pidInt <- readRef pidNext
-              writeRef pidNext (pidInt + 1)
-              let child = Pid pidInt
-                  childPtr = VM.fromPageMap childPdir
-              reg <- liftIO (c_el0_register childPtr)
-              if reg /= 0
-                then do freePDir childPdir; return (Left NoSpace)
-                else do
-                  liftIO (c_budget_reset childPtr)
-                  maskOk <- inheritSvcMask (procPdir parent) childPdir
-                  if not maskOk
-                    then do
-                      liftIO (c_el0_unregister childPtr)
-                      freePDir childPdir
-                      return (Left NoSpace)
+              r <- shareAddrSpace (procPdir parent) childPdir (max (procBrk parent) stackTop)
+              case r of
+                Left e -> return (Left e)
+                Right () -> do
+                  pidInt <- readRef pidNext
+                  writeRef pidNext (pidInt + 1)
+                  let child = Pid pidInt
+                      childPtr = VM.fromPageMap childPdir
+                  reg <- liftIO (c_el0_register childPtr)
+                  if reg /= 0
+                    then do freePDir childPdir; return (Left NoSpace)
                     else do
-                      exitVar <- newEmptyMVar
-                      stopVar <- newEmptyMVar
-                      modifyRef procExitMap (Map.insert child exitVar)
-                      modifyRef procStopMap (Map.insert child stopVar)
-                      modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent)))
-                      grants0 <- readRef procGrants
-                      writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants0) grants0)
-                      Sched.schedRegister child
-                      Vfs.vfsForkPid parentInt pidInt
-                      Fd.fdFork parentPid child
-                      asid <- liftIO (c_asid_for childPtr)
-                      cloned <- liftIO (c_el0_clone parentPtr childPtr)
-                      if cloned /= 0
+                      liftIO (c_budget_reset childPtr)
+                      maskOk <- inheritSvcMask (procPdir parent) childPdir
+                      if not maskOk
                         then do
-                          modifyRef procMap (Map.delete child)
-                          modifyRef procExitMap (Map.delete child)
-                          modifyRef procStopMap (Map.delete child)
-                          grants1 <- readRef procGrants
-                          writeRef procGrants (Map.delete child grants1)
-                          Vfs.vfsReleasePid pidInt
-                          Fd.fdRelease child
                           liftIO (c_el0_unregister childPtr)
                           freePDir childPdir
-                          return (Left (BadSegment "clone slot"))
+                          return (Left NoSpace)
                         else do
-                          _ <- forkH $ do
-                            liftIO (c_set_pdir childPtr)
-                            _ <- liftIO (c_resume_el0 childPtr asid 0)
-                            parkLoop childPdir [] child childPtr asid exitVar stopVar 0 []
-                            return ()
-                          return (Right child)
+                          exitVar <- newEmptyMVar
+                          stopVar <- newEmptyMVar
+                          modifyRef procExitMap (Map.insert child exitVar)
+                          modifyRef procStopMap (Map.insert child stopVar)
+                          modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent) (procDemand parent)))
+                          grants0 <- readRef procGrants
+                          writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants0) grants0)
+                          Sched.schedRegister child
+                          Vfs.vfsForkPid parentInt pidInt
+                          Fd.fdFork parentPid child
+                          asid <- liftIO (c_asid_for childPtr)
+                          cloned <- liftIO (c_el0_clone parentPtr childPtr)
+                          if cloned /= 0
+                            then do
+                              modifyRef procMap (Map.delete child)
+                              modifyRef procExitMap (Map.delete child)
+                              modifyRef procStopMap (Map.delete child)
+                              grants1 <- readRef procGrants
+                              writeRef procGrants (Map.delete child grants1)
+                              Vfs.vfsReleasePid pidInt
+                              Fd.fdRelease child
+                              liftIO (c_el0_unregister childPtr)
+                              freePDir childPdir
+                              return (Left (BadSegment "clone slot"))
+                            else do
+                              _ <- forkH $ do
+                                liftIO (c_set_pdir childPtr)
+                                _ <- liftIO (c_resume_el0 childPtr asid 0)
+                                parkLoop childPdir [] child childPtr asid exitVar stopVar 0 []
+                                return ()
+                              return (Right child)
 
 {- | Unmap every user page in [minVAddr, hi), releasing the backing host
 pages. Shared pages only drop their 'cowRefs' count (the host page frees
-for the last sharer); private pages free directly. Tables are kept (L2/L1
-husks leak at most a page each per exec -- negligible at this scale); the
-pdir pointer stays valid so the parked EL0 slot keeps its key. Runs under
-'userSem'.
+for the last sharer); private pages free directly. Demand markers in range
+are cleared, so an exec replacement never inherits another image's
+commitments (a stale marker would park a fault the new image cannot
+serve). Tables are kept (L2/L1 husks leak at most a page each per exec --
+negligible at this scale); the pdir pointer stays valid so the parked EL0
+slot keeps its key. Runs under 'userSem'.
 -}
 freeUserPages :: VM.PageMap -> Word64 -> H ()
 freeUserPages pdir hi = do
@@ -995,10 +1130,12 @@ freeUserPages pdir hi = do
                 Just _ -> do
                   mInfo <- VM.getPage pdir va
                   case mInfo of
-                    Nothing -> go l1 (va + 4096)
                     Just info -> do
                       _ <- VM.setPage pdir va Nothing
                       releaseBacking (fromPhysPage (VM.physPage info))
+                      go l1 (va + 4096)
+                    Nothing -> do
+                      _ <- VM.clearDemandPage pdir va
                       go l1 (va + 4096)
     nextL1 va = (va .&. complement 0x3FFFFFFF) + 0x40000000
     nextL2 va = (va .&. complement 0x1FFFFF) + 0x200000
@@ -1075,7 +1212,7 @@ execReplaceValidated pid pdir path image = withQSem userSem $ do
                           cleanupMappedImage (procPdir pr) mappedImage
                           return (Left (BadSegment "exec redirect"))
                         else do
-                          writeRef procMap (Map.insert pid pr {procEntry = entry, procBrk = initBrk, procSharedObjects = mappedSharedObjects mappedImage} mp)
+                          writeRef procMap (Map.insert pid pr {procEntry = entry, procBrk = initBrk, procSharedObjects = mappedSharedObjects mappedImage, procDemand = mappedDemand mappedImage} mp)
                           return (Right (entry, sp))
 
 -- | EL1 lookup for the forktest isolation check (caller holds no locks).
@@ -1345,7 +1482,7 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                 Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
                 Just (ReqIpcReply ep va nw tag) -> do handleReply ep va nw tag; loop
-                Just (ReqFault x0 va) -> do cont <- handleCowFault x0 va; when cont loop
+                Just (ReqFault x0 va) -> do cont <- handleDemandFault x0 va; when cont loop
                 Just (ReqFaultKill _x0 va) -> do handleFaultKill va
                 Just (ReqPreempt x0) -> do handlePreempt x0; loop
                 Just (ReqUnknown _) -> do resumeWith negENOSYS; loop
@@ -1354,7 +1491,10 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
     -- still completes: refusing to exit would wedge the process for good.
     runFiniPhase code =
       unless (null finiSteps) $ do
-        outcome <- runConstructorPhase pmap bounds finiSteps (fromIntegral code) sp pdir asid Tramp.ExitProcess
+        table <- withQSem userSem $ do
+          mp <- readRef procMap
+          return (maybe [] procDemand (Map.lookup pid mp))
+        outcome <- runConstructorPhase pmap bounds table finiSteps (fromIntegral code) sp pdir asid Tramp.ExitProcess
         case outcome of
           Left err -> Dmesg.dmesgLog ("fini constructors skipped: " ++ Ldr.loadErrorToString err)
           Right () -> return ()
@@ -1566,6 +1706,27 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                 Sched.schedWakeAll
                 void (liftIO (tryPutMVar exitVar 1))
                 return False
+    {- \| Demand fault first: a fault on a loader-committed but unfaulted page
+    materializes exactly that page from the retained object bytes and resumes
+    the faulting insn. Anything else falls through to the COW path; an
+    exhausted budget or page pool reaps, like the COW no-memory arm.
+    -}
+    handleDemandFault x0 va = do
+      table <- withQSem userSem $ do
+        mp <- readRef procMap
+        return (maybe [] procDemand (Map.lookup pid mp))
+      r <- demandServe pmap table va
+      case r of
+        DemandServed -> do resumeWith x0; return True
+        DemandMiss -> handleCowFault x0 va
+        DemandNoMem -> do
+          alive <- withQSem userSem (Map.member pid <$> readRef procMap)
+          when alive $ do
+            Dmesg.dmesgLog ("demand reap pid=" ++ show pid ++ " va=0x" ++ showHex va "" ++ " nomem")
+            Sched.schedUnregister pid
+            Sched.schedWakeAll
+            void (liftIO (tryPutMVar exitVar 1))
+          return True
     handleFaultKill va = do
       alive <- withQSem userSem (Map.member pid <$> readRef procMap)
       when alive $ do
@@ -1637,17 +1798,25 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                     mp <- readRef procMap
                     case Map.lookup pid mp of
                       Nothing -> return Nothing
-                      Just _ -> do
+                      Just pr -> do
                         modifyRef pendingReply (Map.insert pid hReply)
                         let ws = take (min 8 (fromIntegral nw)) (msgWords msg)
                         if null ws
                           then return (Just 0)
-                          else allocaArray 8 $ \buf -> do
-                            mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
-                            rc <- liftIO (c_user_write pdir va buf (fromIntegral (length ws)))
-                            if rc /= 0
-                              then do modifyRef pendingReply (Map.delete pid); return (Just rc)
-                              else return (Just 0)
+                          else do
+                            -- The reply lands in the server's message buffer,
+                            -- which may not be faulted in yet: serve it first
+                            -- like the 'writeUser' path does.
+                            served <- ensureRange (procPdir pr) (procDemand pr) va (fromIntegral (length ws) * 8)
+                            case served of
+                              DemandNoMem -> do modifyRef pendingReply (Map.delete pid); return (Just (-12))
+                              DemandMiss -> do modifyRef pendingReply (Map.delete pid); return (Just (-14))
+                              DemandServed -> allocaArray 8 $ \buf -> do
+                                mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
+                                rc <- liftIO (c_user_write pdir va buf (fromIntegral (length ws)))
+                                if rc /= 0
+                                  then do modifyRef pendingReply (Map.delete pid); return (Just rc)
+                                  else return (Just 0)
                   case mRc of
                     Nothing -> do
                       _ <- liftIO (tryPutMVar hReply (Left NoSuchEndpoint))
@@ -1685,17 +1854,24 @@ readUser p pd va nw = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup p mp of
     Nothing -> return Nothing
-    Just _ ->
+    Just pr ->
       if nw > 8
         then return (Just (Left (-22)))
         else
           if nw == 0
             then return (Just (Right []))
-            else allocaArray 8 $ \buf -> do
-              rc <- liftIO (c_user_read pd va buf nw)
-              if rc /= 0
-                then return (Just (Left rc))
-                else do ws <- mapM (peekElemOff buf) [0 .. fromIntegral nw - 1]; return (Just (Right ws))
+            else do
+              -- A supervisor copy may touch not-yet-faulted demand pages:
+              -- fault them in first so the copy sees what EL0 would.
+              served <- ensureRange (procPdir pr) (procDemand pr) va (nw * 8)
+              case served of
+                DemandNoMem -> return (Just (Left (-12)))
+                DemandMiss -> return (Just (Left (-14)))
+                DemandServed -> allocaArray 8 $ \buf -> do
+                  rc <- liftIO (c_user_read pd va buf nw)
+                  if rc /= 0
+                    then return (Just (Left rc))
+                    else do ws <- mapM (peekElemOff buf) [0 .. fromIntegral nw - 1]; return (Just (Right ws))
 
 {- | Write words to a live pid's user VA under 'userSem'. Nothing when reaped
 underfoot (caller must skip resume); over-8 payloads fail EINVAL.
@@ -1705,16 +1881,21 @@ writeUser p pd va ws = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup p mp of
     Nothing -> return Nothing
-    Just _ ->
+    Just pr ->
       if length ws > 8
         then return (Just (-22))
         else
           if null ws
             then return (Just 0)
-            else allocaArray 8 $ \buf -> do
-              mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
-              rc <- liftIO (c_user_write pd va buf (fromIntegral (length ws)))
-              return (Just rc)
+            else do
+              served <- ensureRange (procPdir pr) (procDemand pr) va (fromIntegral (length ws) * 8)
+              case served of
+                DemandNoMem -> return (Just (-12))
+                DemandMiss -> return (Just (-14))
+                DemandServed -> allocaArray 8 $ \buf -> do
+                  mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
+                  rc <- liftIO (c_user_write pd va buf (fromIntegral (length ws)))
+                  return (Just rc)
 
 {- | Read bytes from a live pid's user VA under 'userSem'. Nothing when
 reaped underfoot; 0-length reads skip the FFI; over-64K lengths fail
@@ -1725,17 +1906,22 @@ readUserBytes p pd va ln = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup p mp of
     Nothing -> return Nothing
-    Just _ ->
+    Just pr ->
       if ln > 65536
         then return (Just (Left (-22)))
         else
           if ln == 0
             then return (Just (Right []))
-            else allocaArray (fromIntegral ln) $ \buf -> do
-              rc <- liftIO (c_user_read_bytes pd va buf ln)
-              if rc /= 0
-                then return (Just (Left rc))
-                else do ws <- mapM (peekElemOff buf) [0 .. fromIntegral ln - 1]; return (Just (Right ws))
+            else do
+              served <- ensureRange (procPdir pr) (procDemand pr) va ln
+              case served of
+                DemandNoMem -> return (Just (Left (-12)))
+                DemandMiss -> return (Just (Left (-14)))
+                DemandServed -> allocaArray (fromIntegral ln) $ \buf -> do
+                  rc <- liftIO (c_user_read_bytes pd va buf ln)
+                  if rc /= 0
+                    then return (Just (Left rc))
+                    else do ws <- mapM (peekElemOff buf) [0 .. fromIntegral ln - 1]; return (Just (Right ws))
 
 {- | Write bytes to a live pid's user VA under 'userSem'. Nothing when
 reaped underfoot (caller must skip resume); over-64K payloads fail EINVAL.
@@ -1745,16 +1931,21 @@ writeUserBytes p pd va ws = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup p mp of
     Nothing -> return Nothing
-    Just _ ->
+    Just pr ->
       if length ws > 65536
         then return (Just (-22))
         else
           if null ws
             then return (Just 0)
-            else allocaArray (length ws) $ \buf -> do
-              mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
-              rc <- liftIO (c_user_write_bytes pd va buf (fromIntegral (length ws)))
-              return (Just rc)
+            else do
+              served <- ensureRange (procPdir pr) (procDemand pr) va (fromIntegral (length ws))
+              case served of
+                DemandNoMem -> return (Just (-12))
+                DemandMiss -> return (Just (-14))
+                DemandServed -> allocaArray (length ws) $ \buf -> do
+                  mapM_ (uncurry (pokeElemOff buf)) (zip [0 ..] ws)
+                  rc <- liftIO (c_user_write_bytes pd va buf (fromIntegral (length ws)))
+                  return (Just rc)
 
 {- | Read a NUL-terminated path (at most @max@ bytes) from a live pid's
 user VA under 'userSem'. Nothing when reaped underfoot.
@@ -1764,24 +1955,32 @@ readUserCString p pd va mx = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup p mp of
     Nothing -> return Nothing
-    Just _ ->
+    Just pr ->
       if mx == 0 || mx > 4096
         then return (Just (Left (-22)))
-        else allocaArray 1 $ \lp -> do
-          rc <- liftIO (c_user_strlen pd va mx lp)
-          if rc /= 0
-            then return (Just (Left rc))
-            else do
-              ln <- peek lp
-              if ln > mx
-                then return (Just (Left (-22)))
-                else allocaArray (fromIntegral ln) $ \buf -> do
-                  rc2 <- liftIO (c_user_read_bytes pd va buf ln)
-                  if rc2 /= 0
-                    then return (Just (Left rc2))
-                    else do
-                      ws <- mapM (peekElemOff buf) [0 .. fromIntegral ln - 1]
-                      return (Just (Right (map (\b -> chr (fromIntegral (b :: Word8))) ws)))
+        else do
+          -- Serve page by page only until the NUL: the string may end near
+          -- the top of a mapped page, and pre-serving the whole @max@
+          -- window would fault in (or refuse) bytes the scan never reads.
+          served <- serveCString (procPdir pr) (procDemand pr) pd va mx
+          case served of
+            DemandNoMem -> return (Just (Left (-12)))
+            DemandMiss -> return (Just (Left (-14)))
+            DemandServed -> allocaArray 1 $ \lp -> do
+              rc <- liftIO (c_user_strlen pd va mx lp)
+              if rc /= 0
+                then return (Just (Left rc))
+                else do
+                  ln <- peek lp
+                  if ln > mx
+                    then return (Just (Left (-22)))
+                    else allocaArray (fromIntegral ln) $ \buf -> do
+                      rc2 <- liftIO (c_user_read_bytes pd va buf ln)
+                      if rc2 /= 0
+                        then return (Just (Left rc2))
+                        else do
+                          ws <- mapM (peekElemOff buf) [0 .. fromIntegral ln - 1]
+                          return (Just (Right (map (\b -> chr (fromIntegral (b :: Word8))) ws)))
 
 -- | Single per-pid exit poll (no loop; the park loop re-polls).
 tryReadExitOnce :: Ptr Word64 -> H (Maybe Int)
@@ -1916,6 +2115,16 @@ procBrkGrow pid newBrk = withQSem userSem $ do
                         then do HPages.freePage pg; return (Left NoSpace)
                         else growPages pdir (lo + 4096) hi
 
+-- | The demand commitments for a dynamic image's objects, in load order.
+demandFromObjects :: [RuntimeObject] -> DemandTable
+demandFromObjects objects =
+  [ DemandObject
+      (Linker.placedObjectBase (runtimePlaced object))
+      (elfBytes (runtimeElf object))
+      (elfSegs (runtimeElf object))
+  | object <- objects
+  ]
+
 mapPreparedImage :: VM.PageMap -> PreparedImage -> H (Either LoadError MappedImage)
 mapPreparedImage pdir image = case image of
   StaticImage elf -> do
@@ -1931,6 +2140,7 @@ mapPreparedImage pdir image = case image of
           , mappedInitSteps = []
           , mappedFiniSteps = []
           , mappedLoadBounds = [(0, elfSegs elf)]
+          , mappedDemand = [DemandObject 0 (elfBytes elf) (elfSegs elf)]
           }
   DynamicImage plan objects -> do
     case mapM plannedAccessFor objects of
@@ -1940,7 +2150,7 @@ mapPreparedImage pdir image = case image of
         case mapped of
           Left err -> return (Left err)
           Right objectPages -> do
-            patched <- applyPatches pdir plan objects accesses
+            patched <- applyPatches pdir (demandFromObjects objects) plan objects accesses
             case patched of
               Left err -> do
                 cleanupPages pdir (concatMap snd objectPages)
@@ -1976,6 +2186,7 @@ mapPreparedImage pdir image = case image of
                                         [ (Linker.placedObjectBase (runtimePlaced object), elfSegs (runtimeElf object))
                                         | object <- objects
                                         ]
+                                    , mappedDemand = demandFromObjects objects
                                     }
                               )
 
@@ -1984,11 +2195,13 @@ already relocated image, written into the loader's trampoline page, and the
 stub is entered at EL0 — so every constructor instruction runs at EL0 on the
 process's own stack, not from EL1. The page is mapped once and reused by the
 exit phase; it is only rewritten while the process cannot be executing,
-because a process has a single EL0 session.
+because a process has a single EL0 session. Demand pages the phase touches
+fault and park; the post-entry drain serves them from the explicit table
+(the process is not published yet, so the park loop cannot) and resumes.
 -}
-runConstructorPhase :: VM.PageMap -> LoadBounds -> [Linker.LinkStep] -> Word64 -> Word64 -> Ptr Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
-runConstructorPhase pdir bounds steps target sp pdirPtr asid mode = do
-  prepared <- prepareConstructorPhase pdir bounds steps target sp mode
+runConstructorPhase :: VM.PageMap -> LoadBounds -> DemandTable -> [Linker.LinkStep] -> Word64 -> Word64 -> Ptr Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+runConstructorPhase pdir bounds table steps target sp pdirPtr asid mode = do
+  prepared <- prepareConstructorPhase pdir bounds table steps target sp mode
   case prepared of
     Left err -> return (Left err)
     Right () -> do
@@ -1997,16 +2210,46 @@ runConstructorPhase pdir bounds steps target sp pdirPtr asid mode = do
       -- pointers — so a constructor that calls one faults in the kernel's tables.
       liftIO (c_set_pdir pdirPtr)
       liftIO (c_enter_el0 Tramp.trampolinePage sp pdirPtr asid)
-      return (Right ())
+      drainConstructorFaults pdir table pdirPtr asid
+
+{- | Serve the faults of one constructor session to completion. The session
+runs synchronously in the loading thread, so each parked fault is served
+inline and resumed until the session exits. Anything but a served demand
+fault or a clean exit fails the load: init code that cannot run here could
+never run after publish either.
+-}
+drainConstructorFaults :: VM.PageMap -> DemandTable -> Ptr Word64 -> Word64 -> H (Either LoadError ())
+drainConstructorFaults pdir table pdirPtr asid = loop
+  where
+    loop = do
+      mCode <- tryReadExitOnce pdirPtr
+      case mCode of
+        Just _ -> return (Right ())
+        Nothing -> do
+          mReq <- takeParkedDrained pdirPtr
+          case mReq of
+            Just (ReqFault x0 va) -> do
+              r <- demandServe pdir table va
+              case r of
+                DemandServed -> do
+                  _ <- liftIO (c_resume_el0 pdirPtr asid x0)
+                  loop
+                DemandMiss -> return (Left (BadDyn "constructor fault outside LOAD"))
+                DemandNoMem -> return (Left NoSpace)
+            Just (ReqFaultKill _x0 va) -> do
+              Dmesg.dmesgLog ("constructor fault kill va=0x" ++ showHex va "")
+              return (Left (BadDyn "constructor fault kill"))
+            Just _ -> return (Left (BadDyn "constructor unexpected park"))
+            Nothing -> return (Left (BadDyn "constructor session ended"))
 
 {- | Everything a constructor phase needs *before* the process is published:
 expand the relocated addresses, bound them, map the trampoline page, and fill
 it. Kept apart from entering EL0 so a refusal is a failed load with nothing
 registered, rather than a live process that can never run.
 -}
-prepareConstructorPhase :: VM.PageMap -> LoadBounds -> [Linker.LinkStep] -> Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
-prepareConstructorPhase pdir bounds steps target sp mode = do
-  expanded <- expandConstructorSteps pdir (arrayLabel mode) bounds steps
+prepareConstructorPhase :: VM.PageMap -> LoadBounds -> DemandTable -> [Linker.LinkStep] -> Word64 -> Word64 -> Tramp.TrampolineMode -> H (Either LoadError ())
+prepareConstructorPhase pdir bounds table steps target sp mode = do
+  expanded <- expandConstructorSteps pdir table (arrayLabel mode) bounds steps
   case expanded of
     Left err -> return (Left err)
     Right calls
@@ -2022,17 +2265,22 @@ arrayLabel Tramp.BranchToEntry = "init array entry"
 arrayLabel Tramp.ExitProcess = "fini array entry"
 
 -- | Flatten planned steps into the addresses to call, in order.
-expandConstructorSteps :: VM.PageMap -> String -> LoadBounds -> [Linker.LinkStep] -> H (Either LoadError [Word64])
-expandConstructorSteps pdir label bounds steps = go steps []
+expandConstructorSteps :: VM.PageMap -> DemandTable -> String -> LoadBounds -> [Linker.LinkStep] -> H (Either LoadError [Word64])
+expandConstructorSteps pdir table label bounds steps = go steps []
   where
     go [] acc = return (Right (reverse acc))
     go (step : rest) acc = case step of
       Linker.LinkCall address -> go rest (address : acc)
-      Linker.LinkArrayAt table count -> do
-        pointers <- mapM (readConstructorPointer pdir label bounds) [table, table + 8 .. table + fromIntegral count * 8 - 8]
-        case sequence pointers of
-          Left err -> return (Left err)
-          Right addresses -> go rest (reverse addresses ++ acc)
+      Linker.LinkArrayAt tableAddr count -> do
+        served <- ensureRange pdir table tableAddr (fromIntegral count * 8)
+        case served of
+          DemandNoMem -> return (Left NoSpace)
+          DemandMiss -> return (Left (BadDyn "constructor array page unmapped"))
+          DemandServed -> do
+            pointers <- mapM (readConstructorPointer pdir label bounds) [tableAddr, tableAddr + 8 .. tableAddr + fromIntegral count * 8 - 8]
+            case sequence pointers of
+              Left err -> return (Left err)
+              Right addresses -> go rest (reverse addresses ++ acc)
 
 {- | One relocated constructor pointer. The slot it is read from is a
 pointer word and must be eight-byte aligned; the value it holds is a code
@@ -2073,15 +2321,19 @@ unmapTrampolinePage pdir = do
 ensureTrampolinePage :: VM.PageMap -> H (Either LoadError ())
 ensureTrampolinePage pdir = do
   occupied <- VM.getPage pdir Tramp.trampolinePage
-  case occupied of
+  marked <- VM.getDemandPage pdir Tramp.trampolinePage
+  case (occupied, marked) of
+    -- A demand marker under the trampoline is a loader-layout collision:
+    -- refuse instead of silently overwriting another page's commitment.
+    (_, Just _) -> return (Left (BadSegment "trampoline page collision"))
     -- The exit phase refills the init phase's page, which 'fillTrampoline' left
     -- read-only. 'prepareConstructorPhase' is the only place that may hold it
     -- writable, and it always ends read-only again, so the process is never
     -- running EL0 code with a writable stub.
-    Just info -> do
+    (Just info, _) -> do
       ok <- VM.setPage pdir Tramp.trampolinePage (Just info {VM.writable = True})
       return (if ok then Right () else Left NoSpace)
-    Nothing -> do
+    (Nothing, Nothing) -> do
       mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
       case mp of
         Nothing -> return (Left NoSpace)
@@ -2198,20 +2450,20 @@ segmentMappingLayout base segment = do
   pure (pageBase, fromIntegral delta, pages, delta)
 
 mapOneSegment :: VM.PageMap -> Word64 -> BS.ByteString -> Segment -> MapMode -> H (Either LoadError [VM.VAddr])
-mapOneSegment pdir base bytes segment mode = do
+mapOneSegment pdir base _bytes segment mode = do
   let layout = segmentMappingLayout base segment
   case layout of
     Left err -> return (Left err)
-    Right (pageBase, _delta, pages, deltaWord) ->
+    Right (pageBase, _delta, pages, _deltaWord) ->
       if pages == 0
         then return (Right [])
-        else loop pageBase pages deltaWord 0 []
+        else loop pageBase pages 0 []
   where
     writable =
       case mode of
         FinalFlags -> (segFlags segment .&. pfW) /= 0
         TemporaryRW -> True
-    loop pageBase pageCount deltaWord idx acc
+    loop pageBase pageCount idx acc
       | idx >= pageCount = return (Right acc)
       | otherwise = do
           let currentVaResult = checkedAddWord "segment virtual address" pageBase (fromIntegral (idx * 4096))
@@ -2221,56 +2473,182 @@ mapOneSegment pdir base bytes segment mode = do
               return (Left err)
             Right curVa -> do
               occupied <- VM.getPage pdir curVa
-              if isJust occupied
+              marked <- VM.getDemandPage pdir curVa
+              if isJust occupied || isJust marked
                 then do
                   cleanupPages pdir acc
                   return (Left (BadSegment "overlapping LOAD page"))
                 else do
-                  mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
-                  case mp of
-                    Nothing -> do
+                  ok <- VM.setDemandPage pdir curVa writable
+                  if not ok
+                    then do
                       cleanupPages pdir acc
                       return (Left NoSpace)
-                    Just pg -> do
-                      HPages.zeroPage pg
-                      let fileOffset = segFileOff segment
-                          fileSize = segFileSz segment
-                          pageOffset = fromIntegral (idx * 4096) :: Word64
-                          fileStart = if pageOffset <= deltaWord then 0 else pageOffset - deltaWord
-                          destinationOffset = fromIntegral (deltaWord + fileStart - pageOffset) :: Int
-                          fileStartInt = fromIntegral fileStart
-                          remainingFile = max 0 (fileSize - fileStartInt)
-                          copyLength = min (4096 - destinationOffset) remainingFile
-                      copied <-
-                        if fileOffset > maxBound - fileStartInt
-                          then return (Left (BadSegment "file offset overflow"))
-                          else copyElfPageBytes bytes pg (fileOffset + fileStartInt) destinationOffset copyLength
-                      case copied of
-                        Left err -> do
-                          HPages.freePage pg
-                          cleanupPages pdir acc
-                          return (Left err)
-                        Right () -> do
-                          ok <-
-                            VM.setPage
-                              pdir
-                              curVa
-                              ( Just
-                                  ( VM.PageInfo {
-                                      VM.physPage = toPhysPage (castPtr pg)
-                                      , VM.writable = writable
-                                      , VM.dirty = False
-                                      , VM.accessed = False
-                                      , VM.cow = False
-                                      }
-                                  )
-                              )
-                          if not ok
-                            then do
-                              HPages.freePage pg
-                              cleanupPages pdir acc
-                              return (Left NoSpace)
-                            else loop pageBase pageCount deltaWord (idx + 1) (acc ++ [curVa])
+                    else loop pageBase pageCount (idx + 1) (acc ++ [curVa])
+
+{- | Demand-paging outcome for one fault or supervisor copy.
+'DemandServed' materialized the page (or found it already mapped, after a
+lost race); 'DemandMiss' is not a demand page at all (genuine fault, falls
+through to the COW path or an 'EFAULT'); 'DemandNoMem' is budget, page, or
+map exhaustion (the process is reaped, like the COW no-memory arm).
+-}
+data DemandResult = DemandServed | DemandMiss | DemandNoMem
+  deriving (Eq, Show)
+
+-- | Every page a demand object commits, derived from its segments.
+demandObjectPages :: DemandObject -> [VM.VAddr]
+demandObjectPages object = concatMap pagesFor (demandSegs object)
+  where
+    pagesFor seg = case segmentMappingLayout (demandBase object) seg of
+      Left _ -> []
+      Right (pageBase, _, pages, _)
+        | pages <= 0 -> []
+        | otherwise -> [pageBase + fromIntegral (idx * 4096) | idx <- [0 .. pages - 1]]
+
+{- | The segment covering a page, with its page base and span delta for the
+file-byte math. Nothing when no segment of the object covers the page.
+-}
+coveringSegment :: DemandObject -> VM.VAddr -> Maybe (Segment, Word64, Word64)
+coveringSegment object vaPage =
+  case [ (seg, pb, dw)
+       | seg <- demandSegs object
+       , Right (pb, _, pgs, dw) <- [segmentMappingLayout (demandBase object) seg]
+       , pgs > 0
+       , vaPage >= pb
+       , vaPage < pb + fromIntegral pgs * 4096
+       ] of
+    (x : _) -> Just x
+    [] -> Nothing
+
+{- | Materialize one demand page with file content and the marker's final
+perms. The faulting insn retries after resume, so the page must be exactly
+what an eager mapping would have installed: zeroed, file bytes copied per
+the segment span math, mapped with the recorded writability. A presently
+mapped page is none of the pager's business: a copy-on-write sharer in
+particular must miss through to 'breakCow' instead of being resumed into
+another fault on the still-read-only page.
+-}
+demandServe :: VM.PageMap -> DemandTable -> Word64 -> H DemandResult
+demandServe pdir table va = do
+  let page = va .&. complement 4095
+  mapped <- VM.getPage pdir page
+  case mapped of
+    Just info
+      | VM.cow info -> return DemandMiss
+      | otherwise -> return DemandServed
+    Nothing -> do
+      mWritable <- VM.getDemandPage pdir page
+      case mWritable of
+        Nothing -> return DemandMiss
+        Just writable -> case [object | object <- table, isJust (coveringSegment object page)] of
+          [] -> do
+            Dmesg.dmesgLog ("demand without source va=0x" ++ showHex page "")
+            return DemandMiss
+          (object : _) -> serveOne pdir page writable object
+  where
+    serveOne pdir_ page writable object = case coveringSegment object page of
+      Nothing -> return DemandMiss
+      Just (segment, pageBase, deltaWord) -> do
+        allowed <- liftIO (c_budget_acquire (VM.fromPageMap pdir_) 1)
+        if allowed /= 1
+          then return DemandNoMem
+          else do
+            mp <- HPages.allocPage :: H (Maybe (Ptr Word8))
+            case mp of
+              Nothing -> return DemandNoMem
+              Just pg -> do
+                HPages.zeroPage pg
+                copied <- copyDemandBytes (demandBytes object) pg segment page pageBase deltaWord
+                case copied of
+                  Left _ -> do HPages.freePage pg; return DemandNoMem
+                  Right () -> do
+                    ok <-
+                      VM.setPage
+                        pdir_
+                        page
+                        ( Just
+                            ( VM.PageInfo {
+                                VM.physPage = toPhysPage (castPtr pg)
+                                , VM.writable = writable
+                                , VM.dirty = False
+                                , VM.accessed = False
+                                , VM.cow = False
+                                }
+                            )
+                        )
+                    if not ok
+                      then do HPages.freePage pg; return DemandNoMem
+                      else return DemandServed
+
+{- | One page of file bytes per the segment span math (the per-page slice of
+the old eager 'mapOneSegment' loop). Pages past the file size stay zeroed.
+-}
+copyDemandBytes :: BS.ByteString -> Ptr Word8 -> Segment -> Word64 -> Word64 -> Word64 -> H (Either LoadError ())
+copyDemandBytes bytes pg segment page pageBase deltaWord = do
+  let pageOffset = page - pageBase
+      fileOffset = segFileOff segment
+      fileSize = segFileSz segment
+      fileStart = if pageOffset <= deltaWord then 0 else pageOffset - deltaWord
+      destinationOffset = fromIntegral (deltaWord + fileStart - pageOffset) :: Int
+      fileStartInt = fromIntegral fileStart
+      remainingFile = max 0 (fileSize - fileStartInt)
+      copyLength = min (4096 - destinationOffset) remainingFile
+  if fileOffset > maxBound - fileStartInt
+    then return (Left (BadSegment "file offset overflow"))
+    else copyElfPageBytes bytes pg (fileOffset + fileStartInt) destinationOffset copyLength
+
+{- | Materialize one address's page. Used by the loader for pages it must
+touch itself (relocation targets, init/fini arrays) and by the fault path.
+-}
+ensureMaterialized :: VM.PageMap -> DemandTable -> Word64 -> H DemandResult
+ensureMaterialized = demandServe
+
+{- | Materialize every page of @[va, va+len)@. A wrapping range or an
+over-cap length misses fail-closed; the caller reports 'EFAULT'.
+-}
+ensureRange :: VM.PageMap -> DemandTable -> Word64 -> Word64 -> H DemandResult
+ensureRange pdir table va len
+  | len == 0 = return DemandServed
+  | len > 65536 = return DemandMiss
+  | otherwise = case checkedAddWord "demand range" va len of
+      Left _ -> return DemandMiss
+      Right end -> go (va .&. complement 4095) end
+  where
+    go page end
+      | page >= end = return DemandServed
+      | page > maxBound - 4096 = return DemandMiss
+      | otherwise = do
+          r <- demandServe pdir table page
+          case r of
+            DemandServed -> go (page + 4096) end
+            other -> return other
+
+{- | Serve the pages of a NUL-terminated scan one at a time, stopping at the
+first NUL the supervisor copy sees. A string ending near the top of its
+page must not drag the next (possibly unmapped, possibly uncommitted) page
+into the fault path the way a blind @[va, va+max)@ pre-serve would.
+-}
+serveCString :: VM.PageMap -> DemandTable -> Ptr Word64 -> Word64 -> Word64 -> H DemandResult
+serveCString pdir table pd va mx = allocaArray 1 $ \lp -> go lp va mx
+  where
+    go lp cur remaining
+      | remaining == 0 = return DemandServed
+      | otherwise = do
+          r <- demandServe pdir table cur
+          case r of
+            DemandServed -> do
+              rc <- liftIO (c_user_strlen pd cur remaining lp)
+              if rc == 0 || rc == -22
+                then return DemandServed
+                else do
+                  -- -14: the NUL lies past this page; advance. A later page
+                  -- outside every demand range misses fail-closed below.
+                  let pageEnd = (cur .&. complement 4095) + 4096
+                      step = min remaining (pageEnd - cur)
+                  if step == 0 || pageEnd <= cur
+                    then return DemandMiss
+                    else go lp pageEnd (remaining - step)
+            other -> return other
 
 copyElfPageBytes :: BS.ByteString -> Ptr Word8 -> Int -> Int -> Int -> H (Either LoadError ())
 copyElfPageBytes source destination sourceOffset destinationOffset count
@@ -2280,8 +2658,8 @@ copyElfPageBytes source destination sourceOffset destinationOffset count
       pokeBytes (destination `plusPtr` destinationOffset) source sourceOffset count
       return (Right ())
 
-applyPatches :: VM.PageMap -> Linker.LinkPlan -> [RuntimeObject] -> [(String, [(Word64, Linker.PageAccess)])] -> H (Either LoadError ())
-applyPatches pdir plan objects accesses = go (Linker.linkPatches plan)
+applyPatches :: VM.PageMap -> DemandTable -> Linker.LinkPlan -> [RuntimeObject] -> [(String, [(Word64, Linker.PageAccess)])] -> H (Either LoadError ())
+applyPatches pdir table plan objects accesses = go (Linker.linkPatches plan)
   where
     objectNames = Map.fromList [(Linker.placedObjectName (runtimePlaced object), ()) | object <- objects]
     accessByName = Map.fromList [(name, Set.fromList (map fst pages)) | (name, pages) <- accesses]
@@ -2299,22 +2677,29 @@ applyPatches pdir plan objects accesses = go (Linker.linkPatches plan)
               | not (Set.member pageBase pages) ->
                   return (Left (BadDyn "dynamic relocation page outside object"))
               | otherwise -> do
-                  mapped <- VM.getPage pdir pageBase
-                  case mapped of
-                    Nothing -> return (Left (BadDyn "dynamic relocation page unmapped"))
-                    Just info
-                      | not (VM.writable info) ->
-                          return (Left (BadDyn "dynamic relocation page is read-only"))
-                      | VM.cow info ->
-                          return (Left (BadDyn "dynamic relocation page is copy-on-write"))
-                      | target - pageBase > 4088 ->
-                          return (Left (BadDyn "dynamic relocation crosses page"))
-                      | otherwise -> do
-                          pokeWord64LE
-                            (fromPhysPage (VM.physPage info))
-                            (fromIntegral (target - pageBase))
-                            (Linker.patchValue patch)
-                          go rest
+                  -- The target may not be materialized yet: the loader faults
+                  -- it in before patching, like the first EL0 touch would.
+                  served <- ensureMaterialized pdir table pageBase
+                  case served of
+                    DemandNoMem -> return (Left NoSpace)
+                    DemandMiss -> return (Left (BadDyn "dynamic relocation page unmapped"))
+                    DemandServed -> do
+                      mapped <- VM.getPage pdir pageBase
+                      case mapped of
+                        Nothing -> return (Left (BadDyn "dynamic relocation page unmapped"))
+                        Just info
+                          | not (VM.writable info) ->
+                              return (Left (BadDyn "dynamic relocation page is read-only"))
+                          | VM.cow info ->
+                              return (Left (BadDyn "dynamic relocation page is copy-on-write"))
+                          | target - pageBase > 4088 ->
+                              return (Left (BadDyn "dynamic relocation crosses page"))
+                          | otherwise -> do
+                              pokeWord64LE
+                                (fromPhysPage (VM.physPage info))
+                                (fromIntegral (target - pageBase))
+                                (Linker.patchValue patch)
+                              go rest
 
 finalizeDynamic :: VM.PageMap -> [(String, [(Word64, Linker.PageAccess)])] -> [(String, [VM.VAddr])] -> H (Either LoadError ())
 finalizeDynamic pdir accesses mapped = do
@@ -2337,13 +2722,24 @@ finalizeDynamic pdir accesses mapped = do
     setAccess (address, access) = do
       mappedPage <- VM.getPage pdir address
       case mappedPage of
-        Nothing -> return (Left (BadDyn "dynamic final page unmapped"))
         Just info -> do
           let writable = access == Linker.PageRW
           ok <- VM.setPage pdir address (Just info {VM.writable = writable, VM.cow = False})
           if ok
             then return (Right ())
             else return (Left (BadDyn "dynamic final permission update failed"))
+        -- A page the loader never touched keeps its demand marker: record
+        -- the final perms on the marker so the first fault serves them.
+        Nothing -> do
+          marked <- VM.getDemandPage pdir address
+          case marked of
+            Nothing -> return (Left (BadDyn "dynamic final page unmapped"))
+            Just _ -> do
+              let writable = access == Linker.PageRW
+              ok <- VM.setDemandPage pdir address writable
+              if ok
+                then return (Right ())
+                else return (Left (BadDyn "dynamic final permission update failed"))
 
 verifyDynamicPages :: [(String, [(Word64, Linker.PageAccess)])] -> [(String, [VM.VAddr])] -> Either LoadError ()
 verifyDynamicPages accesses mapped = do

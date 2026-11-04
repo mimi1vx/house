@@ -31,6 +31,13 @@ const HOUSE_SVC_IPC_GRANT_MAP: u32 = 0x14;
 static mut HOUSE_USER_EXITED: i32 = 0;
 static mut HOUSE_USER_EXIT_CODE: i32 = 0;
 
+// Demand-pager hook (userspace.rs): 1 when `va` names a loader-committed
+// but unfaulted page in the recorded pdir. Declared once here for both
+// user-memory validators below.
+unsafe extern "C" {
+    fn house_is_demand_va(va: u64) -> i32;
+}
+
 // Per-pid EL0 exit table: fixed 64-slot array keyed by
 // pdir pointer, lock-free (single-copy 64-bit field accesses). Trap context
 // (`house_set_exit` / `house_el0_park` from `c_handle_sync`) must never take
@@ -332,7 +339,10 @@ pub(crate) unsafe fn validate_user_buffer(va: u64, len: u64) -> i32 {
     let end_page = (end - 1) & !4095;
     let mut p = start_page;
     loop {
-        if unsafe { translate_va(p) } == 0 {
+        // A demand marker is a loader-committed future page: park and let
+        // the supervisor serve it, then re-validate. Only a truly unmapped
+        // page refuses here.
+        if unsafe { translate_va(p) } == 0 && unsafe { house_is_demand_va(p) } == 0 {
             return -1;
         }
         if p == end_page {
@@ -374,6 +384,12 @@ unsafe fn validate_cstring_current(va: u64, max: u64) -> i64 {
             let wva = va + i;
             let pa = translate_va(wva);
             if pa == 0 {
+                // Demand-registered: the byte is not here yet, but the page
+                // is committed — park and let the supervisor serve it, then
+                // re-validate the string exactly.
+                if house_is_demand_va(wva) != 0 {
+                    return 0;
+                }
                 return EFAULT;
             }
             // SAFETY: `pa` is an identity-mapped RAM byte.
@@ -485,7 +501,11 @@ pub unsafe extern "C" fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64
 // window/ENOMEM. Returns 1 park / -22 unknown op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_brk_should_park(op: u32, _x0: u64) -> i32 {
-    if op == HOUSE_SVC_BRK { 1 } else { -22 }
+    if op == HOUSE_SVC_BRK {
+        1
+    } else {
+        -22
+    }
 }
 
 // SAFETY: trap context (`c_handle_sync` park gate); fork carries no user
@@ -495,7 +515,11 @@ pub unsafe extern "C" fn house_brk_should_park(op: u32, _x0: u64) -> i32 {
 // unknown op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_fork_should_park(op: u32, _x0: u64) -> i32 {
-    if op == HOUSE_SVC_FORK { 1 } else { -22 }
+    if op == HOUSE_SVC_FORK {
+        1
+    } else {
+        -22
+    }
 }
 
 // SAFETY: trap context (`c_handle_sync` park gate); wait carries only a pid
@@ -504,7 +528,11 @@ pub unsafe extern "C" fn house_fork_should_park(op: u32, _x0: u64) -> i32 {
 // decides ENOENT/EINVAL. Returns 1 park / -22 unknown op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_wait_should_park(op: u32, _x0: u64) -> i32 {
-    if op == HOUSE_SVC_WAIT { 1 } else { -22 }
+    if op == HOUSE_SVC_WAIT {
+        1
+    } else {
+        -22
+    }
 }
 
 // SAFETY: trap context (`c_handle_sync` park gate); exec carries a
@@ -519,7 +547,11 @@ pub unsafe extern "C" fn house_exec_should_park(op: u32, x0: u64) -> i32 {
         return -22;
     }
     let r = unsafe { validate_cstring_current(x0, 256) };
-    if r == 0 { 1 } else { 0 }
+    if r == 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // Byte-granular user copy against an explicit pdir for the fd ring. While a

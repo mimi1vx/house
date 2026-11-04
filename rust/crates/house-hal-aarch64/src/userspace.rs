@@ -317,7 +317,11 @@ pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
             return 0;
         }
         let ap = (d3 >> 6) & 0x3;
-        if ap == 0x3 { 1 } else { 0 }
+        if ap == 0x3 {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -524,7 +528,11 @@ pub unsafe extern "C" fn house_page_budget_try_acquire(pdir: *mut u8, n: u32) ->
         }
     };
     BUDGET_LOCK.unlock();
-    if allowed { 1 } else { 0 }
+    if allowed {
+        1
+    } else {
+        0
+    }
 }
 
 // Per-pdir syscall mask: 22 bits cover 0x00..0x14. Same shape and lock
@@ -645,7 +653,11 @@ pub unsafe extern "C" fn house_svc_allowed(pdir: *mut u8, imm: u32) -> i32 {
     SVC_MASK_LOCK.lock();
     let mask = svc_mask_get_locked(key);
     SVC_MASK_LOCK.unlock();
-    if (mask & (1u32 << imm)) != 0 { 1 } else { 0 }
+    if (mask & (1u32 << imm)) != 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // TLB shootdown acknowledgements: `house_tlb_shootdown` stamps a generation,
@@ -736,6 +748,60 @@ pub unsafe extern "C" fn house_tlb_shootdown_ack(seq: u32) {
         let mut me: u64;
         core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags));
         TLB_SD_ACK[core_slot(me)].store(seq, Ordering::Release);
+    }
+}
+
+/// Demand-pager marker (planted by `H.VirtualMemory`, consumed here and by
+/// the svc.rs park gates): an L3 descriptor with Valid clear, magic `0xDE`
+/// in bits[63:56], and bit1 carrying the final writable bit the supervisor
+/// serve applies. Hardware ignores invalid descriptors outright, and the
+/// `(valid, table-shape, buddy-owned)` checks in `userTable`/`getPage`
+/// treat markers as unmapped — only the fault and validator paths below
+/// interpret them.
+pub(crate) const DEMAND_MAGIC: u64 = 0xDE << 56;
+const DEMAND_MAGIC_MASK: u64 = 0xFF00_0000_0000_0000;
+pub(crate) const DEMAND_WRITABLE: u64 = 1 << 1;
+
+#[inline]
+pub(crate) fn is_demand_desc(d3: u64) -> bool {
+    d3 & 1 == 0 && (d3 & DEMAND_MAGIC_MASK) == DEMAND_MAGIC
+}
+
+/// Trap-side validator hook for the svc.rs park gates: `1` when `va` names
+/// a demand-registered but unfaulted page in the recorded pdir, else `0`.
+/// Markers are loader-committed future pages, so the gates park (the
+/// supervisor serves the page, then re-validates exactly) instead of
+/// refusing with a spurious `EFAULT`.
+///
+/// # Safety
+///
+/// Reads the recorded pdir; caller must guarantee EL1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_is_demand_va(va: u64) -> i32 {
+    let vap = va & !4095;
+    unsafe {
+        let pdir = core::ptr::read_volatile(&raw const RECORDED_PDIR);
+        if pdir.is_null() || (pdir as usize & 4095) != 0 {
+            return 0;
+        }
+        let l0 = pdir as *mut u64;
+        let d0 = *l0.add(((vap >> 39) & 0x1FF) as usize);
+        if d0 & 1 == 0 {
+            return 0;
+        }
+        let l1 = (d0 & !0xFFF) as *mut u64;
+        let d1 = *l1.add(((vap >> 30) & 0x1FF) as usize);
+        if d1 & 1 == 0 {
+            return 0;
+        }
+        let l2 = (d1 & !0xFFF) as *mut u64;
+        let d2 = *l2.add(((vap >> 21) & 0x1FF) as usize);
+        if d2 & 1 == 0 {
+            return 0;
+        }
+        let l3 = (d2 & !0xFFF) as *mut u64;
+        let d3 = *l3.add(((vap >> 12) & 0x1FF) as usize);
+        if is_demand_desc(d3) { 1 } else { 0 }
     }
 }
 
@@ -862,6 +928,13 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             buddy_free_page(page);
             return 0;
         }
+        // Demand-registered but unfaulted: the supervisor materializes file
+        // content with final perms (Haskell `demandServe`) and resumes the
+        // faulting insn, so EL1 must not zero-map here.
+        if is_demand_desc(d3) {
+            buddy_free_page(page);
+            return 2;
+        }
         let desc = ((page as u64) & !0xFFF)
             | PTE_VALID
             | PTE_TABLE
@@ -884,6 +957,16 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demand_desc_recognized() {
+        assert!(is_demand_desc(DEMAND_MAGIC));
+        assert!(is_demand_desc(DEMAND_MAGIC | DEMAND_WRITABLE));
+        assert!(!is_demand_desc(0));
+        assert!(!is_demand_desc(1 | (1 << 10) | (3 << 6)));
+        assert!(!is_demand_desc(DEMAND_MAGIC | 1));
+        assert!(!is_demand_desc(0xDF00_0000_0000_0000));
+    }
 
     #[test]
     fn slot_folds_aff0_onto_32() {

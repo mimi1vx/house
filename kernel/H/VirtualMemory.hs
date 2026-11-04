@@ -9,6 +9,12 @@ module H.VirtualMemory (
   PageInfo (..),
   setPage,
   getPage,
+  demandMagic,
+  isDemandDesc,
+  demandWritable,
+  setDemandPage,
+  getDemandPage,
+  clearDemandPage,
   toPageMap,
   fromPageMap, -- not for public use
 )
@@ -46,6 +52,7 @@ allocPageMap :: H (Maybe PageMap)
 
 {-# DEPRECATED freePageMap "freePageMap does nothing" #-}
 freePageMap :: PageMap -> H ()
+freePageMap _ = return () -- nop; pdirs are freed explicitly via Process.freePDir
 
 {- |
 Page map entries are indexed by valid, aligned, virtual addresses.  The
@@ -105,6 +112,31 @@ bSwDirty, bSwAccessed, bSwCow :: Int
 bSwDirty = 55
 bSwAccessed = 56
 bSwCow = 57
+
+{- | Demand-pager marker (house-q0g.11): an L3 descriptor the loader plants
+for a 'PT_LOAD' page whose content is not yet materialized. 'Valid' stays
+clear so hardware faults on first touch and the 'userTable'/'getPage' shape
+checks keep treating the page as unmapped; bits[63:56] carry the magic and
+bit1 the final writable bit the supervisor serve applies. The Rust fault
+path ('house_handle_user_fault') parks FAULT on a marker instead of
+zero-mapping, and the svc.rs park-gate validators park instead of refusing
+'EFAULT'. Markers live and die with their L3 tables: 'freePDir' frees
+marker-bearing tables wholesale, while 'freeUserPages' clears them so an
+exec replacement never inherits another image's commitments.
+-}
+demandMagic, demandMagicMask, demandWritableBit :: Word64
+demandMagic = 0xDE `shiftL` 56
+demandMagicMask = 0xFF `shiftL` 56
+demandWritableBit = 1 `shiftL` 1
+
+demandDesc :: Bool -> Word64
+demandDesc writable = demandMagic .|. (if writable then demandWritableBit else 0)
+
+isDemandDesc :: Word64 -> Bool
+isDemandDesc d = (d .&. 1) == 0 && (d .&. demandMagicMask) == demandMagic
+
+demandWritable :: Word64 -> Bool
+demandWritable d = (d .&. demandWritableBit) /= 0
 
 mAddress :: Word64
 mAddress = 0x0000FFFFFFFFF000 -- OA [47:12]
@@ -277,6 +309,44 @@ setPage (PageMap l0) vaddr (Just pinfo) | validVAddr vaddr =
 setPage _ vaddr _ | not (validVAddr vaddr) = return False
 setPage _ _ _ = return False
 
+{- | Walk (allocating missing intermediate tables) to the L3 table for a
+user address. 'Nothing' on an out-of-window address or page exhaustion.
+-}
+ensureL3 :: PDir -> VAddr -> H (Maybe Table)
+ensureL3 l0 vaddr
+  | not (validVAddr vaddr) = return Nothing
+  | otherwise = do
+      d0 <- peekElemOff l0 (l0Index vaddr)
+      ml1 <- case tableFromDesc d0 of
+        Just t -> return (Just t)
+        Nothing -> do
+          m <- P.allocPage
+          case m of
+            Nothing -> return Nothing
+            Just t -> do P.zeroPage t; pokeElemOff l0 (l0Index vaddr) (descFromTable t); return (Just t)
+      case ml1 of
+        Nothing -> return Nothing
+        Just l1 -> do
+          d1 <- peekElemOff l1 (l1Index vaddr)
+          ml2 <- case tableFromDesc d1 of
+            Just t -> return (Just t)
+            Nothing -> do
+              m <- P.allocPage
+              case m of
+                Nothing -> return Nothing
+                Just t -> do P.zeroPage t; pokeElemOff l1 (l1Index vaddr) (descFromTable t); return (Just t)
+          case ml2 of
+            Nothing -> return Nothing
+            Just l2 -> do
+              d2 <- peekElemOff l2 (l2Index vaddr)
+              case tableFromDesc d2 of
+                Just t -> return (Just t)
+                Nothing -> do
+                  m <- P.allocPage
+                  case m of
+                    Nothing -> return Nothing
+                    Just t -> do P.zeroPage t; pokeElemOff l2 (l2Index vaddr) (descFromTable t); return (Just t)
+
 allocPageMap =
   do
     mL0 <- P.allocPage
@@ -304,7 +374,77 @@ allocPageMap =
                 -- initPDir deferred to Process.runElf after mapping segments, to keep TTBR0 kernel during map
                 return (Just pm)
 
-freePageMap _ = return () -- nop; pdirs are freed explicitly via Process.freePDir
+{- | Plant a demand marker for one page-aligned user address with its final
+writable bit. Refuses an out-of-window address, a presently mapped page,
+or page exhaustion. Overwriting an existing marker updates its perms.
+-}
+setDemandPage :: PageMap -> VAddr -> Bool -> H Bool
+setDemandPage (PageMap l0) vaddr writable
+  | validVAddr vaddr && vaddr .&. 4095 == 0 = do
+      ml3 <- ensureL3 l0 vaddr
+      case ml3 of
+        Nothing -> return False
+        Just l3 -> do
+          d3 <- peekElemOff l3 (l3Index vaddr)
+          case descToPageInfo d3 of
+            -- A mapped page is never demand-registered over.
+            Just _ -> return False
+            Nothing -> do
+              pokeElemOff l3 (l3Index vaddr) (demandDesc writable)
+              invalidate l0 vaddr
+              return True
+setDemandPage _ _ _ = return False
+
+{- | Read back a demand marker's final writable bit. 'Nothing' for an
+out-of-window or unaligned address, a mapped page, or no marker.
+-}
+getDemandPage :: PageMap -> VAddr -> H (Maybe Bool)
+getDemandPage (PageMap l0) vaddr
+  | validVAddr vaddr && vaddr .&. 4095 == 0 = do
+      d0 <- peekElemOff l0 (l0Index vaddr)
+      case tableFromDesc d0 of
+        Nothing -> return Nothing
+        Just l1 -> do
+          d1 <- peekElemOff l1 (l1Index vaddr)
+          case tableFromDesc d1 of
+            Nothing -> return Nothing
+            Just l2 -> do
+              d2 <- peekElemOff l2 (l2Index vaddr)
+              case tableFromDesc d2 of
+                Nothing -> return Nothing
+                Just l3 -> do
+                  d3 <- peekElemOff l3 (l3Index vaddr)
+                  case descToPageInfo d3 of
+                    Just _ -> return Nothing
+                    Nothing -> return (if isDemandDesc d3 then Just (demandWritable d3) else Nothing)
+getDemandPage _ _ = return Nothing
+
+-- | Clear a demand marker, if present. A mapped page is never touched.
+clearDemandPage :: PageMap -> VAddr -> H Bool
+clearDemandPage (PageMap l0) vaddr
+  | validVAddr vaddr && vaddr .&. 4095 == 0 = do
+      d0 <- peekElemOff l0 (l0Index vaddr)
+      case tableFromDesc d0 of
+        Nothing -> return True
+        Just l1 -> do
+          d1 <- peekElemOff l1 (l1Index vaddr)
+          case tableFromDesc d1 of
+            Nothing -> return True
+            Just l2 -> do
+              d2 <- peekElemOff l2 (l2Index vaddr)
+              case tableFromDesc d2 of
+                Nothing -> return True
+                Just l3 -> do
+                  d3 <- peekElemOff l3 (l3Index vaddr)
+                  case descToPageInfo d3 of
+                    Just _ -> return True
+                    Nothing
+                      | isDemandDesc d3 -> do
+                          pokeElemOff l3 (l3Index vaddr) 0
+                          invalidate l0 vaddr
+                          return True
+                      | otherwise -> return True
+clearDemandPage _ _ = return False
 
 foreign import ccall unsafe "current_pdir" currentPDirIO :: IO PDir
 

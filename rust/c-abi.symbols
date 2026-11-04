@@ -180,6 +180,7 @@ house_irq_pop
 house_irq_push
 house_irq_ring_drops
 house_is_cow_page
+house_is_demand_va
 house_is_exited
 house_is_ro_page
 house_isr_active

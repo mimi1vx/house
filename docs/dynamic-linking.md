@@ -57,7 +57,7 @@ the outcome.
 | 17 | Linker `maxObjectPages` 64 | 4,972 pages for `libHSghc-internal` | cap-raise | open — `house-q0g.1` |
 | 18 | Linker `maxTotalPages` 256 | 6,526 loaded pages for the closure | cap-raise | open — `house-q0g.1` |
 | 19 | 4 GiB `maxVAddr` user window | 25.5 MiB ≈ 0.6% of the window | **not binding** | no work needed |
-| 20 | whole-`PT_LOAD` mapping, no demand pager | 25.5 MiB resident per mapping process | feature | open — `house-q0g.11`, `house-q0g.12` |
+| 20 | whole-`PT_LOAD` mapping, no demand pager | 25.5 MiB resident per mapping process | feature | landed — `house-q0g.11` (fault-driven serve, `house-q0g.12` numbers below) |
 
 Row 0 is decisive because it is neither a bound nor a missing feature: a Linux
 `svc #0` arrives as `svc_imm = 0`, which the house table defines as
@@ -163,6 +163,59 @@ at 16 MiB.
   143 — `house-q0g.1`.
 - Linker `maxTotalPages` 256 → 1024 admits main + `libm` (146) and single
   `base` (660) but refuses the full stock 6,526-page closure — `house-q0g.1`.
+
+## house-q0g.11 demand pager (2026-11-04)
+
+`PT_LOAD` pages are committed at load as PTE markers (valid-clear L3 desc,
+magic `0xDE` in bits[63:56], bit1 = final writable) instead of mapped
+(`H.VirtualMemory.setDemandPage`, the first deliberate touch of
+`H.VirtualMemory`/`H.Pages` by any dynamic slice). First touch faults: EL1
+(`house_handle_user_fault` returns 2) parks FAULT and the supervisor
+materializes exactly that page from the retained object bytes with the
+marker perms, then resumes the faulting insn. Permission faults still kill
+(non-COW RO store parks KILL, unchanged); COW still breaks in Haskell
+(a present page is never claimed as served, so `breakCow` is not starved).
+Budgets draw from the shared 10%-of-buddy cap at serve time; setPage paths
+keep their current-pdir invalidate (ASID/TLBI discipline unchanged, no new
+shootdown needed for fresh pages). Grant-list and syscall-mask semantics
+are untouched (both keyed by pdir, inherited/cleared as before).
+
+Loader-touched pages (relocation targets, init/fini arrays) are served
+eagerly at load so the loader never faults; supervisor user-copies serve
+ranges first, except NUL-terminated scans, which serve page-by-page to the
+NUL so a string ending near the top of its page never drags the next page
+in. Markers ride fork (replanted in the child with the parent's current
+perms; materialized pages share COW as before) and die on exec
+(`freeUserPages` clears them) and reap (tables freed wholesale). Load-time
+M3.1 sharing is preserved on the eager subset, so `loaderrefs` still
+witnesses sharing synchronously; serve-time cross-process sharing of
+faulted pages is a follow-up (each process still materializes its own
+touched set privately).
+
+## house-q0g.12 RAM-per-process, N=2 (2026-11-04, re-measured)
+
+Geometry: `loaderrefs` (two concurrent `/bin/hello-dyn`, waited to exit
+without reaping, then counted via a page-table walk), hvf and tcg, 512M,
+smp2. Counts are mapped user pages (stack included) per live process.
+
+- Eager baseline (pre-pager, from the initramfs objects): 10 `PT_LOAD`
+  pages per closure (main 3 + `libc-house.so.0` 4 + `libmid-house.so.0` 3)
+  + 1 stack = **11 pages = 44 KiB resident per mapping process**.
+- Pager: **5 mapped pages per process (20 KiB), both processes, both
+  accelerators** (`loaderrefs ok pages=Just 5/Just 5` on hvf and tcg).
+- Saving: **6 pages (24 KiB, 55%) per process** for this closure.
+- Cost kept per process, freed on reap: the retained object bytes, bound
+  Σ filesz = 4,739 + 8,804 + 4,664 = **18,207 B (~18 KiB)** in the Haskell
+  heap (not buddy-resident). No cross-process byte sharing yet — the bound
+  scales with file size, so a stock-scale closure would want the shared
+  page-cache follow-up; the house fixtures stay single-digit KiB.
+- No leak: buddy `105944/105952` before and after consecutive runs
+  (±1 transient, non-accumulating across three runs); `cowLiveCount` and
+  ASID slots return to baseline (asserted by the verb itself).
+
+The 25.5 MiB row-20 figure stays as the stock-bindist reference (that
+closure is not loadable — row 0): the runnable `house-libc` closure above
+is what the pager was measured against.
 
 ## house-q0g.3 B2 outcome (2026-11-04)
 

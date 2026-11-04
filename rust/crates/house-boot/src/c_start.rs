@@ -226,14 +226,16 @@ pub unsafe extern "C" fn c_handle_sync(
             && (HOUSE_USER_VA_MIN..=HOUSE_USER_VA_MAX).contains(&far)
         {
             // SAFETY: house_handle_user_fault allocates via buddy, sets PTE, uses dsb/isb.
-            // 1 paged, -12 out of memory and -28 budget exhausted (both park
+            // 1 paged, 2 demand-registered (park for the supervisor to serve
+            // file content + final perms, then resume the faulting insn),
+            // -12 out of memory and -28 budget exhausted (both park
             // for the supervisor to reap), 0 not ours.
             let handled = unsafe { house_handle_user_fault(far) };
             if handled == 1 {
                 unsafe { core::arch::asm!("dsb ish; isb", options(nostack, preserves_flags)) };
                 return elr;
             }
-            if (handled == -12 || handled == -28) && !gpr.is_null() {
+            if (handled == 2 || handled == -12 || handled == -28) && !gpr.is_null() {
                 let sp_el0: u64;
                 // SAFETY: mrs sp_el0 at EL1 handler.
                 unsafe {
@@ -398,22 +400,46 @@ pub unsafe extern "C" fn c_handle_sync(
                         1
                     } else if svc_imm == 0x03 {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
+                        let x0 = unsafe {
+                            if gpr.is_null() {
+                                0
+                            } else {
+                                *gpr.add(0)
+                            }
+                        };
                         // SAFETY: lock-free validator, no memory touch.
                         unsafe { house_brk_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x08 {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
+                        let x0 = unsafe {
+                            if gpr.is_null() {
+                                0
+                            } else {
+                                *gpr.add(0)
+                            }
+                        };
                         // SAFETY: lock-free validator, no memory touch.
                         unsafe { house_fork_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x09 {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
+                        let x0 = unsafe {
+                            if gpr.is_null() {
+                                0
+                            } else {
+                                *gpr.add(0)
+                            }
+                        };
                         // SAFETY: lock-free validator, no memory touch.
                         unsafe { house_wait_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x0B {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
+                        let x0 = unsafe {
+                            if gpr.is_null() {
+                                0
+                            } else {
+                                *gpr.add(0)
+                            }
+                        };
                         // SAFETY: lock-free validator, page-table reads only.
                         unsafe { house_exec_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x04

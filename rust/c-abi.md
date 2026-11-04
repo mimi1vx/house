@@ -195,6 +195,7 @@ demand pager + `mprotect` RO perm faults + `munmap` translation faults,
 | `house-hal-aarch64` | `house_tlb_shootdown_ack` | `void house_tlb_shootdown_ack(uint32_t seq)` | `userspace.rs` (new: report that this core has completed a shootdown covering `seq`; a SGI-1 handler calls it once its own flush is visible, so a requester that sees the ack knows the peer is past the invalidation) |
 | `house-hal-aarch64` | `house_is_ro_page` | `int house_is_ro_page(uint64_t va)` | `userspace.c` |
 | `house-hal-aarch64` | `house_is_cow_page` | `int house_is_cow_page(uint64_t va)` | `userspace.rs` (new: SW bit-57 COW mark on an RO L3 page, `1` COW / `0` otherwise; trap-safe PTE read for the FAULT park gate) |
+| `house-hal-aarch64` | `house_is_demand_va` | `int house_is_demand_va(uint64_t va)` | `userspace.rs` (new: `1` when `va` names a demand-registered but unfaulted L3 marker in the recorded pdir; the svc.rs park-gate validators park instead of refusing `EFAULT` on such pages, and the supervisor serves, then re-validates) |
 | `house-hal-aarch64` | `house_page_budget_reset` | `void house_page_budget_reset(void *pdir)` | `userspace.rs` (new: reset a root's demand-page count to zero for a new incarnation — register and exec reuse the same root, so the 10%-of-buddy cap restarts) |
 | `house-hal-aarch64` | `house_page_budget_try_acquire` | `int house_page_budget_try_acquire(void *pdir, uint32_t n)` | `userspace.rs` (new: charge `n` pages to a root's budget — `1` allowed and counted, `0` at cap; the Haskell brk/COW paths share one cap with the Rust demand pager) |
 | `house-hal-aarch64` | `house_svc_mask_reset` | `void house_svc_mask_reset(void *pdir)` | `userspace.rs` (new: reset a root syscall mask to full for spawn/init) |
@@ -202,7 +203,7 @@ demand pager + `mprotect` RO perm faults + `munmap` translation faults,
 | `house-hal-aarch64` | `house_svc_mask_get` | `uint32_t house_svc_mask_get(void *pdir)` | `userspace.rs` (new: read a root mask for fork inherit) |
 | `house-hal-aarch64` | `house_svc_allowed` | `int house_svc_allowed(void *pdir, uint32_t imm)` | `userspace.rs` (new: per-pdir gate at the park candidate check — `1` allowed, `0` takes the inline-ENOSYS path) |
 | `house-hal-aarch64` | `house_tlb_shootdown` | `void house_tlb_shootdown(uint64_t vaddr)` | `userspace.c` (now also stamps a generation, sends SGI 1 to every online peer, and waits for each peer's ack to reach that generation, so the caller cannot reuse a VA while a peer is still running the translation it invalidated) |
-| `house-hal-aarch64` | `house_handle_user_fault` | `int house_handle_user_fault(uint64_t far)` | `userspace.c` (the L0/L1/L2 create-and-link walk runs under a walk lock, so two cores cannot both allocate and link the same missing level) |
+| `house-hal-aarch64` | `house_handle_user_fault` | `int house_handle_user_fault(uint64_t far)` | `userspace.c` (the L0/L1/L2 create-and-link walk runs under a walk lock, so two cores cannot both allocate and link the same missing level; a demand-marker L3 returns `2` so `c_handle_sync` parks FAULT for the supervisor to serve instead of zero-mapping) |
 | `house-hal-aarch64` | `min_user_addr` | `void *min_user_addr` | `userspace.c` |
 | `house-hal-aarch64` | `max_user_addr` | `void *max_user_addr` | `userspace.c` |
 

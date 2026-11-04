@@ -647,6 +647,7 @@ loop = do
     handleLoaderRefs imagePath = do
       r <- runH $ do
         baseline <- U.cowLiveCount
+        shareBase <- U.cowShareTotal
         mBytes <- FS.vfsRead FS.defaultNamespace imagePath
         case mBytes of
           Left e -> return (Left (showFsError e))
@@ -663,16 +664,35 @@ loop = do
                       _ <- U.killPid pidA
                       return (Left (toExecError le))
                     Right pidB -> do
-                      during <- U.cowLiveCount
+                      -- Demand-pager residency (house-q0g.12): wait for both
+                      -- sessions to exit (without reaping), so both touched
+                      -- sets are final while both page maps are still alive.
+                      -- Sharing is asserted on the monotonic share-event
+                      -- delta, not the live level: the level still holds
+                      -- transient pid1-fork shares at boot, which reap
+                      -- mid-verb and would flake a level delta (seen on tcg).
+                      -- The leak half stays a level check, one-sided so a
+                      -- concurrent init reap cannot fail it either.
+                      -- Counts ride along on the ok line; the gate still
+                      -- matches the "loaderrefs ok" prefix.
+                      settled <- U.waitBothExited pidA pidB
+                      pagesA <- U.procPageCount pidA
+                      pagesB <- U.procPageCount pidB
                       codeA <- U.waitPid pidA
                       codeB <- U.waitPid pidB
                       after <- U.cowLiveCount
-                      if during > baseline && codeA == 0 && codeB == 0 && after == baseline
-                        then return (Right ())
-                        else return (Left ("refs=" ++ show baseline ++ "->" ++ show during ++ "->" ++ show after ++ " exits=" ++ show (codeA, codeB)))
+                      shareEnd <- U.cowShareTotal
+                      if settled && shareEnd > shareBase && after <= baseline && codeA == 0 && codeB == 0
+                        then return (Right (pagesA, pagesB))
+                        else do
+                          -- A settle timeout leaves live processes behind;
+                          -- reap them so a failed measure leaks nothing.
+                          _ <- U.killPid pidA
+                          _ <- U.killPid pidB
+                          return (Left ("refs=" ++ show baseline ++ "->" ++ show after ++ " shares=" ++ show shareBase ++ "->" ++ show shareEnd ++ " settled=" ++ show settled ++ " exits=" ++ show (codeA, codeB)))
       case r of
         Left e -> withCString ("loaderrefs fail " ++ e ++ "\n") c_uart_puts
-        Right () -> withCString "loaderrefs ok\n" c_uart_puts
+        Right (pa, pb) -> withCString ("loaderrefs ok pages=" ++ show pa ++ "/" ++ show pb ++ "\n") c_uart_puts
     handleForktest = do
       r <- runH $ do
         mBytes <- FS.vfsRead FS.defaultNamespace "/bin/hello"

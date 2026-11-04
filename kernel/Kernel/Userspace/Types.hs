@@ -12,6 +12,8 @@ module Kernel.Userspace.Types (
   SharedObject (..),
   StopAck,
   Process (..),
+  DemandTable,
+  DemandObject (..),
   pidNext,
   procMap,
   procExitMap,
@@ -20,6 +22,7 @@ module Kernel.Userspace.Types (
 )
 where
 
+import Data.ByteString (ByteString)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word64)
@@ -28,6 +31,7 @@ import H.Mutable (Ref, newRef)
 import H.PhysicalMemory (PhysPage)
 import H.Unsafe (unsafePerformH)
 import H.VirtualMemory (PageMap, VAddr)
+import Kernel.Userspace.Loader (Segment)
 
 newtype Pid = Pid Int
   deriving (Eq, Ord, Show)
@@ -56,6 +60,27 @@ data Process = Process {
   , procEntry :: VAddr
   , procBrk :: VAddr
   , procSharedObjects :: [SharedObject]
+  , procDemand :: DemandTable
+  }
+  deriving (Eq, Show)
+
+{- | Demand-paging commitments for one process (house-q0g.11): the 'PT_LOAD'
+file content backing each not-yet-materialized page. The loader plants one
+marker per 'PT_LOAD' page ('H.VirtualMemory.setDemandPage') instead of
+mapping it; the first touch faults, parks, and the supervisor materializes
+exactly that page from the retained object bytes with the marker's final
+perms, then resumes the faulting insn. Object bytes stay retained per
+process and are dropped with the 'Process' record on reap; the bound is the
+sum of the image's file sizes (house fixtures: single-digit KiB). A page
+the loader itself must touch (relocation targets, init/fini arrays) is
+materialized eagerly at load, so everything else faults in.
+-}
+type DemandTable = [DemandObject]
+
+data DemandObject = DemandObject {
+  demandBase :: Word64
+  , demandBytes :: ByteString
+  , demandSegs :: [Segment]
   }
   deriving (Eq, Show)
 
