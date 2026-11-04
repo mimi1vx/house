@@ -107,9 +107,9 @@ stock bindist closure: C7 measured that glibc's `libc.so.6` is not loadable by
 this loader regardless of loader work, because its own `R_AARCH64_ABS64`
 targets `_rtld_global`, which asserts a glibc dynamic loader's internal state.
 
-## Deferred backlog: copy relocations, lazy binding, `dlopen` (`house-q0g.10`, 2026-11-04)
+## Deferred backlog: copy relocations, lazy binding, `dlopen`, TLS, IFUNC, version selection (`house-q0g.10`, `house-q0g.6`, `house-q0g.7`, `house-q0g.8`; 2026-11-04)
 
-All three are deliberate non-goals, not scoped slices. Line numbers below are
+All six are deliberate non-goals, not scoped slices. Line numbers below are
 as verified 2026-11-04 (the table's 2026-09-27 numbers have drifted).
 
 **Copy relocations: non-goal.** `R_AARCH64_COPY` (1024) has no relocation
@@ -158,16 +158,71 @@ execution, dependency pinning), none of it started and none of it M4.
 Revisit condition: a named consumer plus that slice; until then the stubs
 stay failing-closed.
 
+**TLS: non-goal — nothing in-branch carries it, and the refusal runs
+first.** The staged main links `ghc -O0 -dynamic -fPIE -pie` with no
+`-threaded` (`scripts/mk-house-image.sh:294`), so the manifest's main needs
+`libHSrts-1.0.3`, never `libHSrts_thr`; `house-libc` declares no
+thread-local storage (no `thread_local!` anywhere under
+`rust/crates/house-libc/src/` — `threads/tls.rs` is resolver text only,
+`__tlsdesc_static` / `__aarch64_tlsdesc_resolve`, emitting no TLS data).
+Measured 2026-11-04 across every house-built object (12 objects: `build-b`,
+`staging`, `root`, `house-image/house-libs`, `proto` `libc-house.so.0`
+flavours): zero `PT_TLS` segments, zero TLS-range relocations, zero `VER*`
+tags — reloc types are `JUMP_SLOT`, `ABS64`, `RELATIVE` only. The three
+refusal sites still fail closed: `PT_TLS` (`Loader.hs:740-741`), `DT_TLS_*`
+(`Loader.hs:938`, with TLS-adjacent tags pinned in `rejectedDynTags`,
+`Main.hs:2932-2939`), and TLS-range relocs (`Loader.hs:1241`). The `PT_TLS`
+check runs before any field validation, so malformed `p_memsz`/`p_filesz`
+mismatch, out-of-window `p_vaddr`, or wrong-alignment variants resolve
+`TlsUnsupported` by construction, never past it. Vectors `elfExecTls` /
+`elfDynTls` / `elfTls` (`Main.hs:1330-1331,1569,3171-3172`), mirrored by
+`repack.py:259,376,522` and gated host-side by
+`scripts/dynamic-elf-check.sh:162,178`. Revisit only if a `-threaded` RTS
+or thread-local `house-libc` storage were ever staged — which is the
+feature, not a gate.
+
+**IFUNC: non-goal — the only IRELATIVE in the measured world is glibc's.**
+The 2 `R_AARCH64_IRELATIVE` relocs live in stock `libc.so.6` (gate-table row
+12 reference), which is unloadable twice over — row 0 (Linux `svc #0`
+mis-dispatch) plus C7's `_rtld_global` finding — so no staged load can
+reach them. The house-built closure measured above carries zero `IRELATIVE`;
+the refusal (`Loader.hs:1242`, mirrored `repack.py:256-257`) plus the
+`elfM2Irelative` vector (`Main.hs:1383,3121-3122`) stays as the fail-closed
+record. A resolver-via-trampoline would need a new exec-path re-entry (the
+C5 `Trampoline.hs` precedent supervises EL0 execution during a load, but no
+`svc` re-enters `linkDynamic` — the same missing host primitive as
+`dlopen`), and building it buys nothing while `house-libc` exports no
+IFUNC. Revisit only with a named `house-libc` IFUNC consumer plus that
+re-entry slice.
+
+**Version selection: non-goal — versions are gone under provenance (ii).**
+C8 honours and bounds-checks `DT_VERSYM` and records the index but
+deliberately does not select on it; `DT_VERNEED` / `DT_VERDEF` stay
+tolerated skips (`Loader.skipDynTag`, reason `ver`, `Loader.hs:426`;
+`Loader.skippableDynTags`, `Loader.hs:434`). The gap C8 named — a single
+provider carrying a different version than the reference asks for — is empty
+in-branch: the B2 manifest records `verneed=0,versym=0` for the rebuilt prim
+and `libc-house.so.0` (`scripts/mk-house-image.sh:475-476`), and the
+on-disk measurement above finds zero `VERSYM` / `VERDEF` / `VERNEED` tags in
+every house-built object, so every symbol reads `VER_NDX_GLOBAL` (vectors
+`Main.hs:1366-1367`). With no versioned symbol staged, no mismatch case
+exists for the duplicate-export refusal (`Linker.hs:411`) to miss —
+ambiguity and mismatch are both `Left` by construction, under the same
+single-provider invariant as `house-q0g.9`. Revisit only if a versioned DSO
+were ever staged, which contradicts the `--hash-style=sysv` unversioned
+rebuild recipe.
+
 ## What is unstarted
 
-Whole-`PT_LOAD` mapping is the recorded accepted M3 cost. The demand pager,
-version *selection*, weak symbols as *reference* semantics, TLS, copy
-relocations, IFUNC, lazy binding and `dlopen` are each unstarted — the M4
-success box lists them as "remain open", each with "unstarted" in the Later
-section. Copy relocations, lazy binding and `dlopen` are disposed above
-(`house-q0g.10` deferral section); the rest await their beads.
-`house-q0g.10` exists to give each a scope or an explicit
-deferral.
+Whole-`PT_LOAD` mapping was the recorded accepted M3 cost (since retired by
+the `house-q0g.11` demand pager). Of the M4 success box's "remain open"
+list, copy relocations, lazy binding and `dlopen` are disposed above
+(`house-q0g.10` deferral paragraphs), as are TLS, IFUNC and version
+*selection* (the `house-q0g.6`, `house-q0g.7`, `house-q0g.8` paragraphs in
+the same section); weak symbols as *reference* semantics landed
+(`house-q0g.9`), and GNU hash awaits `house-q0g.5` — worth taking only if
+provenance (ii) is not the chosen route, per that bead. `house-q0g.10`
+exists to give each a scope or an explicit deferral.
 
 ## Notes worth keeping
 
