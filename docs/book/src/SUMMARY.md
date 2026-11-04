@@ -27,3 +27,4 @@
 - [Shared page ownership](design/shared-page-ownership.md)
 - [TLB shootdown protocol](design/tlb-shootdown-protocol.md)
 - [Linux-ABI syscall emulation (M4 row 0 proposal)](design/linux-abi-syscalls.md)
+- [Gate flake policy](design/gate-flake-policy.md)

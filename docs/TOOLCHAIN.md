@@ -73,6 +73,11 @@ single source `rust/toolchain.lock` `miri_channel`).
   pass `virtio-mmio-transports=`, so they work on Ubuntu noble's QEMU 8.2 too;
   whether they move into `check-tcg` is a gate-suite decision, not a QEMU-version
   one.
+- Gate flake policy (`docs/design/gate-flake-policy.md`): a gate needing a
+  second stabilization commit is a kernel bug report, not a harness tweak;
+  probes never emit UART in a retry loop and a harness never deletes a
+  prompt wait (it converts it to `house_prompt`); a red gate is triaged
+  product-vs-test with the classification recorded in the fixing commit.
 
 ## Design notes
 
