@@ -317,11 +317,7 @@ pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
             return 0;
         }
         let ap = (d3 >> 6) & 0x3;
-        if ap == 0x3 {
-            1
-        } else {
-            0
-        }
+        if ap == 0x3 { 1 } else { 0 }
     }
 }
 
@@ -528,11 +524,7 @@ pub unsafe extern "C" fn house_page_budget_try_acquire(pdir: *mut u8, n: u32) ->
         }
     };
     BUDGET_LOCK.unlock();
-    if allowed {
-        1
-    } else {
-        0
-    }
+    if allowed { 1 } else { 0 }
 }
 
 // Per-pdir syscall mask: 22 bits cover 0x00..0x14. Same shape and lock
@@ -653,11 +645,7 @@ pub unsafe extern "C" fn house_svc_allowed(pdir: *mut u8, imm: u32) -> i32 {
     SVC_MASK_LOCK.lock();
     let mask = svc_mask_get_locked(key);
     SVC_MASK_LOCK.unlock();
-    if (mask & (1u32 << imm)) != 0 {
-        1
-    } else {
-        0
-    }
+    if (mask & (1u32 << imm)) != 0 { 1 } else { 0 }
 }
 
 // TLB shootdown acknowledgements: `house_tlb_shootdown` stamps a generation,

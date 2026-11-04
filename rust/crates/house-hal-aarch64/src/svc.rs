@@ -501,11 +501,7 @@ pub unsafe extern "C" fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64
 // window/ENOMEM. Returns 1 park / -22 unknown op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_brk_should_park(op: u32, _x0: u64) -> i32 {
-    if op == HOUSE_SVC_BRK {
-        1
-    } else {
-        -22
-    }
+    if op == HOUSE_SVC_BRK { 1 } else { -22 }
 }
 
 // SAFETY: trap context (`c_handle_sync` park gate); fork carries no user
@@ -515,11 +511,7 @@ pub unsafe extern "C" fn house_brk_should_park(op: u32, _x0: u64) -> i32 {
 // unknown op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_fork_should_park(op: u32, _x0: u64) -> i32 {
-    if op == HOUSE_SVC_FORK {
-        1
-    } else {
-        -22
-    }
+    if op == HOUSE_SVC_FORK { 1 } else { -22 }
 }
 
 // SAFETY: trap context (`c_handle_sync` park gate); wait carries only a pid
@@ -528,11 +520,7 @@ pub unsafe extern "C" fn house_fork_should_park(op: u32, _x0: u64) -> i32 {
 // decides ENOENT/EINVAL. Returns 1 park / -22 unknown op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_wait_should_park(op: u32, _x0: u64) -> i32 {
-    if op == HOUSE_SVC_WAIT {
-        1
-    } else {
-        -22
-    }
+    if op == HOUSE_SVC_WAIT { 1 } else { -22 }
 }
 
 // SAFETY: trap context (`c_handle_sync` park gate); exec carries a
@@ -547,11 +535,7 @@ pub unsafe extern "C" fn house_exec_should_park(op: u32, x0: u64) -> i32 {
         return -22;
     }
     let r = unsafe { validate_cstring_current(x0, 256) };
-    if r == 0 {
-        1
-    } else {
-        0
-    }
+    if r == 0 { 1 } else { 0 }
 }
 
 // Byte-granular user copy against an explicit pdir for the fd ring. While a

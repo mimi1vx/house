@@ -400,46 +400,22 @@ pub unsafe extern "C" fn c_handle_sync(
                         1
                     } else if svc_imm == 0x03 {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe {
-                            if gpr.is_null() {
-                                0
-                            } else {
-                                *gpr.add(0)
-                            }
-                        };
+                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
                         // SAFETY: lock-free validator, no memory touch.
                         unsafe { house_brk_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x08 {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe {
-                            if gpr.is_null() {
-                                0
-                            } else {
-                                *gpr.add(0)
-                            }
-                        };
+                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
                         // SAFETY: lock-free validator, no memory touch.
                         unsafe { house_fork_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x09 {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe {
-                            if gpr.is_null() {
-                                0
-                            } else {
-                                *gpr.add(0)
-                            }
-                        };
+                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
                         // SAFETY: lock-free validator, no memory touch.
                         unsafe { house_wait_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x0B {
                         // SAFETY: gpr is the 896B vec_sync frame; x0 read only.
-                        let x0 = unsafe {
-                            if gpr.is_null() {
-                                0
-                            } else {
-                                *gpr.add(0)
-                            }
-                        };
+                        let x0 = unsafe { if gpr.is_null() { 0 } else { *gpr.add(0) } };
                         // SAFETY: lock-free validator, page-table reads only.
                         unsafe { house_exec_should_park(svc_imm, x0) }
                     } else if svc_imm == 0x04
