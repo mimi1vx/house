@@ -26,3 +26,4 @@
 - [Park/resume capability pinning](design/park-resume-capability-pinning.md)
 - [Shared page ownership](design/shared-page-ownership.md)
 - [TLB shootdown protocol](design/tlb-shootdown-protocol.md)
+- [Linux-ABI syscall emulation (M4 row 0 proposal)](design/linux-abi-syscalls.md)

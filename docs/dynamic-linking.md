@@ -64,8 +64,13 @@ Row 0 is decisive because it is neither a bound nor a missing feature: a Linux
 `syscallYield`, with `x8` never read. Every other row could be cleared and the
 first C-library call would still be mis-dispatched.
 
-Named sites for row 0: `rust/crates/house-boot/src/c_start.rs`,
+Named sites for row 0: `rust/crates/house-boot/src/c_start.rs`
+(`ec == 0x15` arm, `svc_imm` extraction),
 `kernel/Kernel/Userspace/Syscall.hs`, `rust/crates/house-hal-aarch64/src/svc.rs`.
+
+Proposal: `docs/design/linux-abi-syscalls.md` (`house-q0g.13`) — x8-read
+disambiguation, stage-1 delegate list, forbidden placements, and sequencing
+against the provenance branch. Row 0 stays open until that layer exists.
 
 ## The seven slices
 
