@@ -1,4 +1,15 @@
--- | The Hardware Monad (section 3 in the paper)
+{- | The Hardware Monad (section 3 in the paper).
+
+Honest status (house-oz9.4): 'H' is 'IO' with no enforced effect
+discipline. It is @newtype H a = H {unH :: IO a}@ with @runH = unH@,
+and 'liftIO' admits arbitrary 'IO'. The boundary erasers are
+'trappedRunH' below (runs 'H', prints exceptions) and 'unsafePerformH'
+("H.Unsafe", @unsafePerformIO . runH@), the latter backing ~62 top-level
+CAFs holding kernel state (process tables, endpoint maps, scheduler
+rings, page lists; e.g. @pidNext@, @irqDrops@). Phase 2b rejected monad
+redesign in favour of dependency injection as the testability route;
+this wrapper enforces nothing until that boundary is built.
+-}
 module H.Monad (H, trappedRunH, runH, trace, LiftH (..), H.Monad.liftIO) where
 
 import Control.Exception as Exception
