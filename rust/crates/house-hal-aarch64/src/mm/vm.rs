@@ -573,6 +573,224 @@ pub unsafe extern "C" fn house_vm_map_mmio(pdir: *mut u8, slot: i32) -> i32 {
     }
 }
 
+// ---- S2 (house-oz9.11): driver-root narrowing + fault-domain enrollment ----
+//
+// A fresh `allocPageMap` root clones the kernel L1 (RAM-identity 1GB blocks +
+// RTS-alias tables) and the UART/GIC Device blocks into the user-window L2.
+// That clone is correct for EL0 processes (AP keeps it EL1-only) but wrong
+// for a driver fault domain: an EL0 driver must name exactly its own window,
+// nothing else. Narrowing strips the clone before any EL0 use, so the root
+// that survives is window-only:
+//
+// - L1[1..511] cleared (RAM-identity blocks + RTS-alias table refs; all are
+//   descriptors into shared kernel tables, so clearing drops the reference
+//   without freeing anything — the kernel root keeps them alive).
+// - L2[64]/L2[72] Device blocks cleared (UART/GIC: GIC dispatch stays EL1,
+//   delivered to the EL0 driver via endpoint — no EL0 GIC mapping, which
+//   would violate the allowlist layer).
+// - L0[0] user-window chain untouched (holds the S1 MMIO window page).
+//
+// 4K-granule residual (carried, not fixed): one page covers 8 slots (0x200
+// stride), so the window page still spans same-page neighbours. Fixing that
+// needs sub-page granularity the 4K stage-1 walk does not have.
+//
+// The same call enrolls the root in the driver set below, which makes the
+// demand pager refuse it (fail closed: an EL0 fault under a driver TTBR0
+// context parks FAULT_KILL instead of silently zero-mapping RAM into the
+// allowlist window). AP stays EL1-only here (no EL0 code runs yet); S3
+// revisits AP with the injection case. Two-phase (validate all, then clear)
+// so a refusal leaves no partial state, mirroring the S1 map discipline.
+pub(crate) const DRIVER_L2_UART: usize = 64;
+pub(crate) const DRIVER_L2_GIC: usize = 72;
+
+/// EL0 fault-domain set: narrowed driver roots. Lock-free fixed set (the
+/// `EL0_TABLE` pattern in `svc.rs`): init/teardown publish single word
+/// stores from EL1; trap readers scan concurrently. A stale read can only
+/// fail closed: a missed mark zero-maps (only if EL0 ran before the mark was
+/// visible, which install ordering precludes), a stale mark refuses a
+/// recycled root (already freed — the fault kills instead of paging).
+static mut DRIVER_ROOTS: [*mut u8; 32] = [core::ptr::null_mut(); 32];
+
+/// Trap-side membership test: is `pdir` an enrolled driver root?
+pub(crate) fn is_driver_root(pdir: *mut u8) -> bool {
+    if pdir.is_null() {
+        return false;
+    }
+    unsafe {
+        // SAFETY: word-aligned loads, single-copy atomic on aarch64; writers
+        // publish single stores from EL1 init/teardown paths only.
+        for i in 0..32 {
+            if DRIVER_ROOTS[i] == pdir {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// EL1-only: idempotent enroll. False when the set is full (caller fails
+/// closed — the root stays unmarked and must not be installed for EL0 use).
+fn driver_mark(pdir: *mut u8) -> bool {
+    unsafe {
+        // SAFETY: same store discipline as the reader above.
+        for i in 0..32 {
+            if DRIVER_ROOTS[i] == pdir {
+                return true;
+            }
+        }
+        for i in 0..32 {
+            if DRIVER_ROOTS[i].is_null() {
+                DRIVER_ROOTS[i] = pdir;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// EL1-only: retract. Called from the release path (single choke point), so
+/// Haskell teardown needs no extra symbol.
+pub(crate) fn driver_unmark(pdir: *mut u8) {
+    unsafe {
+        // SAFETY: same store discipline as the reader above.
+        for i in 0..32 {
+            if DRIVER_ROOTS[i] == pdir {
+                DRIVER_ROOTS[i] = core::ptr::null_mut();
+                return;
+            }
+        }
+    }
+}
+
+/// Validate the narrow shape without writing: `Ok(l1, l2)` when L0[0] and
+/// L1[0] are tables and the UART/GIC slots hold nothing but clearable Device
+/// blocks. Pure table reads: the caller holds `VM_LOCK`.
+unsafe fn narrow_validate(pdir: *mut u8) -> Result<(*mut u64, *mut u64), ()> {
+    unsafe {
+        // SAFETY: caller guarantees a page-aligned root; reads only, masked.
+        let l0 = pdir as *mut u64;
+        let d0 = *l0.add(0);
+        if d0 & PTE_VALID == 0 || d0 & PTE_TABLE == 0 {
+            return Err(());
+        }
+        let l1 = (d0 & !0xFFF) as *mut u64;
+        let d1 = *l1.add(0);
+        if d1 & PTE_VALID == 0 || d1 & PTE_TABLE == 0 {
+            return Err(());
+        }
+        let l2 = (d1 & !0xFFF) as *mut u64;
+        for idx in [DRIVER_L2_UART, DRIVER_L2_GIC] {
+            let d = *l2.add(idx);
+            if d != 0 && (d & PTE_VALID == 0 || d & PTE_TABLE != 0) {
+                return Err(());
+            }
+        }
+        Ok((l1, l2))
+    }
+}
+
+/// Narrow a fresh driver root to its window-only shape and enroll it.
+///
+/// Returns 1 narrowed + enrolled, 0 refused (bad/null root, malformed user
+/// chain, unexpected UART/GIC entries, full driver set). The root must never
+/// have been installed: no TLB entry can name it, so no shootdown is needed
+/// (dsb/isb ordering only) — narrowing an installed root would need a
+/// `VAE1IS` + SGI1 pass this helper deliberately does not do.
+///
+/// # Safety
+///
+/// `pdir` must be a caller-owned, page-aligned, never-installed root (driver
+/// init, EL1). Takes `VM_LOCK`; shares the lock domain with the pager and
+/// the `vm.rs` walks (house-oz9.1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_vm_narrow_driver_root(pdir: *mut u8) -> i32 {
+    if pdir.is_null() || (pdir as usize & 4095) != 0 {
+        return 0;
+    }
+    unsafe {
+        // Reserve the fault-domain slot first: a narrowed-but-unmarked root
+        // would page instead of kill, so a full set fails before any write.
+        if !driver_mark(pdir) {
+            return 0;
+        }
+        VM_LOCK.lock();
+        // SAFETY: pdir validated above; lock excludes other table writers.
+        let pair = narrow_validate(pdir);
+        let (l1, l2) = match pair {
+            Ok(v) => v,
+            Err(()) => {
+                VM_LOCK.unlock();
+                driver_unmark(pdir);
+                return 0;
+            }
+        };
+        for i in 1..512 {
+            *l1.add(i) = 0;
+        }
+        for idx in [DRIVER_L2_UART, DRIVER_L2_GIC] {
+            *l2.add(idx) = 0;
+        }
+        // Never installed, so no stale TLB entry exists; order the clears
+        // before the mark becomes observable to a concurrent trap reader.
+        core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+        VM_LOCK.unlock();
+        1
+    }
+}
+
+/// Is the L3 leaf (or block) at `far` a Device mapping? Trap-side classifier
+/// for the RO-guard extension in `c_handle_sync`: an EL0 store to a Device
+/// page (MMIO window, UART/GIC blocks) is a permission fault that is neither
+/// RO nor COW, so without this it takes the diagnostic skip and the store
+/// silently vanishes. Fail closed: Device + EL0 store parks FAULT_KILL.
+///
+/// # Safety
+///
+/// EL1 fault context; page-table reads against the recorded pdir only, no
+/// locks (same discipline as `house_is_ro_page`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_is_mmio_page(far: u64) -> i32 {
+    let va = far & !4095;
+    unsafe {
+        let pdir = current_pdir();
+        if pdir.is_null() || (pdir as usize & 4095) != 0 {
+            return 0;
+        }
+        let l0 = pdir as *mut u64;
+        let d0 = *l0.add(((va >> 39) & 0x1FF) as usize);
+        if d0 & 1 == 0 {
+            return 0;
+        }
+        // Device blocks (kernel 1GB Device window, UART/GIC L2 blocks) name
+        // MMIO without a deeper walk.
+        if d0 & 2 == 0 {
+            return (((d0 >> 2) & 0x7) == 1) as i32;
+        }
+        let l1 = (d0 & !0xFFF) as *mut u64;
+        let d1 = *l1.add(((va >> 30) & 0x1FF) as usize);
+        if d1 & 1 == 0 {
+            return 0;
+        }
+        if d1 & 2 == 0 {
+            return (((d1 >> 2) & 0x7) == 1) as i32;
+        }
+        let l2 = (d1 & !0xFFF) as *mut u64;
+        let d2 = *l2.add(((va >> 21) & 0x1FF) as usize);
+        if d2 & 1 == 0 {
+            return 0;
+        }
+        if d2 & 2 == 0 {
+            return (((d2 >> 2) & 0x7) == 1) as i32;
+        }
+        let l3 = (d2 & !0xFFF) as *mut u64;
+        let d3 = *l3.add(((va >> 12) & 0x1FF) as usize);
+        if d3 & 1 == 0 {
+            return 0;
+        }
+        (((d3 >> 2) & 0x7) == 1) as i32
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
     if addr.is_null() {
@@ -827,6 +1045,141 @@ mod tests {
             assert!(mmio_l2_slot(bare.0.as_mut_ptr() as *mut u8, 0x0a000000).is_err());
             *l0.0.as_mut_ptr().add(0) = 0x40000000 | 0x401;
             assert!(mmio_l2_slot(l0p, 0x0a000000).is_err());
+        }
+    }
+
+    // S2 (house-oz9.11) narrowing: a fresh S1-shaped driver root (RAM-clone
+    // blocks, RTS-alias table ref, UART/GIC Device blocks, one MMIO leaf)
+    // narrows to window-only and enrolls the fault domain; refusals leave no
+    // partial state. Runs on host: narrow executes dsb/isb only (both
+    // EL0-legal), never tlbi.
+    #[repr(align(4096))]
+    struct Narrow512([u64; 512]);
+
+    /// S1-shaped fake driver root: L0[0]->L1, L1[0]->L2 (+RAM clone blocks
+    /// at 1/5, RTS-alias-style table at 264), L2 UART/GIC Device blocks +
+    /// L2[80]->L3 with one Device leaf. The fifth box backs the shared
+    /// alias table so the root owns every page it names.
+    fn fake_driver_root() -> (
+        Box<Narrow512>,
+        Box<Narrow512>,
+        Box<Narrow512>,
+        Box<Narrow512>,
+        Box<Narrow512>,
+    ) {
+        let mut l0 = Box::new(Narrow512([0; 512]));
+        let mut l1 = Box::new(Narrow512([0; 512]));
+        let mut l2 = Box::new(Narrow512([0; 512]));
+        let mut l3 = Box::new(Narrow512([0; 512]));
+        let mut shared = Box::new(Narrow512([0; 512]));
+        unsafe {
+            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
+            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            // RAM-identity clone: 1GB blocks the kernel L1 lends every root.
+            *l1.0.as_mut_ptr().add(1) = 0x40000000 | 0x401;
+            *l1.0.as_mut_ptr().add(5) = 0x80000000 | 0x401;
+            // RTS-alias-style table ref (shared tables stay alive via the
+            // kernel root; narrowing drops only this root's reference).
+            *l1.0.as_mut_ptr().add(264) = (shared.0.as_mut_ptr() as u64) | 0x3;
+            // UART/GIC identity Device blocks from clone_kernel_l2.
+            *l2.0.as_mut_ptr().add(super::DRIVER_L2_UART) = 0x08000000 | 0x405;
+            *l2.0.as_mut_ptr().add(super::DRIVER_L2_GIC) = 0x09000000 | 0x405;
+            // The S1 MMIO window leaf.
+            *l2.0.as_mut_ptr().add(80) = (l3.0.as_mut_ptr() as u64) | 0x3;
+            *l3.0.as_mut_ptr().add(0) = super::mmio_leaf_desc(0x0a000000);
+        }
+        (l0, l1, l2, l3, shared)
+    }
+
+    #[test]
+    fn narrow_strips_clone_keeps_window() {
+        use super::{DRIVER_L2_GIC, DRIVER_L2_UART, driver_unmark, is_driver_root};
+        let (mut l0, _l1, _l2, _l3, _shared) = fake_driver_root();
+        let l0p = l0.0.as_mut_ptr() as *mut u8;
+        unsafe {
+            assert_eq!(super::house_vm_narrow_driver_root(l0p), 1);
+            assert!(is_driver_root(l0p), "narrow enrolls the fault domain");
+            let l1p = (l0.0.as_mut_ptr().add(0).read() & !0xFFF) as *mut u64;
+            // RAM clone + alias ref gone; user-window link intact.
+            assert_eq!(*l1p.add(0) & 1, 1, "L1[0] user chain kept");
+            assert_eq!(*l1p.add(1), 0, "RAM block stripped");
+            assert_eq!(*l1p.add(5), 0, "RAM block stripped");
+            assert_eq!(*l1p.add(264), 0, "alias ref stripped");
+            let l2p = (*l1p.add(0) & !0xFFF) as *mut u64;
+            assert_eq!(*l2p.add(DRIVER_L2_UART), 0, "UART block stripped");
+            assert_eq!(*l2p.add(DRIVER_L2_GIC), 0, "GIC block stripped");
+            // Window leaf untouched.
+            assert_ne!(*l2p.add(80) & 1, 0, "MMIO L2 link kept");
+            let l3p = (*l2p.add(80) & !0xFFF) as *mut u64;
+            assert_eq!((*l3p.add(0) >> 2) & 0x7, 1, "MMIO leaf still Device");
+            driver_unmark(l0p);
+            assert!(!is_driver_root(l0p), "unmark retracts");
+        }
+    }
+
+    #[test]
+    fn narrow_refuses_bad_shape() {
+        use super::{driver_unmark, is_driver_root};
+        #[repr(align(4096))]
+        struct A512([u64; 512]);
+        unsafe {
+            // Null and misaligned refuse.
+            assert_eq!(super::house_vm_narrow_driver_root(core::ptr::null_mut()), 0);
+            assert_eq!(super::house_vm_narrow_driver_root(0x1234 as *mut u8), 0);
+            // Bare root (no user chain) refuses.
+            let mut bare = Box::new(A512([0; 512]));
+            let bp = bare.0.as_mut_ptr() as *mut u8;
+            assert_eq!(super::house_vm_narrow_driver_root(bp), 0);
+            assert!(!is_driver_root(bp), "refusal enrolls nothing");
+            // Block at L0[0] refuses.
+            *bare.0.as_mut_ptr().add(0) = 0x40000000 | 0x401;
+            assert_eq!(super::house_vm_narrow_driver_root(bp), 0);
+            assert!(!is_driver_root(bp));
+            // Table where a Device block is expected refuses (no partial
+            // clear: L1[1] must survive the refusal).
+            let (mut l0, _l1, _l2, _l3, _shared) = fake_driver_root();
+            let l0p = l0.0.as_mut_ptr() as *mut u8;
+            let l1p = (l0.0.as_mut_ptr().add(0).read() & !0xFFF) as *mut u64;
+            let l2p = (*l1p.add(0) & !0xFFF) as *mut u64;
+            *l2p.add(super::DRIVER_L2_UART) = (l2p as u64) | 0x3;
+            assert_eq!(super::house_vm_narrow_driver_root(l0p), 0);
+            assert!(!is_driver_root(l0p), "shape refusal enrolls nothing");
+            assert_ne!(*l1p.add(1), 0, "refusal leaves no partial state");
+            driver_unmark(l0p);
+        }
+    }
+
+    #[test]
+    fn mmio_classifier_names_device() {
+        use super::mmio_leaf_desc;
+        // Device leaf (narrowed window) reads Device; Normal leaf, zero
+        // word, and 1GB Device blocks classify around it. The RO-guard
+        // extension parks EL0 stores exactly on this bit.
+        let dev = mmio_leaf_desc(0x0a000000);
+        assert_eq!((dev >> 2) & 0x7, 1);
+        let normal = dev & !(0x7 << 2);
+        assert_eq!((normal >> 2) & 0x7, 0);
+        assert_eq!((0u64 >> 2) & 0x7, 0);
+        let dev_block = 0x0a000000 | 0x405;
+        assert_eq!((dev_block >> 2) & 0x7, 1);
+    }
+
+    #[test]
+    fn driver_mark_roundtrip() {
+        use super::{driver_mark, driver_unmark, is_driver_root};
+        #[repr(align(4096))]
+        struct A512([u64; 512]);
+        let b = Box::new(A512([0; 512]));
+        let p = b.0.as_ptr() as *mut u8;
+        unsafe {
+            assert!(!is_driver_root(p));
+            assert!(!is_driver_root(core::ptr::null_mut()));
+            assert!(driver_mark(p), "first mark takes a slot");
+            assert!(is_driver_root(p));
+            assert!(driver_mark(p), "re-mark is idempotent");
+            driver_unmark(p);
+            assert!(!is_driver_root(p));
+            driver_unmark(p);
         }
     }
 }

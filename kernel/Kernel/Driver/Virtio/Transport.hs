@@ -26,13 +26,13 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (peek)
 import H.Concurrency (QSem, newQSem, withQSem)
-import H.Concurrency qualified as HC
 import H.Interrupts (IntId, spi)
-import H.Monad (H, liftIO, runH)
+import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.GIC qualified as DGIC
 import Kernel.Driver.IRQ qualified as DIRQ
+import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Virtio.Queue (VirtQueue, allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
 import Kernel.Driver.Virtio.Types (VirtioError (..), VirtioFeature (..), cErrToVirtioError, virtioFeatureMask)
 import Kernel.IPC.Endpoint qualified as IPC
@@ -173,7 +173,11 @@ virtioInit slot
                                               ep <- IPC.newEndpoint
                                               _ <- DIRQ.registerIrqForwarding (spi (fromIntegral (16 + slot))) ep
                                               _ <- NS.nsRegister ("virtio-slot" ++ show slot) ep
-                                              _ <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep transportEndpointHandler)
+                                              -- S2 (house-oz9.11): supervised endpoint server — a dead
+                                              -- dispatcher restarts (dmesg-logged) instead of wedging
+                                              -- IRQ delivery; teardown frees the endpoint, which ends
+                                              -- the loop without a restart.
+                                              _ <- liftIO $ DrvReg.superviseDriverEndpoint ("virtio-slot" ++ show slot) ep transportEndpointHandler
                                               let intid = spi (fromIntegral (16 + slot))
                                               let dev = VirtioDevice slot did vid stCheck intid (Just vq) (Just ep)
                                               withQSem virtioSem $ do

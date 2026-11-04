@@ -180,6 +180,7 @@ house_irq_pop
 house_irq_push
 house_irq_ring_drops
 house_is_cow_page
+house_is_mmio_page
 house_is_demand_va
 house_is_exited
 house_is_ro_page
@@ -272,6 +273,7 @@ house_userspace_init
 house_vm_demand_100
 house_vm_demand_single
 house_vm_map_mmio
+house_vm_narrow_driver_root
 house_vm_mmap
 house_vm_mprotect
 house_vm_munmap

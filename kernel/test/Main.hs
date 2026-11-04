@@ -44,9 +44,9 @@ import Data.Either (fromRight, isLeft)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Ix qualified as Ix
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, isNothing)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.C.String (withCString)
@@ -78,6 +78,7 @@ import Kernel.IPC.IRQ qualified as IRQ
 import Kernel.IPC.Types qualified as IT
 import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
+import Kernel.Log.Dmesg qualified as Dmesg
 import Kernel.Shell.Commands qualified as Shell
 import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader qualified as Ldr
@@ -1814,6 +1815,9 @@ main = do
       , checkIO "unregister kills both driver threads" driverTwoThreadGolden
       , check "mmio desc Device reads unmapped" mmioClassifierGolden
       , checkIO "driver root install fails closed" driverRootFailClosedGolden
+      , checkIO "driver teardown frees its root" driverTeardownFreesRootGolden
+      , checkIO "driver fault reaps only that driver" driverFaultReapsOnlyGolden
+      , checkIO "supervised endpoint restarts after death" driverEndpointRestartGolden
       , checkIO "wedged server yields WouldBlock" wedgedGolden
       , checkIO "aborted grant call returns its page" grantAbortGolden
       , check "svc mask full allows all" svcMaskFullGolden
@@ -2380,6 +2384,108 @@ driverRootFailClosedGolden = do
   noPages <- HM.runH (DrvReg.installDriverRoot "s1-none" 0)
   missing <- HM.runH (DrvReg.lookupDriverRoot "s1-none")
   return (not badSlot && not noPages && isNothing missing)
+
+{- | S2 (house-oz9.11): teardown frees the recorded fault-domain root — the
+S1 reload leak (three table pages per cycle) ends here. Registers a driver,
+hands it a fresh root, unregisters: the root entry is gone and the host page
+pool is back to baseline (before/after delta, sequential suite).
+-}
+driverTeardownFreesRootGolden :: IO Bool
+driverTeardownFreesRootGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    before <- HM.runH P.freePageCount
+    ep <- HM.runH Endpoint.newEndpoint
+    reg <- HM.runH (DrvReg.registerDriver "s2-teardown" ep Nothing VirtioMMIO [] [ep])
+    mpm <- HM.runH VM.allocPageMap
+    case mpm of
+      Nothing -> return False
+      Just pm -> do
+        rootReg <- HM.runH (DrvReg.registerDriverRoot "s2-teardown" pm 7 3)
+        found <- HM.runH (DrvReg.lookupDriverByPdir (VM.fromPageMap pm))
+        unreg <- HM.runH (DrvReg.unregisterDriver "s2-teardown")
+        gone <- HM.runH (DrvReg.lookupDriverRoot "s2-teardown")
+        goneByPtr <- HM.runH (DrvReg.lookupDriverByPdir (VM.fromPageMap pm))
+        after <- HM.runH P.freePageCount
+        return
+          ( reg == Right ()
+              && rootReg == Right ()
+              && found == Just "s2-teardown"
+              && unreg == Right ()
+              && isNothing gone
+              && isNothing goneByPtr
+              && after == before
+          )
+  return (r == Just True)
+
+{- | S2: a fault reap touches only the faulting driver. Two drivers with
+roots; reaping one (the re-arm fails closed on host stubs, like S1) deletes
+only its entry, frees only its pages, and leaves the other driver — domain
+and registration — intact. The reaped driver's own registration survives
+(reap removes the fault domain, not the driver).
+-}
+driverFaultReapsOnlyGolden :: IO Bool
+driverFaultReapsOnlyGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    before <- HM.runH P.freePageCount
+    epA <- HM.runH Endpoint.newEndpoint
+    epB <- HM.runH Endpoint.newEndpoint
+    _ <- HM.runH (DrvReg.registerDriver "s2-reaped" epA Nothing VirtioMMIO [] [epA])
+    _ <- HM.runH (DrvReg.registerDriver "s2-other" epB Nothing VirtioMMIO [] [epB])
+    mpmA <- HM.runH VM.allocPageMap
+    mpmB <- HM.runH VM.allocPageMap
+    case (mpmA, mpmB) of
+      (Just pmA, Just pmB) -> do
+        _ <- HM.runH (DrvReg.registerDriverRoot "s2-reaped" pmA 7 3)
+        _ <- HM.runH (DrvReg.registerDriverRoot "s2-other" pmB 8 4)
+        HM.runH (DrvReg.reapAndRestartDriver "s2-reaped" 3 pmA 0xdead)
+        goneA <- HM.runH (DrvReg.lookupDriverRoot "s2-reaped")
+        goneAbyPtr <- HM.runH (DrvReg.lookupDriverByPdir (VM.fromPageMap pmA))
+        keptB <- HM.runH (DrvReg.lookupDriverRoot "s2-other")
+        keptByPtr <- HM.runH (DrvReg.lookupDriverByPdir (VM.fromPageMap pmB))
+        stillRegA <- HM.runH (DrvReg.lookupDriver "s2-reaped")
+        stillRegB <- HM.runH (DrvReg.lookupDriver "s2-other")
+        _ <- HM.runH (DrvReg.unregisterDriver "s2-reaped")
+        _ <- HM.runH (DrvReg.unregisterDriver "s2-other")
+        after <- HM.runH P.freePageCount
+        return
+          ( isNothing goneA
+              && isNothing goneAbyPtr
+              && keptB == Just (pmB, 8, 4)
+              && keptByPtr == Just "s2-other"
+              && isJust stillRegA
+              && isJust stillRegB
+              && after == before
+          )
+      _ -> return False
+  return (r == Just True)
+
+{- | S2: a dead endpoint server restarts instead of wedging its endpoint. The
+handler throws twice (two supervised restarts, dmesg-logged) then serves: the
+first two calls time out, the third is answered, and exactly two restart lines
+name this endpoint.
+-}
+driverEndpointRestartGolden :: IO Bool
+driverEndpointRestartGolden = do
+  r <- Timeout.timeout 15000000 $ do
+    ep <- HM.runH Endpoint.newEndpoint
+    hits <- newIORef (0 :: Int)
+    _ <- DrvReg.superviseDriverEndpoint "s2-restart-test" ep (flaky hits)
+    threadDelay 50000
+    let Right m0 = IT.mkMessage 7 [] Nothing
+    _ <- HM.runH (Endpoint.callTimeout 200000 ep m0)
+    _ <- HM.runH (Endpoint.callTimeout 200000 ep m0)
+    r2 <- HM.runH (Endpoint.callTimeout 2000000 ep m0)
+    logs <- HM.runH Dmesg.dmesgRead
+    _ <- HM.runH (Endpoint.freeEndpoint ep)
+    threadDelay 50000
+    let restarts = length (filter (isInfixOf "driver endpoint restart s2-restart-test") logs)
+    return (r2 == Right (IT.Message 7 [] Nothing) && restarts == 2)
+  return (r == Just True)
+  where
+    flaky hits _ = do
+      n <- HM.liftIO (readIORef hits)
+      HM.liftIO (writeIORef hits (n + 1))
+      if n < 2 then Prelude.error ("boom " ++ show n) else return (Right (IT.Message 7 [] Nothing))
 
 driverTwoThreadGolden :: IO Bool
 driverTwoThreadGolden = do

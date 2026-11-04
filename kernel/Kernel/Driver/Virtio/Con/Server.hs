@@ -24,9 +24,8 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, threadDelay, withQSem)
-import H.Concurrency qualified as HC
 import H.Interrupts (spi)
-import H.Monad (H, liftIO, runH)
+import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.GIC qualified as DGIC
@@ -505,13 +504,13 @@ attachDevice slot kind vqRx vqTx mCtrl = do
   _ <- DIRQ.registerIrqForwarding (spi (fromIntegral (16 + slot))) ep
   let intid = spi (fromIntegral (16 + slot))
   let dev = ConDevice slot intid ep vqRx vqTx mCtrl
-  tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep conEndpointHandler)
+  tid <- liftIO $ DrvReg.superviseDriverEndpoint ("virtio-con" ++ show slot) ep conEndpointHandler
   rReg <- DrvReg.registerDriver ("virtio-con" ++ show slot) ep (Just intid) VirtioMMIO [tid] [ep]
   case rReg of
     Left _ -> do freeQueue vqRx; freeQueue vqTx; freeCtrl mCtrl; return (Left (ConInvalidArg "register failed"))
     Right () -> do
-      -- S1 (house-oz9.11): per-driver TTBR0 root (mapping only). Fail-open:
-      -- the driver runs rootless until S2.
+      -- S2 (house-oz9.11): per-driver TTBR0 fault domain (narrowed +
+      -- supervised). Fail-open: the driver runs rootless on refusal.
       _ <- DrvReg.installDriverRoot ("virtio-con" ++ show slot) slot
       withQSem conSem $ do m <- readRef conMap; writeRef conMap (Map.insert slot dev m)
       withQSem conSem $ do gmap <- readRef conRxGrants; writeRef conRxGrants (Map.insert slot Map.empty gmap)

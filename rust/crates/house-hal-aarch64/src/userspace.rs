@@ -229,6 +229,11 @@ pub unsafe extern "C" fn house_release_pdir(pdir: *mut u8) -> i32 {
                 *slot = ttbr0_l0.as_ptr() as *mut u8;
             }
         }
+        // S2 (house-oz9.11): retract the fault-domain enrollment with the
+        // root (single choke point — Haskell teardown needs no extra call).
+        // A stale mark would refuse a recycled root; an early unmark only
+        // fails closed (kill instead of page).
+        crate::mm::vm::driver_unmark(pdir);
         let _ = evict_asid(pdir);
         budget_remove(pdir as u64);
         SVC_MASK_LOCK.lock();
@@ -837,6 +842,13 @@ pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
     if pdir.is_null() || (pdir as usize & 4095) != 0 {
         return 0;
     }
+    // S2 (house-oz9.11): a narrowed driver root is not pageable. Refuse here
+    // (before the lock) so an EL0 fault under a driver TTBR0 context falls
+    // through to the generic fault-kill park instead of silently zero-mapping
+    // a RAM page into the driver's allowlist window.
+    if crate::mm::vm::is_driver_root(pdir) {
+        return 0;
+    }
     VM_LOCK.lock();
     // SAFETY: the lock excludes a second walker; the walk only allocates from
     // the buddy and writes the levels it just allocated.
@@ -1014,6 +1026,45 @@ mod tests {
             for (i, p) in pdirs.iter().enumerate() {
                 assert_eq!(asid_for_pdir(*p) as u64, seen[i], "stable re-request");
             }
+        }
+    }
+
+    // S2 (house-oz9.11): the demand pager refuses enrolled driver roots, so
+    // an EL0 fault under a driver TTBR0 context falls through to the generic
+    // fault-kill park instead of zero-mapping RAM into the allowlist window.
+    // Runs on host: refusal touches no allocator and no barriers.
+    #[test]
+    fn pager_refuses_driver_root() {
+        use crate::mm::vm::{driver_unmark, house_vm_narrow_driver_root};
+        #[repr(align(4096))]
+        struct A512([u64; 512]);
+        unsafe {
+            let mut l0 = Box::new(A512([0; 512]));
+            let mut l1 = Box::new(A512([0; 512]));
+            let mut l2 = Box::new(A512([0; 512]));
+            let l0p = l0.0.as_mut_ptr() as *mut u8;
+            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
+            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            let prev = current_pdir();
+            house_set_recorded_pdir(l0p);
+            // Unmarked: the pager owns it (maps or refuses on alloc — either
+            // way it does not take the driver-refusal exit).
+            let before = house_handle_user_fault(0x01000000);
+            assert_ne!(before, 0, "unmarked root is pageable, got refusal");
+            // Narrowed + enrolled: refused without touching the allocator.
+            assert_eq!(house_vm_narrow_driver_root(l0p), 1);
+            assert_eq!(
+                house_handle_user_fault(0x01000000),
+                0,
+                "marked root refused"
+            );
+            assert_eq!(
+                house_handle_user_fault(0x0a000100),
+                0,
+                "marked root refused off-window-page too"
+            );
+            driver_unmark(l0p);
+            house_set_recorded_pdir(prev);
         }
     }
 

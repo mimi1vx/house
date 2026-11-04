@@ -35,9 +35,8 @@ import Data.Word (
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
-import H.Concurrency qualified as HC
 import H.Interrupts (IntId)
-import H.Monad (H, liftIO, runH)
+import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Unsafe (unsafePerformH)
 import Kernel.Driver.Registry qualified as DrvReg
@@ -161,13 +160,14 @@ blkServerInit slot
                       let qsz = 64
                           intid = VTrans.vdIntId vdev
                           blkDev = BlkDevice slot cap intid ep qsz reqEp reqTok
-                      tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint reqEp blkRequestHandler)
+                      tid <- liftIO $ DrvReg.superviseDriverEndpoint ("virtio-blk" ++ show slot) reqEp blkRequestHandler
                       rReg <- DrvReg.registerDriver ("virtio-blk" ++ show slot) ep (Just intid) VirtioMMIO [tid] [ep, reqEp]
                       case rReg of
                         Left _ -> return (Left (BlkInvalidArg "register failed"))
                         Right () -> do
-                          -- S1 (house-oz9.11): per-driver TTBR0 root (mapping
-                          -- only). Fail-open: the driver runs rootless until S2.
+                          -- S2 (house-oz9.11): per-driver TTBR0 fault domain
+                          -- (narrowed + supervised). Fail-open: the driver runs
+                          -- rootless when any step refuses.
                           _ <- DrvReg.installDriverRoot ("virtio-blk" ++ show slot) slot
                           withQSem blkSem $ do
                             m2 <- readRef blkMap

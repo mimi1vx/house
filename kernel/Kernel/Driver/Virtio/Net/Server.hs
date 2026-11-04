@@ -36,9 +36,8 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek, poke)
 import H.Concurrency (QSem, newQSem, withQSem)
-import H.Concurrency qualified as HC
 import H.Interrupts (spi)
-import H.Monad (H, liftIO, runH)
+import H.Monad (H, liftIO)
 import H.Mutable (Ref, newRef, readRef, writeRef)
 import H.Pages qualified as P
 import H.Unsafe (unsafePerformH)
@@ -222,13 +221,13 @@ netServerInit slot
                                                           _ <- DIRQ.registerIrqForwarding (spi (fromIntegral (16 + slot))) ep
                                                           let intid = spi (fromIntegral (16 + slot))
                                                           let dev = NetDevice slot mac (Just (Ipv4 10 0 2 15)) (Ipv4 10 0 2 2) (Ipv4 255 255 255 0) intid ep vqRx vqTx
-                                                          tid <- liftIO $ HC.forkSupervisedIO $ runH (IPC.serveEndpoint ep netEndpointHandler)
+                                                          tid <- liftIO $ DrvReg.superviseDriverEndpoint ("virtio-net" ++ show slot) ep netEndpointHandler
                                                           rReg <- DrvReg.registerDriver ("virtio-net" ++ show slot) ep (Just intid) VirtioMMIO [tid] [ep]
                                                           case rReg of
                                                             Left _ -> do freeQueue vqRx; freeQueue vqTx; return (Left (NetInvalidArg "register failed"))
                                                             Right () -> do
-                                                              -- S1 (house-oz9.11): per-driver TTBR0 root (mapping
-                                                              -- only). Fail-open: the driver runs rootless until S2.
+                                                              -- S2 (house-oz9.11): per-driver TTBR0 fault domain
+                                                              -- (narrowed + supervised). Fail-open on refusal.
                                                               _ <- DrvReg.installDriverRoot ("virtio-net" ++ show slot) slot
                                                               withQSem netSem $ do m <- readRef netMap; writeRef netMap (Map.insert slot dev m)
                                                               withQSem netSem $ do gmap <- readRef netRxGrants; writeRef netRxGrants (Map.insert slot Map.empty gmap)

@@ -125,6 +125,7 @@ unsafe extern "C" {
     fn house_tlb_shootdown_ack(seq: u32);
     fn house_is_ro_page(va: u64) -> i32;
     fn house_is_cow_page(va: u64) -> i32;
+    fn house_is_mmio_page(va: u64) -> i32;
     fn house_el0_park_fault(elr: u64, sp_el0: u64, gpr: *const u64, far: u64) -> i32;
     fn house_el0_park_kill(elr: u64, sp_el0: u64, gpr: *const u64, far: u64) -> i32;
     fn house_svc_dispatch(imm: u32, x0: u64, x1: u64, x2: u64, x3: u64, gpr: *mut u64) -> i64;
@@ -271,7 +272,14 @@ pub unsafe extern "C" fn c_handle_sync(
             if (HOUSE_USER_VA_MIN..=HOUSE_USER_VA_MAX).contains(&far) {
                 // SAFETY: checks PTE AP bits.
                 let is_ro = unsafe { house_is_ro_page(far) } != 0;
-                if is_ro {
+                // S2 (house-oz9.11): an EL0 store to a Device page (driver
+                // MMIO window, UART/GIC blocks) faults as permission but is
+                // neither RO nor COW, so without this it takes the diagnostic
+                // skip below and the store silently vanishes. Fail closed:
+                // treat Device like RO here (kill for EL0, skip for EL1).
+                // SAFETY: PTE AttrIdx-bit read only, no locks or allocation.
+                let is_mmio = unsafe { house_is_mmio_page(far) } != 0;
+                if is_ro || is_mmio {
                     // COW sharer: park FAULT for the Haskell copy/remap so the
                     // faulting store retries after resume (ELR as-delivered,
                     // never +4). Same trampoline path as the svc parks, so the

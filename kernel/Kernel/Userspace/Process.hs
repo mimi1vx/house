@@ -56,7 +56,7 @@ import H.Mutable (Ref, modifyRef, newRef, readRef, writeRef)
 import H.Pages qualified as HPages
 import H.PhysicalMemory (fromPhysPage, toPhysPage)
 import H.Unsafe (unsafePerformH)
-import H.Utils (ptrFromWord64, ptrToWord64)
+import H.Utils (ptrToWord64)
 import H.VirtualMemory qualified as VM
 import Kernel.Driver.Virtio.Net.Server qualified as NetSock
 import Kernel.Driver.Virtio.Net.Types (NetError (..), word32ToIpv4)
@@ -2909,48 +2909,12 @@ freePDir pdir = do
   live <- liftIO (c_release_pdir l0)
   if live /= 0
     then return ()
-    else do
-      let pageEntries = 512
-      let l0Idx = fromIntegral ((VM.minVAddr `div` (2 ^ (39 :: Int))) `mod` 512) :: Int
-      -- Instead of recomputing, directly walk all L1 entries for the user window
-      -- Simpler: iterate whole L1 table (512) and free reachable L2/L3
-      d0 <- peekElemOff l0 l0Idx
-      case userTable d0 of
-        Nothing -> HPages.freePage l0
-        Just l1 -> do
-          forM_ [0 .. pageEntries - 1] $ \i1 -> do
-            d1 <- peekElemOff l1 i1
-            case userTable d1 of
-              Nothing -> return ()
-              Just l2 -> do
-                forM_ [0 .. pageEntries - 1] $ \i2 -> do
-                  d2 <- peekElemOff l2 i2
-                  case userTable d2 of
-                    Nothing -> return ()
-                    Just l3 -> do
-                      forM_ [0 .. 511] $ \i3 -> do
-                        d3 <- peekElemOff l3 i3
-                        -- S1 (house-oz9.11): a Device leaf names MMIO, not
-                        -- buddy RAM — never free its address (the L3 table
-                        -- itself is still freed below).
-                        when ((d3 .&. 1) /= 0 && not (VM.isDeviceDesc d3)) $
-                          releaseBacking (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000))
-                      HPages.freePage l3
-                HPages.freePage l2
-          HPages.freePage l1
-          HPages.freePage l0
+    else VM.freeUserTables releaseBacking pdir
 
-{- | A user-window page-table descriptor: a level pointing at another table.
-Bit 1 set distinguishes a table from a 1 GiB or 2 MiB block, and the pointer
-has to name a page the buddy allocator actually owns — the pager splits
-identity-map blocks into 2 MiB and 1 GiB block descriptors, and a walker that
-accepted those would free whatever the block's address field happened to name.
-One predicate for all three walkers ('freePDir', 'shareAddrSpace' and
-'freeUserPages'), so they cannot drift apart again.
+{- | The user-window table predicate, shared with 'H.VirtualMemory' (which
+owns it for 'VM.freeUserTables'): one predicate for all walkers
+('freePDir' via 'VM.freeUserTables', 'shareAddrSpace', 'freeUserPages'),
+so they cannot drift apart again.
 -}
 userTable :: Word64 -> Maybe (Ptr Word64)
-userTable d
-  | d .&. 3 == 3
-  , HPages.validPage (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000)) =
-      Just (ptrFromWord64 (d .&. 0x0000FFFFFFFFF000))
-  | otherwise = Nothing
+userTable = VM.userTable

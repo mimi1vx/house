@@ -18,12 +18,15 @@ module H.VirtualMemory (
   toPageMap,
   fromPageMap, -- not for public use
   isDeviceDesc,
+  userTable,
+  freeUserTables,
 )
 where
 
 -- import Kernel.Debug(putStrLn)
 import Control.Monad
 import Data.Bits
+import Data.Word (Word8)
 import H.AdHocMem
 import H.Monad (liftIO)
 import H.Pages qualified as P
@@ -179,6 +182,64 @@ descToPageInfo d
             , cow = testBit' bSwCow d
             }
         )
+
+{- | A user-window page-table descriptor: a level pointing at another table.
+Bit 1 set distinguishes a table from a 1 GiB or 2 MiB block, and the pointer
+has to name a page the buddy allocator actually owns — the pager splits
+identity-map blocks into 2 MiB and 1 GiB block descriptors, and a walker that
+accepted those would free whatever the block's address field happened to name.
+One predicate for all walkers ('freeUserTables', 'shareAddrSpace' and
+'freeUserPages' in 'Kernel.Userspace.Process'), so they cannot drift apart.
+-}
+userTable :: Desc -> Maybe Table
+userTable d
+  | d .&. 3 == 3
+  , P.validPage (ptrFromWord64 (d .&. mAddress)) =
+      Just (ptrFromWord64 (d .&. mAddress))
+  | otherwise = Nothing
+
+{- | Free every table under a root's user window (L0[0] chain). The @release@
+callback frees each mapped RAM page ('Kernel.Userspace.Process.releaseBacking'
+for processes, which consults the COW registry; a plain page free for driver
+roots, which never map RAM — their only leaf is the skipped Device window).
+Device leaves name MMIO, not buddy RAM, so they are skipped here while the L3
+table itself is still freed. Shared by process teardown
+('Kernel.Userspace.Process.freePDir', after 'house_release_pdir') and driver
+root teardown ('Kernel.Driver.Registry', same release call): one walker so the
+Device-leaf and block-descriptor guards cannot drift apart. Only root-owned
+tables are freed (fresh levels + mapped pages); clone descriptors into shared
+kernel tables are skipped by 'userTable'.
+-}
+freeUserTables :: (Ptr Word8 -> H ()) -> PageMap -> H ()
+freeUserTables release pdir = do
+  let l0 = fromPageMap pdir
+      l0Idx = fromIntegral ((minVAddr `div` (2 ^ (39 :: Int))) `mod` 512) :: Int
+  -- Instead of recomputing, directly walk all L1 entries for the user window
+  -- Simpler: iterate whole L1 table (512) and free reachable L2/L3
+  d0 <- peekElemOff l0 l0Idx
+  case userTable d0 of
+    Nothing -> P.freePage l0
+    Just l1 -> do
+      forM_ [0 .. pageEntries - 1] $ \i1 -> do
+        d1 <- peekElemOff l1 i1
+        case userTable d1 of
+          Nothing -> return ()
+          Just l2 -> do
+            forM_ [0 .. pageEntries - 1] $ \i2 -> do
+              d2 <- peekElemOff l2 i2
+              case userTable d2 of
+                Nothing -> return ()
+                Just l3 -> do
+                  forM_ [0 .. 511] $ \i3 -> do
+                    d3 <- peekElemOff l3 i3
+                    -- A Device leaf names MMIO, not buddy RAM — never free its
+                    -- address (the L3 table itself is still freed below).
+                    when ((d3 .&. 1) /= 0 && not (isDeviceDesc d3)) $
+                      release (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000))
+                  P.freePage l3
+            P.freePage l2
+      P.freePage l1
+      P.freePage l0
 
 pageInfoToDesc :: PageInfo -> Desc
 pageInfoToDesc pinfo =
