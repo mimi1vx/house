@@ -51,6 +51,7 @@ launchConsoleDriver = do
     dispatch NewLine = c_uart_putc (fromIntegral (fromEnum '\n'))
     dispatch CarriageReturn = c_uart_putc (fromIntegral (fromEnum '\r'))
     dispatch (PutChar _ c) = c_uart_putc (fromIntegral (fromEnum c))
+    dispatch (PutStr s) = cPutStr s
     dispatch (MoveCursorBackward n) = mapM_ (\_ -> c_uart_putc 0x08) [1 .. n]
     dispatch ClearScreen = cPutStr "\ESC[2J\ESC[H"
     dispatch ClearEOL = cPutStr "\ESC[K"

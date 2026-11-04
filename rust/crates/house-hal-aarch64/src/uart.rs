@@ -52,6 +52,18 @@ pub unsafe extern "C" fn uart_putc(c: u8) {
     UART_LOCK.lock();
     // SAFETY: PL011 FR/DR MMIO valid while lock held; polling TXFF preserves ordering.
     unsafe {
+        putc_locked(c);
+    }
+    UART_LOCK.unlock();
+}
+
+/// Emit one byte with the UART lock already held by the caller.
+/// Caller must pair `uart_lock` / `uart_unlock` with no blocking call between
+/// (TXFF poll only, as in `uart_putc`).
+#[inline]
+pub(crate) unsafe fn putc_locked(c: u8) {
+    // SAFETY: caller holds UART_LOCK; PL011 FR/DR MMIO valid.
+    unsafe {
         if c == b'\n' {
             while mmio_r32_u(UART_BASE + UARTFR) & FR_TXFF != 0 {
                 core::arch::asm!("", options(nostack, preserves_flags));
@@ -63,6 +75,21 @@ pub unsafe extern "C" fn uart_putc(c: u8) {
         }
         mmio_w32_u(UART_BASE + UARTDR, c as u32);
     }
+}
+
+/// Hold the UART lock across a caller-driven multi-byte emission (EL0 WRITE
+/// fd 1 in svc.rs), so the message lands contiguously against concurrent
+/// console-queue drains. Crate-internal: no c-abi.md entry. The hold is
+/// bounded by the already-validated caller length; no blocking call runs
+/// under it.
+#[inline]
+pub(crate) fn uart_lock() {
+    UART_LOCK.lock();
+}
+
+/// Release a hold taken with `uart_lock`.
+#[inline]
+pub(crate) fn uart_unlock() {
     UART_LOCK.unlock();
 }
 

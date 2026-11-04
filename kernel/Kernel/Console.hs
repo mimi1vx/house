@@ -2,6 +2,7 @@ module Kernel.Console (
   Console,
   putString,
   putStringLn,
+  putStr,
   Kernel.Console.putChar,
   putChar',
   clearScreen,
@@ -12,6 +13,7 @@ module Kernel.Console (
 where
 
 import H.Concurrency
+import Prelude hiding (putStr)
 
 {-P:
 import Prelude hiding (putChar)
@@ -37,6 +39,15 @@ putStringLn (Console vConsole) str =
     do
       writeList2Chan (consoleChan con) $ map putc str
       writeChan (consoleChan con) NewLine
+
+{- | Single uart_puts unit (see ConsoleCommand PutStr): one chan entry, one
+UART lock hold. Use for byte runs that must stay contiguous against
+concurrent EL0 WRITE fd 1 output.
+-}
+putStr :: Console -> String -> H ()
+putStr (Console vConsole) str =
+  withMVar vConsole $ \console ->
+    do writeChan (consoleChan console) $ PutStr str
 
 putChar :: Console -> Char -> H ()
 putChar (Console vConsole) char =

@@ -19,7 +19,7 @@ import Kernel.Types.Console (VideoAttributes)
  Loosely based on SimpleLineEditor by Malcom Wallace
  http://www.haskell.org/pipermail/glasgow-haskell-users/2003-June/005370.html
 ---}
-import Prelude hiding (getLine, putChar)
+import Prelude hiding (getLine, putChar, putStr)
 
 data LineEditorData = LineEditorData {
   editorChan :: Chan KeyPress
@@ -188,9 +188,14 @@ getLine (LineEditor vEditor) prompt =
                     putString con cs
                     clearEOL con
                     moveCursorBackward con (length newAfter)
-      putString con prompt
+      -- One uart_puts unit: the prompt plus its cursor cell must hit the
+      -- wire contiguously. The EL0 WRITE fd 1 trap path bypasses this
+      -- queue, so per-char emission lets init-child bytes (e.g. sh's
+      -- "sh: ENOENT") split the ">  " signature the harness matches on.
+      -- Wire-identical to the old sequence: the serial renderer ignores
+      -- attributes, so the inverseVideo cursor cell is a plain space here.
+      putStr con (prompt ++ " ")
       history <- readMVar (editorHistory editor)
-      putChar' con inverseVideo ' '
       clearEOL con
       moveCursorBackward con 1
       line <- gl ([], []) ([], history)

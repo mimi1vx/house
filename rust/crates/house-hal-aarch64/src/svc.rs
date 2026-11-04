@@ -1,5 +1,7 @@
 //! Supervisor calls — `svc.c` transliteration.
 
+use crate::uart::{putc_locked, uart_lock, uart_unlock};
+
 const HOUSE_SVC_YIELD: u32 = 0x00;
 const HOUSE_SVC_WRITE: u32 = 0x01;
 const HOUSE_SVC_EXIT: u32 = 0x02;
@@ -116,7 +118,6 @@ static mut PARK_PIPE_W: i32 = -1;
 
 unsafe extern "C" {
     fn uart_puts(s: *const u8);
-    fn uart_putc(c: u8);
     fn house_ipc_svc_dispatch(op: u32, x0: u64, x1: u64, x2: u64, x3: u64) -> i64;
     fn current_pdir() -> *mut u8;
     fn house_set_recorded_pdir(pdir: *mut u8);
@@ -1242,8 +1243,15 @@ pub unsafe extern "C" fn house_svc_dispatch(
                     }
                     return -14;
                 }
+                // Whole message under one UART lock hold: per-byte uart_putc
+                // let concurrent console-queue drains split EL0 output
+                // mid-line (observed: "sh: ENOENT" spliced inside the shell
+                // prompt's ">  " signature, failing the harness prompt
+                // match). Bound: len <= 64K validated above; TXFF poll only.
+                uart_lock();
                 let mut remaining = len;
                 let mut cur = va;
+                let mut fault = false;
                 while remaining > 0 {
                     let page_off = cur & 0xFFF;
                     let mut chunk = 4096 - page_off;
@@ -1252,18 +1260,23 @@ pub unsafe extern "C" fn house_svc_dispatch(
                     }
                     let pa = translate_va(cur);
                     if pa == 0 {
-                        if !gpr.is_null() {
-                            *gpr = -14i64 as u64;
-                        }
-                        return -14;
+                        fault = true;
+                        break;
                     }
                     let src = pa as *const u8;
                     for i in 0..chunk {
                         let c = *src.add(i as usize);
-                        uart_putc(c);
+                        putc_locked(c);
                     }
                     cur = cur.checked_add(chunk).unwrap_or(cur);
                     remaining -= chunk;
+                }
+                uart_unlock();
+                if fault {
+                    if !gpr.is_null() {
+                        *gpr = -14i64 as u64;
+                    }
+                    return -14;
                 }
                 if !gpr.is_null() {
                     *gpr = len;
