@@ -1,10 +1,13 @@
 // EL0 cat for /bin/cat (pid1 slice).
 // Streams a file to stdout via the fd ring: OPEN 0x04, READ 0x05 loop,
 // CLOSE 0x07. Path is argv[1], defaulting to /probe.txt so the legacy
-// `run /bin/cat` probe (qemu-fd-el0.exp) keeps working. Prints `cat ok`
-// and exits 0 after the full stream; a missing path prints `cat: ENOENT`
-// (keeps the fs-harness ENOENT match), any other mismatch `cat fail`,
-// all exit 1. Read chunk is 1024 (well under the 64K svc buffer cap).
+// `run /bin/cat` probe (qemu-fd-el0.exp) keeps working. At EOF a SEEK 0x0A
+// self-check runs first: SEEK_END must resume the streamed total, SEEK_SET
+// must resume 0, and a head re-read must return the full chunk (prints
+// `seek ok`). Prints `cat ok` and exits 0 after the full stream; a missing
+// path prints `cat: ENOENT` (keeps the fs-harness ENOENT match), any other
+// mismatch `cat fail`, all exit 1. Read chunk is 1024 (well under the 64K
+// svc buffer cap).
 .arch armv8-a
 .text
 .global _start
@@ -25,6 +28,7 @@ do_open:
     cmp     x0, #34
     b.hi    fail
     mov     x19, x0                 // fd
+    mov     x21, #0
 read_loop:
     adrp    x1, buf
     add     x1, x1, :lo12:buf
@@ -35,6 +39,7 @@ read_loop:
     b.hi    fail                    // negative errno or over-cap
     cbz     x0, eof
     mov     x20, x0                 // n
+    add     x21, x21, x0
     adrp    x1, buf
     add     x1, x1, :lo12:buf
     mov     x2, x20
@@ -42,6 +47,35 @@ read_loop:
     svc     #0x01                   // WRITE(1, buf, n)
     b       read_loop
 eof:
+    mov     x0, x19
+    mov     x1, #0
+    mov     x2, #2
+    svc     #0x0A                   // SEEK(fd, 0, END) -> x0 = size
+    cmp     x0, x21
+    b.ne    fail                    // size must equal streamed total
+    mov     x0, x19
+    mov     x1, #0
+    mov     x2, #0
+    svc     #0x0A                   // SEEK(fd, 0, SET) -> x0 = 0
+    cbnz    x0, fail
+    cbz     x21, seek_ok
+    adrp    x1, buf
+    add     x1, x1, :lo12:buf
+    mov     x2, #1024
+    cmp     x21, #1024
+    b.hi    reread
+    mov     x2, x21
+reread:
+    mov     x0, x19
+    svc     #0x05                   // READ -> x0 = n'
+    cmp     x0, x2
+    b.ne    fail                    // head chunk must re-read whole
+seek_ok:
+    adrp    x1, seekmsg
+    add     x1, x1, :lo12:seekmsg
+    mov     x2, #8
+    mov     x0, #1
+    svc     #0x01                   // WRITE(1, "seek ok\n", 8)
     mov     x0, x19
     svc     #0x07                   // CLOSE(fd)
     cbnz    x0, fail
@@ -75,6 +109,8 @@ defpath:
     .ascii  "/probe.txt\0"
 okmsg:
     .ascii  "cat ok\n"
+seekmsg:
+    .ascii  "seek ok\n"
 failmsg:
     .ascii  "cat fail\n"
 enoentmsg:

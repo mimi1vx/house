@@ -47,6 +47,11 @@ expect {
     eof { puts "\nFAIL: eof before cat content"; exit 1 }
 }
 expect {
+    -re "seek ok" { puts "\nPASS: EL0 seek ok (SEEK_END size + SEEK_SET re-read)" }
+    timeout { puts "\nFAIL: seek ok timeout (0x0A park ring wedged?)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before seek ok"; exit 1 }
+}
+expect {
     -re "cat ok" { puts "\nPASS: EL0 cat ok (CLOSE resumed 0)" }
     timeout { puts "\nFAIL: cat ok timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before cat ok"; exit 1 }

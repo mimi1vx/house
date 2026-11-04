@@ -22,18 +22,23 @@ catInstrs =
       x2 = mustX 2
       x19 = mustX 19
       x20 = mustX 20
+      x21 = mustX 21
       svcOpen = mustSvc 0x04
       svcRead = mustSvc 0x05
       svcClose = mustSvc 0x07
+      svcSeek = mustSvc 0x0A
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
    in [ Comment "EL0 cat for /bin/cat (pid1 slice)."
       , Comment "Streams a file to stdout via the fd ring: OPEN 0x04, READ 0x05 loop,"
       , Comment "CLOSE 0x07. Path is argv[1], defaulting to /probe.txt so the legacy"
-      , Comment "`run /bin/cat` probe (qemu-fd-el0.exp) keeps working. Prints `cat ok`"
-      , Comment "and exits 0 after the full stream; a missing path prints `cat: ENOENT`"
-      , Comment "(keeps the fs-harness ENOENT match), any other mismatch `cat fail`,"
-      , Comment "all exit 1. Read chunk is 1024 (well under the 64K svc buffer cap)."
+      , Comment "`run /bin/cat` probe (qemu-fd-el0.exp) keeps working. At EOF a SEEK 0x0A"
+      , Comment "self-check runs first: SEEK_END must resume the streamed total, SEEK_SET"
+      , Comment "must resume 0, and a head re-read must return the full chunk (prints"
+      , Comment "`seek ok`). Prints `cat ok` and exits 0 after the full stream; a missing"
+      , Comment "path prints `cat: ENOENT` (keeps the fs-harness ENOENT match), any other"
+      , Comment "mismatch `cat fail`, all exit 1. Read chunk is 1024 (well under the 64K"
+      , Comment "svc buffer cap)."
       , Arch "armv8-a"
       , Text
       , Global "_start"
@@ -54,6 +59,7 @@ catInstrs =
       , CmpImm x0 (mustU12 34)
       , BCond Hi "fail"
       , Trail (MovReg x19 x0) "fd"
+      , MovImm x21 0
       , Label "read_loop"
       , Adrp x1 "buf"
       , AddLo12 x1 x1 "buf"
@@ -64,6 +70,7 @@ catInstrs =
       , Trail (BCond Hi "fail") "negative errno or over-cap"
       , Cbz x0 "eof"
       , Trail (MovReg x20 x0) "n"
+      , AddReg x21 x21 x0
       , Adrp x1 "buf"
       , AddLo12 x1 x1 "buf"
       , MovReg x2 x20
@@ -71,6 +78,35 @@ catInstrs =
       , Trail (Svc svcWrite Nothing) "WRITE(1, buf, n)"
       , B "read_loop"
       , Label "eof"
+      , MovReg x0 x19
+      , MovImm x1 0
+      , MovImm x2 2
+      , Trail (Svc svcSeek Nothing) "SEEK(fd, 0, END) -> x0 = size"
+      , CmpReg x0 x21
+      , Trail (BCond Ne "fail") "size must equal streamed total"
+      , MovReg x0 x19
+      , MovImm x1 0
+      , MovImm x2 0
+      , Trail (Svc svcSeek Nothing) "SEEK(fd, 0, SET) -> x0 = 0"
+      , Cbnz x0 "fail"
+      , Cbz x21 "seek_ok"
+      , Adrp x1 "buf"
+      , AddLo12 x1 x1 "buf"
+      , MovImm x2 1024
+      , CmpImm x21 (mustU12 1024)
+      , BCond Hi "reread"
+      , MovReg x2 x21
+      , Label "reread"
+      , MovReg x0 x19
+      , Trail (Svc svcRead Nothing) "READ -> x0 = n'"
+      , CmpReg x0 x2
+      , Trail (BCond Ne "fail") "head chunk must re-read whole"
+      , Label "seek_ok"
+      , Adrp x1 "seekmsg"
+      , AddLo12 x1 x1 "seekmsg"
+      , MovImm x2 8
+      , MovImm x0 1
+      , Trail (Svc svcWrite Nothing) "WRITE(1, \"seek ok\\n\", 8)"
       , MovReg x0 x19
       , Trail (Svc svcClose Nothing) "CLOSE(fd)"
       , Cbnz x0 "fail"
@@ -104,6 +140,8 @@ catInstrs =
       , Ascii "/probe.txt\0"
       , Label "okmsg"
       , Ascii "cat ok\n"
+      , Label "seekmsg"
+      , Ascii "seek ok\n"
       , Label "failmsg"
       , Ascii "cat fail\n"
       , Label "enoentmsg"
