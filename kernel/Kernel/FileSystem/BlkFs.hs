@@ -23,7 +23,6 @@ module Kernel.FileSystem.BlkFs (
 )
 where
 
-import Data.Either (fromRight)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -180,7 +179,7 @@ dirExists :: Image -> [[String]] -> [String] -> Bool
 dirExists files cached comps =
   null comps || comps `elem` cached || any ((comps `isPrefixOf`) . fst) fileComps
   where
-    fileComps = [(pcs, bs) | (p, bs) <- files, let pcs = fromRight [] (splitPath p)]
+    fileComps = [(pcs, bs) | (p, bs) <- files, Right pcs <- [splitPath p]]
     isPrefixOf [] _ = True
     isPrefixOf _ [] = False
     isPrefixOf (x : xs) (y : ys) = x == y && isPrefixOf xs ys
@@ -377,7 +376,7 @@ blkRead bd slot path = case pathComps path of
             | null cs || cs `elem` cached || any ((cs `isPrefixOf`) . fst) (filesComps files) -> return (Left EISDIR)
             | otherwise -> return (Left ENOENT)
   where
-    filesComps files = [(fromRight [] (splitPath p), bs) | (p, bs) <- files]
+    filesComps files = [(pcs, bs) | (p, bs) <- files, Right pcs <- [splitPath p]]
     isPrefixOf [] _ = True
     isPrefixOf _ [] = False
     isPrefixOf (x : xs) (y : ys) = x == y && isPrefixOf xs ys
@@ -398,7 +397,7 @@ blkLs bd slot path = case pathComps path of
             | otherwise -> return (Right (children files cached cs))
   where
     children files cached cs =
-      let fcs = [fromRight [] (splitPath p) | (p, _) <- files]
+      let fcs = [pcs | (p, _) <- files, Right pcs <- [splitPath p]]
           fromFiles = [x | pcs <- fcs, Just rest <- [stripPrefix cs pcs], (x : _) <- [rest]]
           fromCache = [x | ccs <- cached, Just rest <- [stripPrefix cs ccs], (x : _) <- [rest]]
        in dedup (fromFiles ++ fromCache)
@@ -443,7 +442,7 @@ blkRm bd slot path = case pathComps path of
     joinWith _ [] = ""
     joinWith _ [x] = x
     joinWith s (x : xs) = x ++ s ++ joinWith s xs
-    filesComps files = [(fromRight [] (splitPath p), ()) | (p, _) <- files]
+    filesComps files = [(pcs, ()) | (p, _) <- files, Right pcs <- [splitPath p]]
     isStrictPrefixOf [] (_ : _) = True
     isStrictPrefixOf _ _ = False
 
@@ -464,7 +463,7 @@ blkStat bd slot path = case pathComps path of
             | otherwise -> return (Left ENOENT)
   where
     children files cached cs =
-      let fcs = [fromRight [] (splitPath p) | (p, _) <- files]
+      let fcs = [pcs | (p, _) <- files, Right pcs <- [splitPath p]]
           fromFiles = [x | pcs <- fcs, Just rest <- [stripPrefix cs pcs], (x : _) <- [rest]]
           fromCache = [x | ccs <- cached, Just rest <- [stripPrefix cs ccs], (x : _) <- [rest]]
        in dedup (fromFiles ++ fromCache)

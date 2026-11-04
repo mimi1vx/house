@@ -1313,6 +1313,7 @@ main = do
       , checkIO "ramfs over-quota refused" ramfsQuotaGolden
       , check "blk bytes all-256 round-trip" (case BP.encodeImage [("/all", [0 .. 255])] of Left _ -> False; Right img -> BP.decodeImage img == Right [("/all", [0 .. 255])])
       , check "blk bytes NUL+high round-trip" (case BP.encodeImage [("/b", [0, 128, 255, 0, 1])] of Left _ -> False; Right img -> BP.decodeImage img == Right [("/b", [0, 128, 255, 0, 1])])
+      , check "blk overlong component decodes yet splits Left" blkLongNamePremise
       , check "latin1 edge round-trip" (let enc s = [fromIntegral (ord c `mod` 256) :: Word8 | c <- s]; dec bs = [chr (fromIntegral b) | b <- bs]; s = dec [0 .. 255] in dec (enc s) == s)
       , -- splitPath goldens
         check "splitPath a/b" (Vfs.splitPath "/a/b" == Right ["a", "b"])
@@ -1845,6 +1846,7 @@ main = do
       , check "svc mask narrow revokes one" svcMaskNarrowGolden
       , check "svc mask fork inherit exec retain" svcMaskInheritGolden
       , checkIO "blockdev fake maps to FsError" blockDevGolden
+      , checkIO "blk corrupt entry dropped from ls" blkCorruptDroppedGolden
       , checkIO "console hook set clear" consoleHookGolden
       , assertLinkError
           "link missing dependency"
@@ -2656,6 +2658,41 @@ blockDevGolden = do
   where
     isLeft (Left _) = True
     isLeft _ = False
+
+blkLongName :: FilePath
+blkLongName = "/" ++ replicate 300 'a'
+
+{- | Reachability premise: an overlong (>255) component passes the image
+codec yet fails 'splitPath', so BlkFs must drop such entries.
+-}
+blkLongNamePremise :: Bool
+blkLongNamePremise = case BP.encodeImage [(blkLongName, [1])] of
+  Left _ -> False
+  Right img -> case BP.decodeImage img of
+    Right [(p, _)] -> p == blkLongName && isLeft (Vfs.splitPath p)
+    _ -> False
+  where
+    isLeft (Left _) = True
+    isLeft _ = False
+
+{- | A decodable-but-unsplittable entry is dropped, not aliased to root:
+root still lists only the valid file and it still reads back.
+-}
+blkCorruptDroppedGolden :: IO Bool
+blkCorruptDroppedGolden = case BP.encodeImage [("/ok", [7]), (blkLongName, [9])] of
+  Left _ -> return False
+  Right img -> do
+    let need = (length img + 4095) `div` 4096
+        fake =
+          BlockDev {
+            bdCapacity = \_ -> return (Right (fromIntegral (need * 8)))
+            , bdRead = \_ lba -> return (Right (take 4096 (drop (fromIntegral lba * 4096) (img ++ repeat 0))))
+            , bdWrite = \_ _ _ -> return (Right ())
+            }
+        ops = BlkFs.blkfsOps fake 7
+    rLs <- HM.runH (Vfs.opsLs ops "/")
+    rRead <- HM.runH (Vfs.opsRead ops "/ok")
+    return (rLs == Right ["ok"] && rRead == Right [7])
 
 -- | Console hook: set fires on print, clear silences, no hook is exactly raw.
 consoleHookGolden :: IO Bool
