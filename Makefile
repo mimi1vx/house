@@ -258,11 +258,17 @@ house-irq-dispatch-check: house-build initrd
 	expect scripts/qemu-irq-dispatch.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) 1 -- -drive if=none,file=/tmp/house-irq.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 
 # Virtio-net (Track 5): virtio-net server, rx0+tx1, 12B hdr, Grant 4K, ARP/IPv4/UDP/DHCP, dc cvac/ivac/dsb, IRQ->Endpoint, user netdev 10.0.2.0/24
+# Timeouts are per-expect-step, not total run time. hvf 20 suffices because
+# every step is a fast guest round-trip; -con below needs more headroom.
 house-virtio-net-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 20 hvf $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 	expect scripts/qemu-virtio-net.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56
 
 # Virtio-console (ID 3): console server, rx0+tx1, Grant 4K, full-duplex + mirror, socket chardev
+# Timeouts are per-expect-step, not total run time. hvf stays at 45 (not net's
+# 20): the socat TCP->UNIX bridge, host-side socket polls (up to 6s each), and
+# the EL0 /bin/sh-over-console stage stall longer than pure guest round-trips
+# — the sh-prompt step has been observed past 20s under hvf. tcg 180/180 both.
 house-virtio-con-check: house-build initrd
 	rm -f /tmp/house-con.sock
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
@@ -316,6 +322,9 @@ house-svcmask-check: house-build initrd
 # YIELD starvation: a tight `svc #0` spinner must not hold the RTS capability
 # long enough to starve the shell. Spawns the probe, asserts `uname` still
 # answers, then reaps the probe exit 0.
+# Pinned to -smp 1 (deliberate and load-bearing): the stall is observable only
+# on one capability; at -smp 2 the shell runs alongside the spinner and the
+# bound proves nothing. Do not thread $(SMP_N) through here.
 house-yield-spin-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-yield-spin.exp $(SPIKE_DIR)/build/house.bin 'yield-spin-ok' 60 hvf $(SPIKE_MEM)
 	expect scripts/qemu-yield-spin.exp $(SPIKE_DIR)/build/house.bin 'yield-spin-ok' 120 tcg $(SPIKE_MEM)
@@ -327,8 +336,8 @@ house-fork-check: house-build initrd
 	expect scripts/qemu-fork.exp $(SPIKE_DIR)/build/house.bin 'fork-ok' 90 tcg $(SPIKE_MEM) $(SMP_N)
 
 # EL0 preemption via timer IRQ + baton run queue (multiprocess step 11):
-# 2 CPU-bound spinners interleave on -smp 1 (smp forced to 1: the switch is
-# proven by alternation, not core count), shell responsive throughout.
+# Pinned to -smp 1: 2 CPU-bound spinners interleave (the switch is proven by
+# alternation, not core count), shell responsive throughout.
 house-preempt-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 120 hvf $(SPIKE_MEM) 1
 	expect scripts/qemu-preempt.exp $(SPIKE_DIR)/build/house.bin 'preempt-ok' 300 tcg $(SPIKE_MEM) 1
@@ -337,6 +346,7 @@ house-preempt-check: house-build initrd
 # survives `smp down 1` (hvf: down-leg only, PSCI refuses re-CPU_ON) and the
 # full down/up cycle on tcg (resume migrates cores via the global run queue);
 # shell responsive throughout, spinner reaped exit 0.
+# Pinned to -smp 2: the hotplug cycle needs exactly one spare core.
 house-spin-hotplug-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 300 hvf $(SPIKE_MEM) 2
 	expect scripts/qemu-spin-hotplug.exp $(SPIKE_DIR)/build/house.bin 'spin-hotplug-ok' 420 tcg $(SPIKE_MEM) 2
@@ -359,6 +369,8 @@ house-ipc-el0-check: house-build initrd
 # Userspace EL0 (Track 6): ELF loader 0x01000000 window, svc write/exit/brk + IPC 0x10..0x14 via Endpoint, TTBR0/ASID/pager
 # SMP demand-pager race: two EL0 processes faulting fresh pages at once, so two
 # cores enter house_handle_user_fault together. Only meaningful at -smp >= 2.
+# Pinned to -smp 2: the minimum geometry that puts two cores in the fault
+# handler together; higher N adds noise, not signal.
 house-smp-fault-race-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-smp-fault-race.exp $(SPIKE_DIR)/build/house.bin 180 hvf $(SPIKE_MEM) 2
 	expect scripts/qemu-smp-fault-race.exp $(SPIKE_DIR)/build/house.bin 240 tcg $(SPIKE_MEM) 2
