@@ -159,10 +159,12 @@ pub unsafe extern "C" fn qsort(
     cmp: Option<unsafe extern "C" fn(*const c_void, *const c_void) -> i32>,
 ) {
     // SAFETY: caller guarantees base valid for nm*sz bytes and cmp total order.
-    if base.is_null() || nm < 2 || sz == 0 || cmp.is_none() {
+    if base.is_null() || nm < 2 || sz == 0 {
         return;
     }
-    let cmp = cmp.unwrap();
+    let Some(cmp) = cmp else {
+        return;
+    };
     let n = nm.min(1024);
     for i in 1..n {
         let mut j = i;

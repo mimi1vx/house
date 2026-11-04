@@ -14,7 +14,10 @@ pub struct RawSpinLock {
     pub v: UnsafeCell<u32>,
 }
 
-// SAFETY: RawSpinLock is Sync if used correctly (like C house_spinlock_t).
+// SAFETY: sole field `v: UnsafeCell<u32>` is touched only through the
+// LDAXR/STXR + `dmb sy` acquire/release protocol in `lock`/`unlock`
+// (parity with C `house_spinlock_t`), which serializes all cross-thread
+// access; no other state exists to transfer, so sharing and moving are sound.
 unsafe impl Sync for RawSpinLock {}
 unsafe impl Send for RawSpinLock {}
 
@@ -110,6 +113,9 @@ pub struct SpinLock<T> {
     data: UnsafeCell<T>,
 }
 
+// SAFETY: `data: UnsafeCell<T>` is accessed only through a held
+// `RawSpinLock` guard (`lock()` takes `&self` and returns the guard that
+// unlocks on drop); `T: Send` lets the protected value move across threads.
 unsafe impl<T: Send> Sync for SpinLock<T> {}
 unsafe impl<T: Send> Send for SpinLock<T> {}
 
@@ -153,12 +159,14 @@ pub struct SpinLockGuard<'a, T> {
 impl<T> Deref for SpinLockGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: guard holds the lock, so no other holder aliases `data`.
         unsafe { &*self.data }
     }
 }
 
 impl<T> DerefMut for SpinLockGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: guard holds the lock and `&mut self` is exclusive.
         unsafe { &mut *self.data }
     }
 }

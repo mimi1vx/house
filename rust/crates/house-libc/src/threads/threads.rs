@@ -788,9 +788,19 @@ pub unsafe extern "C" fn house_thread_trampoline() {
             unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
         }
     }
+    // SAFETY: `thr` is non-null (checked above) and names the live
+    // `HouseThread` slot the scheduler installed in `house_current_thr`
+    // for this core; `start`/`arg` were initialized before the thread
+    // became runnable (`pthread_create` / `house_thread_init_main`) and
+    // are never mutated afterwards, so these reads are valid.
     let start = unsafe { (*thr).start };
     let arg = unsafe { (*thr).arg };
     let ret = if !start.is_null() {
+        // SAFETY: non-null `start` round-trips the caller-supplied
+        // `pthread_create` entry point (`*mut u8`-erased fn pointer); the
+        // caller guarantees it is a valid
+        // `unsafe extern "C" fn(*mut u8) -> *mut u8`, invoked once here
+        // with the paired `arg`; no other provenance is ever stored.
         let f: unsafe extern "C" fn(*mut u8) -> *mut u8 = unsafe { core::mem::transmute(start) };
         unsafe { f(arg) }
     } else {

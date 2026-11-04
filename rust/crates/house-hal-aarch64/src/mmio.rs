@@ -53,7 +53,7 @@ pub unsafe fn mmio_r64(addr: u64) -> u64 {
 
 /// Write 64-bit MMIO at `addr`.
 /// # Safety
-/// Same as `mmio_w64`.
+/// Same as `mmio_r64` (write direction).
 #[inline(always)]
 pub unsafe fn mmio_w64(addr: u64, v: u64) {
     // SAFETY: caller guarantees MMIO destination valid.
@@ -74,6 +74,10 @@ pub unsafe fn mmio_r32_off(base: usize, off: usize) -> u32 {
     unsafe { mmio_r32(addr) }
 }
 
+/// Write 32-bit MMIO at `base+off` via `str`.
+///
+/// # Safety
+/// Same preconditions as `mmio_r32_off` (write direction).
 #[inline(always)]
 pub unsafe fn mmio_w32_off(base: usize, off: usize, v: u32) {
     // SAFETY: caller guarantees base+off MMIO (see mmio_r32_off).
@@ -251,6 +255,10 @@ pub unsafe fn tlbi_vmalle1is() {
     }
 }
 
+/// Invalidate the entire instruction cache (`ic iallu`).
+///
+/// # Safety
+/// EL1 only; no operands, invalidates unconditionally.
 #[inline(always)]
 pub unsafe fn ic_iallu() {
     // SAFETY: `ic iallu` is always safe at EL1 (invalidate I-cache).

@@ -20,7 +20,10 @@ pub struct RawSpinLock {
     pub v: UnsafeCell<u32>,
 }
 
-// SAFETY: RawSpinLock is `Sync` when used per C `house_spinlock_t` protocol (single owner via LDAXR/STXR).
+// SAFETY: sole field `v: UnsafeCell<u32>` is touched only through the
+// LDAXR/STXR + `dmb sy` acquire/release protocol in `lock`/`unlock`
+// (parity with C `house_spinlock_t`), which serializes all cross-thread
+// access; no other state exists to transfer, so sharing and moving are sound.
 unsafe impl Sync for RawSpinLock {}
 unsafe impl Send for RawSpinLock {}
 
@@ -74,6 +77,8 @@ pub struct SpinLock<T> {
     data: UnsafeCell<T>,
 }
 
+// SAFETY: `data: UnsafeCell<T>` is accessed only through a held
+// `RawSpinLock` guard; `T: Send` lets the protected value move across threads.
 unsafe impl<T: Send> Sync for SpinLock<T> {}
 unsafe impl<T: Send> Send for SpinLock<T> {}
 

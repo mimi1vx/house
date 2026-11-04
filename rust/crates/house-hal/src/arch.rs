@@ -24,7 +24,11 @@ pub struct VirtAddr(pub u64);
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Page(pub *mut u8);
 
-// SAFETY: Page is a raw pointer wrapper; Send/Sync follow caller guarantees.
+// SAFETY: `Page` is an owned 4 KiB buddy frame; the frame allocator hands
+// each frame to a single owner, so transferring or sharing the handle is
+// sound as long as the caller upholds that exclusive-ownership contract
+// (no live aliases across free, no double free). The `*mut u8` itself
+// carries no thread-local state.
 unsafe impl Send for Page {}
 unsafe impl Sync for Page {}
 
