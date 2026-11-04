@@ -987,6 +987,36 @@ mod tests {
         assert!(!is_demand_desc(0xDF00_0000_0000_0000));
     }
 
+    // S1 (house-oz9.11): driver roots reuse the process ASID allocator —
+    // no separate budget. The map must fit every live driver root: 32 slots
+    // against a 64-entry map leaves headroom for live processes, and the
+    // wrap/rebuild path is shared (a driver pdir is just a pdir to it).
+    #[test]
+    fn driver_roots_share_asid_cap() {
+        use crate::mm::vm::VIRTIO_SLOT_COUNT;
+        assert!((VIRTIO_SLOT_COUNT as usize) * 2 <= ASID_MAP_CAP);
+        unsafe {
+            // 40 roots stay under the cap, so no wrap flush fires (the host
+            // runs EL0 and cannot execute TLBI): distinct ASIDs in the 8-bit
+            // range, stable on re-request, accounted in the map length.
+            let mut pdirs = [core::ptr::null_mut(); 40];
+            for (i, slot) in pdirs.iter_mut().enumerate() {
+                *slot = (0x1000 * (i + 1)) as *mut u8;
+            }
+            let mut seen = [0u64; 40];
+            for (i, p) in pdirs.iter().enumerate() {
+                let a = asid_for_pdir(*p) as u64;
+                assert!((1..=250).contains(&a), "ASID in 8-bit range");
+                assert!(!seen[..i].contains(&a), "distinct before the cap");
+                seen[i] = a;
+            }
+            assert_eq!(ASID_MAP_LEN, 40);
+            for (i, p) in pdirs.iter().enumerate() {
+                assert_eq!(asid_for_pdir(*p) as u64, seen[i], "stable re-request");
+            }
+        }
+    }
+
     #[test]
     fn slot_folds_aff0_onto_32() {
         for mpidr in 0..=0xFFu64 {

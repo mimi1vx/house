@@ -271,6 +271,7 @@ house_user_write_bytes
 house_userspace_init
 house_vm_demand_100
 house_vm_demand_single
+house_vm_map_mmio
 house_vm_mmap
 house_vm_mprotect
 house_vm_munmap

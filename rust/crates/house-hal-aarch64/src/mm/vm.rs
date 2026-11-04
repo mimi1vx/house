@@ -427,6 +427,152 @@ pub unsafe extern "C" fn house_vm_mmap(
     }
 }
 
+// ---- S1 (house-oz9.11): per-driver virtio-MMIO window mapping ----
+//
+// VA decision (recorded): identity — VA == PA == VIRTIO_BASE + slot*STRIDE.
+// The existing accessors (`mmio_r32`/`mmio_w32`, every `slot_base`) already
+// use absolute addresses, so identity keeps them working unchanged when a
+// driver root is eventually installed; the window sits inside the user-window
+// convention (`HOUSE_USER_VA_MIN..=MAX`), so the standard L0/L1/L2 shape
+// applies; and the UART/GIC precedent (`house_mmu_clone_kernel_l2`) is
+// identity Device blocks too.
+//
+// 4K-granule residual: one page covers 8 slots (0x200 stride), so a driver
+// root's page also spans same-page neighbours. S1 is mapping-only and still
+// EL1-accessed — the kernel root already maps the whole 1GB window Device —
+// so the exposure delta is zero; S2 narrows the root (drops the RAM-identity
+// clone, keeps window+queues) before any EL0 execution.
+pub(crate) const VIRTIO_MMIO_BASE: u64 = 0x0a000000;
+pub(crate) const VIRTIO_MMIO_STRIDE: u64 = 0x200;
+// 32 probed virtio-mmio transports (`virtio_probe`, e952984 narrative).
+pub(crate) const VIRTIO_SLOT_COUNT: i32 = 32;
+
+/// 4K page containing `slot`'s 0x200 window (identity VA == PA), or `None`
+/// for a bad slot. Checked arithmetic throughout: the caller never computes
+/// an MMIO address, the HAL enforces the window here.
+pub(crate) fn mmio_slot_page(slot: i32) -> Option<u64> {
+    if !(0..VIRTIO_SLOT_COUNT).contains(&slot) {
+        return None;
+    }
+    let base = VIRTIO_MMIO_BASE.checked_add((slot as u64).checked_mul(VIRTIO_MMIO_STRIDE)?)?;
+    Some(base & !4095)
+}
+
+/// L3 page descriptor for an MMIO page: the demand-pager leaf exactly, with
+/// AttrIdx 0 (Normal) replaced by 1 (Device-nGnRnE, MAIR index 1 in
+/// `mmu.rs`). XN at both levels (UXN+PXN, never executable — S1 scope),
+/// nG (ASID-scoped like every process page, so wrap/rebuild flushes cover
+/// it), AF, Inner-shareable, AP 01 (EL1 RW, no EL0 access: S1 is
+/// EL1-accessed; S2 revisits AP before any EL0 execution).
+pub(crate) fn mmio_leaf_desc(pa_page: u64) -> u64 {
+    const PTE_AF: u64 = 1 << 10;
+    const PTE_SH_INNER: u64 = 3 << 8;
+    const PTE_NG: u64 = 1 << 11;
+    const PTE_UXN: u64 = 1 << 54;
+    const PTE_PXN: u64 = 1 << 53;
+    const PTE_ATTR_DEVICE: u64 = 1 << 2;
+    (pa_page & !0xFFF)
+        | PTE_VALID
+        | PTE_TABLE
+        | PTE_AF
+        | PTE_SH_INNER
+        | PTE_NG
+        | PTE_UXN
+        | PTE_PXN
+        | PTE_ATTR_DEVICE
+        | PTE_AP_RW
+}
+
+/// MMIO window allowlist check shared by map and unmap: AttrIdx == 1 marks a
+/// leaf the buddy allocator must never own.
+#[inline]
+fn is_mmio_desc(d: u64) -> bool {
+    (d >> 2) & 0x7 == 1
+}
+
+/// Locate the L2 slot for an MMIO page without allocating: `Ok` when the slot
+/// is free, `Err` when the root is malformed or the slot is occupied. Pure
+/// table reads (no lock, no alloc, no barriers): the caller holds `VM_LOCK`.
+/// Never splits or overwrites — overlap from this helper is a caller bug and
+/// fails closed here.
+pub(crate) unsafe fn mmio_l2_slot(pdir: *mut u8, page: u64) -> Result<*mut u64, ()> {
+    unsafe {
+        // SAFETY: caller guarantees a mapped root; reads only, indices masked.
+        let l0 = pdir as *mut u64;
+        let d0 = *l0.add(((page >> 39) & 0x1FF) as usize);
+        if d0 & PTE_VALID == 0 || d0 & PTE_TABLE == 0 {
+            return Err(());
+        }
+        let l1 = (d0 & !0xFFF) as *mut u64;
+        let d1 = *l1.add(((page >> 30) & 0x1FF) as usize);
+        if d1 & PTE_VALID == 0 || d1 & PTE_TABLE == 0 {
+            return Err(());
+        }
+        let l2 = (d1 & !0xFFF) as *mut u64;
+        let s2 = l2.add(((page >> 21) & 0x1FF) as usize);
+        if *s2 & PTE_VALID != 0 {
+            return Err(());
+        }
+        Ok(s2)
+    }
+}
+
+/// Map one driver's virtio-MMIO window into its own root (S1: mapping only).
+///
+/// Returns 1 installed, 0 refused (bad slot/root, occupied slot), -12 OOM.
+/// The L3 table comes from the buddy; every level above it must already be a
+/// table (a standard `allocPageMap` root) — a malformed root is refused, and
+/// nothing is linked before the L3 allocation succeeds, so OOM leaves no
+/// partial state behind.
+///
+/// # Safety
+///
+/// `pdir` must be a caller-owned, page-aligned root the caller never installs
+/// concurrently (driver init, EL1). Takes `VM_LOCK`; shares the lock domain
+/// with the pager and the `vm.rs` walks (house-oz9.1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_vm_map_mmio(pdir: *mut u8, slot: i32) -> i32 {
+    let Some(page) = mmio_slot_page(slot) else {
+        return 0;
+    };
+    if pdir.is_null() || (pdir as usize & 4095) != 0 {
+        return 0;
+    }
+    unsafe {
+        VM_LOCK.lock();
+        // SAFETY: pdir validated above; lock excludes other table writers.
+        let slot_ptr = match mmio_l2_slot(pdir, page) {
+            Ok(s) => s,
+            Err(()) => {
+                VM_LOCK.unlock();
+                return 0;
+            }
+        };
+        let l3 = buddy_alloc_page() as *mut u64;
+        if l3.is_null() {
+            VM_LOCK.unlock();
+            return -12;
+        }
+        for i in 0..512 {
+            *l3.add(i) = 0;
+        }
+        // SAFETY: fresh buddy page, exclusively owned; publish before linking.
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        *slot_ptr = ((l3 as u64) & !0xFFF) | PTE_VALID | PTE_TABLE;
+        core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+        *l3.add(((page >> 12) & 0x1FF) as usize) = mmio_leaf_desc(page);
+        // Fresh page: no stale TLB entry exists, so a local invalidate (like
+        // the demand pager) suffices — no SGI shootdown on the map path.
+        core::arch::asm!(
+            "dsb ishst; tlbi vae1is, {0}; dsb ish; isb",
+            in(reg) page >> 12,
+            options(nostack, preserves_flags)
+        );
+        VM_LOCK.unlock();
+        1
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
     if addr.is_null() {
@@ -457,11 +603,17 @@ pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
             if !slot.is_null() {
                 let d = unsafe { *slot };
                 if d & PTE_VALID != 0 {
+                    // S1 (house-oz9.11): a Device leaf names MMIO, not buddy
+                    // RAM. Clear the entry and shoot down, but never free the
+                    // address — freeing it would hand a device page to the
+                    // buddy allocator (or the Haskell free list).
                     let page = (d & !0xFFF) as *mut u8;
                     unsafe { *slot = 0 };
                     unsafe { core::arch::asm!("dsb ishst", options(nostack, preserves_flags)) };
                     unsafe { house_tlb_shootdown(va) };
-                    unsafe { buddy_free_page(page) };
+                    if !is_mmio_desc(d) {
+                        unsafe { buddy_free_page(page) };
+                    }
                 }
             }
             va = va.wrapping_add(PAGE_SIZE as u64);
@@ -601,6 +753,80 @@ mod tests {
             assert_eq!(keep & 1, 1);
             assert_eq!(keep & (1 << 1), 1 << 1);
             assert_eq!(keep & 0xFFF, (d & 0xFFF) | 0x2);
+        }
+    }
+
+    // S1 (house-oz9.11) mapping-layout tests: slot window -> Device PTE.
+    // The full install runs on target (driver init, `house-driver-check`
+    // green with the S1 dmesg line); these pin the layout math it executes:
+    // which page a slot lands on, which table slots the walk touches, and
+    // the exact attribute word the leaf carries.
+    #[test]
+    fn mmio_slot_vectors() {
+        use super::mmio_slot_page;
+        // Slot 0 opens the window; neighbours share the 4K page (0x200
+        // stride): the granule residual recorded on `house_vm_map_mmio`.
+        assert_eq!(mmio_slot_page(0), Some(0x0a000000));
+        assert_eq!(mmio_slot_page(1), Some(0x0a000000));
+        assert_eq!(mmio_slot_page(7), Some(0x0a000000));
+        assert_eq!(mmio_slot_page(8), Some(0x0a001000));
+        assert_eq!(mmio_slot_page(31), Some(0x0a003000));
+        // Allowlist: negative, past-the-end, and overflowed slots refuse.
+        assert_eq!(mmio_slot_page(-1), None);
+        assert_eq!(mmio_slot_page(32), None);
+        assert_eq!(mmio_slot_page(i32::MAX), None);
+    }
+
+    #[test]
+    fn mmio_leaf_is_device_xn() {
+        use super::mmio_leaf_desc;
+        let d = mmio_leaf_desc(0x0a003000);
+        // Identity: the leaf names the window's own page (address field
+        // only — the XN bits live above it).
+        assert_eq!(d & 0x0000FFFFFFFFF000, 0x0a003000);
+        assert_eq!(d & 1, 1, "VALID");
+        assert_eq!(d & (1 << 1), 1 << 1, "L3 page convention (PTE_TABLE)");
+        assert_eq!(d & (1 << 10), 1 << 10, "AF");
+        // AttrIdx bits[4:2] == 001: Device-nGnRnE, never Normal cacheable.
+        assert_eq!((d >> 2) & 0x7, 1, "AttrIdx device");
+        // XN at both levels, ASID-scoped, EL1-only RW (S1 mapping-only).
+        assert_eq!(d & (1 << 54), 1 << 54, "UXN");
+        assert_eq!(d & (1 << 53), 1 << 53, "PXN");
+        assert_eq!(d & (1 << 11), 1 << 11, "nG");
+        assert_eq!((d >> 6) & 0x3, 0x1, "AP EL1 RW");
+        // Inner-shareable, like every other leaf this tree installs.
+        assert_eq!((d >> 8) & 0x3, 0x3, "SH inner");
+    }
+
+    #[test]
+    fn mmio_walk_layout() {
+        use super::mmio_l2_slot;
+        // Fake root with 4K-aligned tables (the walk masks links to 4K,
+        // exactly like hardware): L0[0] -> L1, L1[0] -> L2, rest invalid.
+        #[repr(align(4096))]
+        struct Aligned512([u64; 512]);
+        let mut l0 = Box::new(Aligned512([0; 512]));
+        let mut l1 = Box::new(Aligned512([0; 512]));
+        let mut l2 = Box::new(Aligned512([0; 512]));
+        let l0p = l0.0.as_mut_ptr() as *mut u8;
+        unsafe {
+            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
+            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            // Free slot: every driver window lands in L2[80] (0x0a000000
+            // / 2MB == 80), L3 index varies by page.
+            let s = mmio_l2_slot(l0p, 0x0a003000).expect("free slot");
+            assert_eq!(s, l2.0.as_mut_ptr().add(80));
+            let s0 = mmio_l2_slot(l0p, 0x0a000000).expect("free slot");
+            assert_eq!(s0, l2.0.as_mut_ptr().add(80));
+            // Occupied slot refuses (overlap backstop): VALID block or leaf.
+            *l2.0.as_mut_ptr().add(80) = 0x0a000000 | 0x3;
+            assert!(mmio_l2_slot(l0p, 0x0a003000).is_err());
+            *l2.0.as_mut_ptr().add(80) = 0;
+            // Malformed roots refuse: invalid L0, block L1.
+            let mut bare = Box::new(Aligned512([0; 512]));
+            assert!(mmio_l2_slot(bare.0.as_mut_ptr() as *mut u8, 0x0a000000).is_err());
+            *l0.0.as_mut_ptr().add(0) = 0x40000000 | 0x401;
+            assert!(mmio_l2_slot(l0p, 0x0a000000).is_err());
         }
     }
 }

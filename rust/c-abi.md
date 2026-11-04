@@ -177,7 +177,8 @@ IRQ→Endpoint push path (`house_irq_push`, `ba5acfa` livelock fix) is frozen;
 
 TTBR0 window `0x01000000–0xFFFFFFFF`, 8-bit ASID with `VMALLE1IS` wrap,
 demand pager + `mprotect` RO perm faults + `munmap` translation faults,
-`VAE1IS` + SGI 1 shootdown.
+`VAE1IS` + SGI 1 shootdown. Per-driver roots (house-oz9.11 S1) reuse the same
+ASID map and wrap path — a driver pdir is just a pdir to the allocator.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
@@ -214,11 +215,13 @@ demand-100 pages, `mprotect` RO perm fault, `munmap` translation fault,
 `house_puts_after` ordering marker. Shared-page ownership is documented in
 `docs/design/shared-page-ownership.md`: `cowRefs` is the sole registry and
 `house_vm_munmap` is the one path that frees without consulting it,
-reachable only from EL1 diagnostics.
+reachable only from EL1 diagnostics. Device leaves (S1 MMIO windows) are
+cleared but never freed.
 
 | Crate | Symbol | C signature | Source |
 |-------|--------|-------------|--------|
 | `house-hal-aarch64` | `house_vm_mmap` | `void *house_vm_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)` | `mm/vm.c` |
+| `house-hal-aarch64` | `house_vm_map_mmio` | `int house_vm_map_mmio(void *pdir, int slot)` | `mm/vm.rs` (new: map one driver's virtio-MMIO window (identity VA == PA, `VIRTIO_BASE` + slot * `0x200`) into its own TTBR0 root with Device-nGnRnE, XN, nG, AP EL1-only attrs; 1 installed, 0 refused (bad slot/root, occupied), -12 OOM. Never splits or overwrites; `munmap` clears Device leaves without freeing the address) |
 | `house-hal-aarch64` | `house_vm_munmap` | `int house_vm_munmap(void *a, size_t len)` | `mm/vm.c` |
 | `house-hal-aarch64` | `house_vm_mprotect` | `int house_vm_mprotect(void *a, size_t len, int prot)` | `mm/vm.c` |
 | `house-hal-aarch64` | `house_vm_demand_single` | `int house_vm_demand_single(void)` | `mm/vm.c` |

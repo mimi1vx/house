@@ -227,6 +227,9 @@ netServerInit slot
                                                           case rReg of
                                                             Left _ -> do freeQueue vqRx; freeQueue vqTx; return (Left (NetInvalidArg "register failed"))
                                                             Right () -> do
+                                                              -- S1 (house-oz9.11): per-driver TTBR0 root (mapping
+                                                              -- only). Fail-open: the driver runs rootless until S2.
+                                                              _ <- DrvReg.installDriverRoot ("virtio-net" ++ show slot) slot
                                                               withQSem netSem $ do m <- readRef netMap; writeRef netMap (Map.insert slot dev m)
                                                               withQSem netSem $ do gmap <- readRef netRxGrants; writeRef netRxGrants (Map.insert slot Map.empty gmap)
                                                               forM_ ([1 .. 4] :: [Int]) $ \_ -> do

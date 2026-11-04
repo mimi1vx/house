@@ -58,6 +58,7 @@ import H.Interrupts qualified as Interrupts
 import H.Monad (liftIO)
 import H.Monad qualified as HM
 import H.Pages qualified as P
+import H.VirtualMemory qualified as VM
 import Kernel.Driver.Registry qualified as DrvReg
 import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Blk.Completion qualified as Completion
@@ -1811,6 +1812,8 @@ main = do
       , checkIO "irq drops counted on full queue" irqDropsGolden
       , checkIO "serveEndpoint dispatches and exits on free" serveEndpointGolden
       , checkIO "unregister kills both driver threads" driverTwoThreadGolden
+      , check "mmio desc Device reads unmapped" mmioClassifierGolden
+      , checkIO "driver root install fails closed" driverRootFailClosedGolden
       , checkIO "wedged server yields WouldBlock" wedgedGolden
       , checkIO "aborted grant call returns its page" grantAbortGolden
       , check "svc mask full allows all" svcMaskFullGolden
@@ -2352,6 +2355,32 @@ The second thread blocks on an MVar rather than on its endpoint, so freeing
 the endpoints cannot stop it: only an explicit `killH` can, which is what
 makes this discriminate a two-thread teardown from a one-thread one.
 -}
+
+{- | S1 (house-oz9.11): the Device classifier behind the walker guards.
+A Device-nGnRnE leaf (AttrIdx 1) is not RAM: 'descToPageInfo' reads it as
+unmapped, so 'freeUserPages'/teardown paths skip it. A Normal leaf, a zero
+word, and a demand marker (invalid, AttrIdx 0) are not devices.
+-}
+mmioClassifierGolden :: Bool
+mmioClassifierGolden =
+  let normal = 0x0a003000 .|. 0x3 .|. (1 `shiftL` 10) .|. (3 `shiftL` 8) .|. (1 `shiftL` 11)
+      device = normal .|. (1 `shiftL` 2)
+      demand = 0xDE `shiftL` 56
+   in VM.isDeviceDesc device
+        && not (VM.isDeviceDesc normal)
+        && not (VM.isDeviceDesc 0)
+        && not (VM.isDeviceDesc demand)
+
+{- | S1: 'installDriverRoot' fails closed on host — bad slot refused before
+any allocation, and a refused map (stubs + no host pages) records nothing.
+-}
+driverRootFailClosedGolden :: IO Bool
+driverRootFailClosedGolden = do
+  badSlot <- HM.runH (DrvReg.installDriverRoot "s1-bad" (-1))
+  noPages <- HM.runH (DrvReg.installDriverRoot "s1-none" 0)
+  missing <- HM.runH (DrvReg.lookupDriverRoot "s1-none")
+  return (not badSlot && not noPages && isNothing missing)
+
 driverTwoThreadGolden :: IO Bool
 driverTwoThreadGolden = do
   r <- Timeout.timeout 10000000 $ do

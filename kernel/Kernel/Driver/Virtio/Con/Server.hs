@@ -510,6 +510,9 @@ attachDevice slot kind vqRx vqTx mCtrl = do
   case rReg of
     Left _ -> do freeQueue vqRx; freeQueue vqTx; freeCtrl mCtrl; return (Left (ConInvalidArg "register failed"))
     Right () -> do
+      -- S1 (house-oz9.11): per-driver TTBR0 root (mapping only). Fail-open:
+      -- the driver runs rootless until S2.
+      _ <- DrvReg.installDriverRoot ("virtio-con" ++ show slot) slot
       withQSem conSem $ do m <- readRef conMap; writeRef conMap (Map.insert slot dev m)
       withQSem conSem $ do gmap <- readRef conRxGrants; writeRef conRxGrants (Map.insert slot Map.empty gmap)
       forM_ ([1 .. 4] :: [Int]) $ \_ -> do

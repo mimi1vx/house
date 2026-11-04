@@ -166,6 +166,9 @@ blkServerInit slot
                       case rReg of
                         Left _ -> return (Left (BlkInvalidArg "register failed"))
                         Right () -> do
+                          -- S1 (house-oz9.11): per-driver TTBR0 root (mapping
+                          -- only). Fail-open: the driver runs rootless until S2.
+                          _ <- DrvReg.installDriverRoot ("virtio-blk" ++ show slot) slot
                           withQSem blkSem $ do
                             m2 <- readRef blkMap
                             writeRef blkMap (Map.insert slot blkDev m2)

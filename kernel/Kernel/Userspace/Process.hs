@@ -2930,7 +2930,11 @@ freePDir pdir = do
                     Just l3 -> do
                       forM_ [0 .. 511] $ \i3 -> do
                         d3 <- peekElemOff l3 i3
-                        when ((d3 .&. 1) /= 0) $ releaseBacking (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000))
+                        -- S1 (house-oz9.11): a Device leaf names MMIO, not
+                        -- buddy RAM — never free its address (the L3 table
+                        -- itself is still freed below).
+                        when ((d3 .&. 1) /= 0 && not (VM.isDeviceDesc d3)) $
+                          releaseBacking (ptrFromWord64 (d3 .&. 0x0000FFFFFFFFF000))
                       HPages.freePage l3
                 HPages.freePage l2
           HPages.freePage l1

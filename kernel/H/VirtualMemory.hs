@@ -17,6 +17,7 @@ module H.VirtualMemory (
   clearDemandPage,
   toPageMap,
   fromPageMap, -- not for public use
+  isDeviceDesc,
 )
 where
 
@@ -156,9 +157,18 @@ apRW, apRO :: Word64
 apRW = 1 `shiftL` 6 -- AP 01
 apRO = 3 `shiftL` 6 -- AP 11
 
+{- | AttrIdx == 1 (Device-nGnRnE) marks an MMIO leaf (S1, house-oz9.11):
+names device registers, never buddy RAM. Walkers that free or serve RAM
+pages must skip these ('descToPageInfo', 'freePDir' in
+'Kernel.Userspace.Process').
+-}
+isDeviceDesc :: Desc -> Bool
+isDeviceDesc d = ((d `shiftR` 2) .&. 0x7) == 1
+
 descToPageInfo :: Desc -> Maybe PageInfo
 descToPageInfo d
   | not (testBit' bValid d) = Nothing
+  | isDeviceDesc d = Nothing
   | otherwise =
       Just
         ( PageInfo {
