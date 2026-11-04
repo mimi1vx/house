@@ -67,7 +67,10 @@ jobs:
               make house-fd-el0-check TCG_ONLY=1
               make house-fork-check TCG_ONLY=1
               make house-proc-check TCG_ONLY=1
-              make house-svcmask-check TCG_ONLY=1
+              # Timing-sensitive: each needed a stabilization commit, so a
+              # single green run is not evidence. Repeat x10, fail on first red.
+              make gate-repeat TARGET=house-svcmask-check N=10 TCG_ONLY=1
+              make gate-repeat TARGET=house-fault-kill-check N=10 TCG_ONLY=1
               make house-yield-spin-check TCG_ONLY=1
               ;;
             smp)

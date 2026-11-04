@@ -481,6 +481,16 @@ endif
 gate-coverage:
 	sh scripts/gate-coverage.sh
 
+# Timing-sensitive gates: repeat one focused check N times (default 10),
+# fail on first red. "It passed once" is not evidence for a gate that
+# needed a stabilization commit. Extra make vars (TCG_ONLY=1, SMP_N=,
+# SPIKE_MEM=) flow to the sub-make via MAKEFLAGS.
+# Usage: make gate-repeat TARGET=house-svcmask-check N=10 [TCG_ONLY=1]
+gate-repeat:
+	@[ -n "$(TARGET)" ] || { echo "gate-repeat: TARGET required (e.g. make gate-repeat TARGET=house-svcmask-check N=10)" >&2; exit 2; }
+	@for i in $$(seq 1 $${N:-10}); do echo "== gate-repeat run $$i/$${N:-10}: $(TARGET)"; $(MAKE) $(TARGET) || exit 1; done
+	@echo "== gate-repeat: $(TARGET) passed $${N:-10}/$${N:-10}"
+
 # TCG-only gate for Linux CI: the check legs under TCG, except the hvf
 # halves (TCG_ONLY=1 skips them; hosted runners have no nested virt) and
 # except house-dynamic-root-check, whose harness still forces
@@ -535,6 +545,6 @@ check:
 	$(MAKE) dynamic-elf-check
 	@echo "== make check: all aarch64 gates passed (doctor, gate-coverage, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic, irq dispatch, rust, haskell, el0tiny, dynamic ELF) =="
 
-.PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check \
+.PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check gate-repeat \
         irq-build irq-run irq-check gate-coverage \
         house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-irq-dispatch-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg house-yield-spin-check
