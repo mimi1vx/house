@@ -15,7 +15,32 @@ pub static mut min_user_addr: *mut u8 = core::ptr::null_mut();
 #[unsafe(no_mangle)]
 pub static mut max_user_addr: *mut u8 = core::ptr::null_mut();
 
-static mut RECORDED_PDIR: *mut u8 = core::ptr::null_mut();
+// Trap-time identity: one recorded root per core. A single global races when
+// two cores trap at once: the second core's resume/park overwrites the first
+// core's table mid-validation, so the first core validates user pointers
+// against the wrong tables and fails a healthy call with a spurious EFAULT.
+// Every trap/IRQ-context reader runs on the trapping core, and every
+// resume/enter sets the slot on the core EL0 is about to run on, so indexing
+// by this core's MPIDR slot keeps each core on its own table. Host unit
+// tests have no MPIDR and always use slot 0.
+static mut RECORDED_PDIRS: [*mut u8; 32] = [core::ptr::null_mut(); 32];
+
+#[cfg(test)]
+#[inline]
+fn recorded_idx() -> usize {
+    0
+}
+
+#[cfg(not(test))]
+#[inline]
+fn recorded_idx() -> usize {
+    let me: u64;
+    // SAFETY: mrs mpidr_el1 is always readable at EL1 (trap/IRQ context only).
+    unsafe {
+        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) me, options(nostack, preserves_flags))
+    };
+    core_slot(me)
+}
 static ASID_LOCK: RawSpinLock = RawSpinLock::new();
 static mut NEXT_ASID: u16 = 1;
 const ASID_MAP_CAP: usize = 64;
@@ -37,8 +62,8 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_userspace_init() {
     unsafe {
-        if RECORDED_PDIR.is_null() {
-            RECORDED_PDIR = ttbr0_l0.as_ptr() as *mut u8;
+        if RECORDED_PDIRS[recorded_idx()].is_null() {
+            RECORDED_PDIRS[recorded_idx()] = ttbr0_l0.as_ptr() as *mut u8;
         }
         if min_user_addr.is_null() {
             min_user_addr = PAGE_POOL.0.as_mut_ptr();
@@ -199,8 +224,10 @@ pub unsafe extern "C" fn house_release_pdir(pdir: *mut u8) -> i32 {
         let ttbr0: u64;
         core::arch::asm!("mrs {0}, ttbr0_el1", out(reg) ttbr0, options(nostack, preserves_flags));
         let live = ((ttbr0 & 0x0000_FFFF_FFFF_F000) as *mut u8) == pdir;
-        if RECORDED_PDIR == pdir {
-            RECORDED_PDIR = ttbr0_l0.as_ptr() as *mut u8;
+        for slot in RECORDED_PDIRS.iter_mut() {
+            if *slot == pdir {
+                *slot = ttbr0_l0.as_ptr() as *mut u8;
+            }
         }
         let _ = evict_asid(pdir);
         budget_remove(pdir as u64);
@@ -247,7 +274,7 @@ pub unsafe extern "C" fn init_page_dir(pdir: *mut u8) {
     }
     unsafe {
         let asid = asid_for_pdir(pdir) as u64;
-        RECORDED_PDIR = pdir;
+        RECORDED_PDIRS[recorded_idx()] = pdir;
         house_mmu_set_ttbr0(pdir, asid);
         uart_puts(b"[userspace] init_page_dir done\n\0".as_ptr());
     }
@@ -256,19 +283,19 @@ pub unsafe extern "C" fn init_page_dir(pdir: *mut u8) {
 #[cfg(test)]
 pub(crate) unsafe fn userspace_set_recorded_for_test(pdir: *mut u8) {
     unsafe {
-        RECORDED_PDIR = pdir;
+        house_set_recorded_pdir(pdir);
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn current_pdir() -> *mut u8 {
-    unsafe { RECORDED_PDIR }
+    unsafe { RECORDED_PDIRS[recorded_idx()] }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_set_recorded_pdir(pdir: *mut u8) {
     unsafe {
-        RECORDED_PDIR = pdir;
+        RECORDED_PDIRS[recorded_idx()] = pdir;
     }
 }
 
@@ -284,7 +311,7 @@ pub unsafe extern "C" fn house_asid_for_pdir(pdir: *mut u8) -> u64 {
 pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
     let va = va & !4095;
     unsafe {
-        let pdir = RECORDED_PDIR;
+        let pdir = current_pdir();
         if pdir.is_null() || (pdir as usize & 4095) != 0 {
             return 0;
         }
@@ -330,7 +357,7 @@ pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
 pub unsafe extern "C" fn house_is_cow_page(va: u64) -> i32 {
     let va = va & !4095;
     unsafe {
-        let pdir = RECORDED_PDIR;
+        let pdir = current_pdir();
         if pdir.is_null() || (pdir as usize & 4095) != 0 {
             return 0;
         }
@@ -387,7 +414,7 @@ pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
 // zeroing, and faults are rare, so a side table keyed by root would buy no
 // throughput and one more thing to keep in step with the allocator.
 // Unification (house-oz9.1): the pager shares VM_LOCK (crate::mm::vm) with
-// the vm.rs walks (mmap/munmap/mprotect): one domain over RECORDED_PDIR.
+// the vm.rs walks (mmap/munmap/mprotect): one domain over the recorded root.
 // Outer lock; BUDGET_LOCK and the buddy LOCK are inner leaves.
 
 // Per-pdir demand-page budget: one process cannot drain the buddy for
@@ -763,12 +790,13 @@ pub(crate) fn is_demand_desc(d3: u64) -> bool {
 ///
 /// # Safety
 ///
-/// Reads the recorded pdir; caller must guarantee EL1.
+/// Reads this core's recorded pdir; caller must guarantee EL1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_is_demand_va(va: u64) -> i32 {
     let vap = va & !4095;
     unsafe {
-        let pdir = core::ptr::read_volatile(&raw const RECORDED_PDIR);
+        let slot = core::ptr::addr_of!(RECORDED_PDIRS[recorded_idx()]);
+        let pdir = core::ptr::read_volatile(slot);
         if pdir.is_null() || (pdir as usize & 4095) != 0 {
             return 0;
         }
@@ -802,7 +830,10 @@ pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
     if far < HOUSE_USER_VA_MIN || far > HOUSE_USER_VA_MAX {
         return 0;
     }
-    let pdir = unsafe { core::ptr::read_volatile(&raw const RECORDED_PDIR) };
+    let pdir = unsafe {
+        let slot = core::ptr::addr_of!(RECORDED_PDIRS[recorded_idx()]);
+        core::ptr::read_volatile(slot)
+    };
     if pdir.is_null() || (pdir as usize & 4095) != 0 {
         return 0;
     }

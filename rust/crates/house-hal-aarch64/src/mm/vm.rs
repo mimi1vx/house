@@ -68,8 +68,8 @@ const ENOMEM: i32 = 12;
 
 // Single page-table lock domain: covers the vm.rs walks (mmap/munmap/
 // mprotect, via vm_l3_entry/vm_split_slot) and the demand-pager install
-// path in userspace.rs (house_handle_user_fault/fault_locked), both over
-// RECORDED_PDIR/current_pdir(). Outer lock; BUDGET_LOCK and the buddy
+// path in userspace.rs (house_handle_user_fault/fault_locked): one domain
+// over this core's recorded root. Outer lock; BUDGET_LOCK and the buddy
 // LOCK are inner leaves (never held while acquiring this one).
 pub(crate) static VM_LOCK: RawSpinLock = RawSpinLock::new();
 static mut VM_RESV: [(*mut u8, *mut u8); 32] = [(core::ptr::null_mut(), core::ptr::null_mut()); 32];

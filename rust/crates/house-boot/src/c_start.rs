@@ -388,7 +388,8 @@ pub unsafe extern "C" fn c_handle_sync(
             if park_candidate {
                 // Per-pdir syscall mask: denied imms skip parking and take
                 // the inline-ENOSYS dispatch path below (same as 0x14).
-                // SAFETY: current_pdir reads TTBR0 at EL1 handler.
+                // SAFETY: current_pdir reads this core's recorded
+                // table at EL1 handler.
                 let allowed = unsafe { house_svc_allowed(current_pdir(), svc_imm) };
                 if allowed != 0 {
                     // YIELD park: save the 896B frame + ELR (as-delivered, already
