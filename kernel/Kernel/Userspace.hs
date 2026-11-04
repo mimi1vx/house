@@ -18,6 +18,7 @@ module Kernel.Userspace (
 
   -- * Types
   Kernel.Userspace.Types.Pid (..),
+  Kernel.Userspace.Types.supervisorPid,
   Kernel.Userspace.Types.SharedObject (..),
   Kernel.Userspace.Types.Process (..),
 
@@ -28,6 +29,7 @@ module Kernel.Userspace (
   Kernel.Userspace.Process.procInfo,
   Kernel.Userspace.Process.listProcs,
   Kernel.Userspace.Process.waitPid,
+  Kernel.Userspace.Process.WaitError (..),
   Kernel.Userspace.Process.killPid,
   Kernel.Userspace.Process.procBrkGrow,
   Kernel.Userspace.Process.stackTop,

@@ -9,6 +9,7 @@ Lock order: ... -> netSem -> userSem -> epSem . Never hold userSem across takeMV
 -}
 module Kernel.Userspace.Types (
   Pid (..),
+  supervisorPid,
   SharedObject (..),
   StopAck,
   Process (..),
@@ -36,6 +37,14 @@ import Kernel.Userspace.Loader (Segment)
 newtype Pid = Pid Int
   deriving (Eq, Ord, Show)
 
+{- | The EL1 shell supervisor. Never allocated by 'pidNext' (which starts at
+1): spawns are parented here, orphaned grandchildren are adopted here on
+reap/kill, and the shell reaps as this waiter, so shell job control keeps
+working while EL0 wait is restricted to own children.
+-}
+supervisorPid :: Pid
+supervisorPid = Pid 0
+
 {- | Per-pid acknowledgement that the process's EL0 session has ended. 'killPid'
 frees a root only after the target's park loop has seen the removal and
 returned, so pages that are still executing from are never handed back to the
@@ -56,6 +65,7 @@ data SharedObject = SharedObject {
 
 data Process = Process {
   procPid :: Pid
+  , procParent :: Pid
   , procPdir :: PageMap
   , procEntry :: VAddr
   , procBrk :: VAddr

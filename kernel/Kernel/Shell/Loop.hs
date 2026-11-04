@@ -355,9 +355,12 @@ loop = do
                         Left le2 -> return (Left (toExecError le2))
                         Right cPid -> do
                           U.grantEndpoint cPid (IPC.endpointId ep)
-                          sCode <- U.waitPid sPid
-                          cCode <- U.waitPid cPid
-                          return (Right (sCode, cCode))
+                          sWait <- U.waitPid U.supervisorPid sPid
+                          cWait <- U.waitPid U.supervisorPid cPid
+                          case (sWait, cWait) of
+                            (Right sCode, Right cCode) -> return (Right (sCode, cCode))
+                            (Left e, _) -> return (Left ("wait server: " ++ show e))
+                            (_, Left e) -> return (Left ("wait client: " ++ show e))
       case r of
         Left e -> withCString ("ipc el0pp failed: " ++ e ++ "\n") c_uart_puts
         Right (sv, cl) -> withCString ("ipc el0pp ok server=" ++ show sv ++ " client=" ++ show cl ++ "\n") c_uart_puts
@@ -678,11 +681,11 @@ loop = do
                       settled <- U.waitBothExited pidA pidB
                       pagesA <- U.procPageCount pidA
                       pagesB <- U.procPageCount pidB
-                      codeA <- U.waitPid pidA
-                      codeB <- U.waitPid pidB
+                      codeA <- U.waitPid U.supervisorPid pidA
+                      codeB <- U.waitPid U.supervisorPid pidB
                       after <- U.cowLiveCount
                       shareEnd <- U.cowShareTotal
-                      if settled && shareEnd > shareBase && after <= baseline && codeA == 0 && codeB == 0
+                      if settled && shareEnd > shareBase && after <= baseline && codeA == Right 0 && codeB == Right 0
                         then return (Right (pagesA, pagesB))
                         else do
                           -- A settle timeout leaves live processes behind;
@@ -758,7 +761,7 @@ loop = do
       case res of
         Left le -> return (Just ("spawn " ++ toExecError le))
         Right pid -> do
-          _ <- U.waitPid pid
+          _ <- U.waitPid U.supervisorPid pid
           after <- readAsidMapLen
           return (if after == asids0 then Nothing else Just (show asids0 ++ "->" ++ show after))
     forkShared pidA pidB = do
@@ -832,8 +835,10 @@ loop = do
                 case res of
                   Left le2 -> return (Left (toExecError le2))
                   Right pid -> do
-                    code <- U.waitPid pid
-                    return (Right code)
+                    resW <- U.waitPid U.supervisorPid pid
+                    case resW of
+                      Left e -> return (Left ("wait failed: " ++ show e))
+                      Right code -> return (Right code)
       case r of
         Left e -> withCString (e ++ "\n") c_uart_puts
         Right 0 -> return ()
@@ -851,8 +856,10 @@ loop = do
                 case res of
                   Left le2 -> return (Left (toExecError le2))
                   Right pid -> do
-                    code <- U.waitPid pid
-                    return (Right code)
+                    resW <- U.waitPid U.supervisorPid pid
+                    case resW of
+                      Left e -> return (Left ("wait failed: " ++ show e))
+                      Right code -> return (Right code)
       case r of
         Left e -> withCString (e ++ "\n") c_uart_puts
         Right code -> withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
@@ -880,16 +887,22 @@ loop = do
         live <- runH U.listProcs
         if any (\(U.Pid m) -> m == n) live
           then do
-            code <- runH (U.waitPid (U.Pid n))
-            withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
+            res <- runH (U.waitPid U.supervisorPid (U.Pid n))
+            case res of
+              Right code -> withCString ("ok exit " ++ show code ++ "\n") c_uart_puts
+              Left U.WaitNotChild -> withCString ("not a child: " ++ s ++ "\n") c_uart_puts
+              Left U.WaitNoSuch -> withCString ("no such job: " ++ s ++ "\n") c_uart_puts
           else withCString ("no such job: " ++ s ++ "\n") c_uart_puts
       _ -> withCString "usage: wait [pid]\n" c_uart_puts
     handleWaitAll = do
       pids <- runH U.listProcs
       mapM_
         ( \(U.Pid n) -> do
-            code <- runH (U.waitPid (U.Pid n))
-            withCString ("reaped pid " ++ show n ++ " exit " ++ show code ++ "\n") c_uart_puts
+            res <- runH (U.waitPid U.supervisorPid (U.Pid n))
+            case res of
+              Right code -> withCString ("reaped pid " ++ show n ++ " exit " ++ show code ++ "\n") c_uart_puts
+              Left U.WaitNotChild -> withCString ("skip pid " ++ show n ++ ": not a child\n") c_uart_puts
+              Left U.WaitNoSuch -> withCString ("skip pid " ++ show n ++ ": already reaped\n") c_uart_puts
         )
         pids
     handleQuantum s = case reads s :: [(Integer, String)] of

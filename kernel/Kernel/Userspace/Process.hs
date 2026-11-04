@@ -11,6 +11,7 @@ module Kernel.Userspace.Process (
   procInfo,
   listProcs,
   waitPid,
+  WaitError (..),
   killPid,
   procBrkGrow,
   stackTop,
@@ -67,7 +68,7 @@ import Kernel.Userspace.Loader (Elf (..), LoadError (..), Segment (..), loadElf,
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Sched qualified as Sched
 import Kernel.Userspace.Trampoline qualified as Tramp
-import Kernel.Userspace.Types (DemandObject (..), DemandTable, Pid (..), Process (..), SharedObject (..), StopAck, pidNext, procExitMap, procMap, procStopMap, userSem)
+import Kernel.Userspace.Types (DemandObject (..), DemandTable, Pid (..), Process (..), SharedObject (..), StopAck, pidNext, procExitMap, procMap, procStopMap, supervisorPid, userSem)
 import Numeric (showHex)
 import System.Timeout qualified as T
 
@@ -815,7 +816,7 @@ runPreparedBound pidInt image argv envp = do
                               stopVar <- newEmptyMVar
                               modifyRef procExitMap (Map.insert pid exitVar)
                               modifyRef procStopMap (Map.insert pid stopVar)
-                              modifyRef procMap (Map.insert pid (Process pid pdir entry initBrk (mappedSharedObjects mappedImage) (mappedDemand mappedImage)))
+                              modifyRef procMap (Map.insert pid (Process pid supervisorPid pdir entry initBrk (mappedSharedObjects mappedImage) (mappedDemand mappedImage)))
                               modifyRef procGrants (Map.insert pid [])
                               Sched.schedRegister pid
                               let finiSteps = mappedFiniSteps mappedImage
@@ -887,7 +888,7 @@ forkProc parentPid@(Pid parentInt) = withQSem userSem $ do
                   pidInt <- readRef pidNext
                   writeRef pidNext (pidInt + 1)
                   let child = Pid pidInt
-                  modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent) (procDemand parent)))
+                  modifyRef procMap (Map.insert child (Process child parentPid childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent) (procDemand parent)))
                   grants <- readRef procGrants
                   writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants) grants)
                   maskOk <- inheritSvcMask (procPdir parent) childPdir
@@ -1071,7 +1072,7 @@ forkChildEl0 parentPid@(Pid parentInt) parentPtr = withQSem userSem $ do
                           stopVar <- newEmptyMVar
                           modifyRef procExitMap (Map.insert child exitVar)
                           modifyRef procStopMap (Map.insert child stopVar)
-                          modifyRef procMap (Map.insert child (Process child childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent) (procDemand parent)))
+                          modifyRef procMap (Map.insert child (Process child parentPid childPdir (procEntry parent) (procBrk parent) (procSharedObjects parent) (procDemand parent)))
                           grants0 <- readRef procGrants
                           writeRef procGrants (Map.insert child (Map.findWithDefault [] parentPid grants0) grants0)
                           Sched.schedRegister child
@@ -1151,7 +1152,7 @@ the path (VFS, then 'loadElf') before touching the old image; only then frees
 old user pages, maps the new segments, lays a fresh argv ([path]) + env
 stack, updates entry/brk, and redirects the parked slot via
 'house_el0_set_entry' (resume with x0 = 0 follows in the caller). Fds stay
-open across exec (Unix semantics); the pid/namespace/slot are unchanged.
+open across exec (Unix semantics); the pid/namespace/slot/parent are unchanged.
 Errors before the point of no return resume errnos (ENOENT/EINVAL/ENOMEM);
 a mapping failure past it resumes ENOMEM on a half-built image.
 -}
@@ -1287,36 +1288,64 @@ pokeWord64LE p o w = do
   poke (p `plusPtr` (o + 6)) (fromIntegral (w `shiftR` 48) :: Word8)
   poke (p `plusPtr` (o + 7)) (fromIntegral (w `shiftR` 56) :: Word8)
 
-waitPid :: Pid -> H Int
-waitPid pid@(Pid pidInt) = do
-  mVar <- withQSem userSem (Map.lookup pid <$> readRef procExitMap)
-  code <- maybe pollExit takeMVar mVar
-  (mProc, mStash) <- withQSem userSem $ do
+-- | Reap failure: the target never existed, or it is not the waiter's child.
+data WaitError = WaitNoSuch | WaitNotChild
+  deriving (Eq, Show)
+
+{- | Adopt the live children of a departing pid into the shell supervisor, so a
+reaped or killed parent never leaves an unreapable zombie behind.
+-}
+adoptOrphans :: Pid -> Map.Map Pid Process -> Map.Map Pid Process
+adoptOrphans gone = Map.map (\pr -> if procParent pr == gone then pr {procParent = supervisorPid} else pr)
+
+{- | Reap an exited child and return its exit code. Only the recorded parent
+may reap: EL0 has no privilege boundary (one unikernel trust domain), so this
+is ownership bookkeeping, not a security boundary — each exit code goes to
+the waiter that spawned or forked the child instead of letting any process
+steal another subtree's reap. Exec keeps parent (record update); orphans are
+adopted by the supervisor (see 'adoptOrphans').
+-}
+waitPid :: Pid -> Pid -> H (Either WaitError Int)
+waitPid waiter pid@(Pid pidInt) = do
+  mVar <- withQSem userSem $ do
     mp <- readRef procMap
     case Map.lookup pid mp of
-      Nothing -> return (Nothing, Nothing)
-      Just pr -> do
-        writeRef procMap (Map.delete pid mp)
-        modifyRef procExitMap (Map.delete pid)
-        modifyRef procStopMap (Map.delete pid)
-        m <- readRef pendingReply
-        writeRef pendingReply (Map.delete pid m)
-        g <- readRef procGrants
-        writeRef procGrants (Map.delete pid g)
-        return (Just pr, Map.lookup pid m)
-  case mStash of
-    Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
-    Nothing -> return ()
-  Vfs.vfsReleasePid pidInt
-  Fd.fdRelease pid
-  Sched.schedUnregister pid
-  Sched.schedWakeAll
-  case mProc of
-    Nothing -> return code
-    Just pr -> do
-      freePDir (procPdir pr)
-      liftIO (c_el0_unregister (VM.fromPageMap (procPdir pr)))
-      return code
+      Nothing -> return (Left WaitNoSuch)
+      Just pr
+        | procParent pr /= waiter -> return (Left WaitNotChild)
+        | otherwise -> do
+            exits <- readRef procExitMap
+            return (Right (Map.lookup pid exits))
+  case mVar of
+    Left err -> return (Left err)
+    Right m -> do
+      code <- maybe pollExit takeMVar m
+      (mProc, mStash) <- withQSem userSem $ do
+        mp <- readRef procMap
+        case Map.lookup pid mp of
+          Nothing -> return (Nothing, Nothing)
+          Just pr -> do
+            writeRef procMap (adoptOrphans pid (Map.delete pid mp))
+            modifyRef procExitMap (Map.delete pid)
+            modifyRef procStopMap (Map.delete pid)
+            pend <- readRef pendingReply
+            writeRef pendingReply (Map.delete pid pend)
+            g <- readRef procGrants
+            writeRef procGrants (Map.delete pid g)
+            return (Just pr, Map.lookup pid pend)
+      case mStash of
+        Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
+        Nothing -> return ()
+      Vfs.vfsReleasePid pidInt
+      Fd.fdRelease pid
+      Sched.schedUnregister pid
+      Sched.schedWakeAll
+      case mProc of
+        Nothing -> return (Right code)
+        Just pr -> do
+          freePDir (procPdir pr)
+          liftIO (c_el0_unregister (VM.fromPageMap (procPdir pr)))
+          return (Right code)
 
 {- | Poll for a killed process's park-loop acknowledgement. A CPU-bound guest
 is guaranteed to come back (the timer parks it), but a guest blocked in a
@@ -1346,7 +1375,7 @@ killPid pid@(Pid pidInt) = do
     case Map.lookup pid mp of
       Nothing -> return Nothing
       Just pr -> do
-        writeRef procMap (Map.delete pid mp)
+        writeRef procMap (adoptOrphans pid (Map.delete pid mp))
         modifyRef procExitMap (Map.delete pid)
         m <- readRef pendingReply
         writeRef pendingReply (Map.delete pid m)
@@ -1385,7 +1414,7 @@ resumes immediately with x0 = 0; brk grows via 'procBrkGrow' (resumes the
 new break); fd 0x04..0x07/0x0A run against the pid's 'Fd' table (per-pid,
 so cross-pid use fails EBADF); fork 0x08 shares via 'shareAddrSpace'
 (child x0 = 0, parent resumes the child pid); wait 0x09 blocks in 'waitPid'
-until the child exits (reaps, resumes the exit code); exec 0x0B replaces
+until the waiter's own child exits (reaps, resumes the exit code); exec 0x0B replaces
 the image via 'execReplace' (resumes 0 in the new image); dir 0x0C..0x0F
 run against the pid's VFS namespace (MKDIR/UNLINK resume 0, STAT/GETDENTS
 resume the rendered byte count); a write to a cow
@@ -1408,7 +1437,8 @@ number; READ/WRITE resume the byte count; CLOSE resumes 0; SEEK resumes
 the new offset; FORK resumes the child pid (0 in the child); WAIT resumes
 the reaped exit code; EXEC resumes 0; MKDIR/UNLINK resume 0; STAT/GETDENTS
 resume the rendered byte count. Errors resume negative errnos:
--1 EPERM (ungranted endpoint), -2 ENOENT, -9 EBADF, -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
+-1 EPERM (ungranted endpoint), -2 ENOENT, -9 EBADF, -10 ECHILD (wait on a
+non-child), -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
 -14 EFAULT, -17 EEXIST, -20 ENOTDIR, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
 -}
 parkLoop :: VM.PageMap -> LoadBounds -> Pid -> Ptr Word64 -> Word64 -> MVar Int -> StopAck -> Word64 -> [Linker.LinkStep] -> H ()
@@ -1501,6 +1531,7 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
     resumeWith res = void (liftIO (c_resume_el0 pdir asid res))
     negENOSYS = fromIntegral (-38 :: Int) :: Word64
     negENOENT = fromIntegral (-2 :: Int) :: Word64
+    negECHILD = fromIntegral (-10 :: Int) :: Word64
     negAGAIN = fromIntegral (-11 :: Int) :: Word64
     negINVAL = fromIntegral (-22 :: Int) :: Word64
     negNOMEM = fromIntegral (-12 :: Int) :: Word64
@@ -1577,11 +1608,11 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
       if c == 0 || childInt <= 0 || childInt == selfInt
         then resumeWith negINVAL
         else do
-          live <- withQSem userSem (Map.member (Pid childInt) <$> readRef procMap)
-          if not live
-            then resumeWith negENOENT
-            else do
-              code <- waitPid (Pid childInt)
+          r <- waitPid pid (Pid childInt)
+          case r of
+            Left WaitNoSuch -> resumeWith negENOENT
+            Left WaitNotChild -> resumeWith negECHILD
+            Right code -> do
               alive2 <- withQSem userSem (Map.member pid <$> readRef procMap)
               when alive2 (resumeWith (fromIntegral (code .&. 0xFF)))
     handleExec va = do

@@ -54,7 +54,12 @@ launchPid1 = do
     Right n -> do
       withCString ("init pid " ++ show n ++ "\n") c_uart_puts
       _ <- forkSupervisedIO $ do
-        code <- runH (U.waitPid (U.Pid n))
-        withCString ("init exit " ++ show code ++ "\n") c_uart_puts
-        runH (Dmesg.dmesgLog ("init exit " ++ show code))
+        res <- runH (U.waitPid U.supervisorPid (U.Pid n))
+        case res of
+          Right code -> do
+            withCString ("init exit " ++ show code ++ "\n") c_uart_puts
+            runH (Dmesg.dmesgLog ("init exit " ++ show code))
+          Left e -> do
+            withCString ("init reap failed " ++ show e ++ "\n") c_uart_puts
+            runH (Dmesg.dmesgLog ("init reap failed " ++ show e))
       return (Pid1Up (U.Pid n))

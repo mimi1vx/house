@@ -66,8 +66,8 @@ syscallBrk = 0x03
 backs per-pid 'Kernel.Userspace.Fd' over ramfs; fork/wait (0x08/0x09) backs
 'Kernel.Userspace.Process.forkChildEl0' (COW share + trap-frame clone,
 child x0 = 0, parent resumes the child pid; a write to a shared page parks
-FAULT and copies/remaps RW; wait blocks in 'waitPid' and resumes the reaped
-exit code); exec (0x0B) backs
+FAULT and copies/remaps RW; wait blocks in 'waitPid' for an own child and
+resumes the reaped exit code); exec (0x0B) backs
 'Kernel.Userspace.Process.execReplace' (same pid, fds stay open).
 Numbering resolves the plan's overlap (fd 0x04-0x07 vs fork 0x05/0x06):
 fd takes 0x04-0x07, fork/wait move to 0x08/0x09, lseek takes 0x0A,
