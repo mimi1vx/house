@@ -18,6 +18,12 @@ fn be32(p: *const u8) -> u32 {
     }
 }
 
+/// Validate an FDT blob header (magic, size, version, offsets); 1 if valid.
+///
+/// # Safety
+///
+/// `dtb` must be null (returns 0) or readable for the 24-byte fixed header;
+/// malformed content returns 0 without further reads.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_valid(dtb: *const u8) -> i32 {
     if dtb.is_null() {
@@ -80,6 +86,11 @@ fn align4(v: u32) -> u32 {
 }
 
 /// uint64_t fdt_get_ram_bytes(const void *dtb) — sum of `reg` sizes for `memory` nodes.
+///
+/// # Safety
+///
+/// `dtb` must be null (returns 0) or point to a `fdt_valid`-accepted blob;
+/// all subsequent reads stay inside its `totalsize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
     if unsafe { fdt_valid(dtb) } == 0 {
@@ -265,6 +276,12 @@ pub unsafe extern "C" fn fdt_get_ram_bytes(dtb: *const u8) -> u64 {
     }
 }
 
+/// Count `cpu` node entries in the FDT (0 when invalid).
+///
+/// # Safety
+///
+/// `dtb` must be null (returns 0) or point to a `fdt_valid`-accepted blob;
+/// all subsequent reads stay inside its `totalsize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_get_cpu_count(dtb: *const u8) -> i32 {
     if unsafe { fdt_valid(dtb) } == 0 {
@@ -549,6 +566,10 @@ unsafe fn ram_bank_at(
 }
 
 /// int fdt_ram_bank_count(const void *dtb) — number of `memory` `reg` entries.
+///
+/// # Safety
+///
+/// `dtb` must be null (returns 0) or point to a `fdt_valid`-accepted blob.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_ram_bank_count(dtb: *const u8) -> i32 {
     if unsafe { fdt_valid(dtb) } == 0 {
@@ -559,6 +580,12 @@ pub unsafe extern "C" fn fdt_ram_bank_count(dtb: *const u8) -> i32 {
 }
 
 /// int fdt_get_ram_bank(const void *dtb, int i, uint64_t *base, uint64_t *size)
+///
+/// # Safety
+///
+/// `dtb` must be null (returns 0) or point to a `fdt_valid`-accepted blob;
+/// `base`/`size` must be non-null and valid for `u64` writes; `idx < 0`
+/// returns 0.
 /// — 1 on success, 0 when missing/out of range.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdt_get_ram_bank(
@@ -575,6 +602,11 @@ pub unsafe extern "C" fn fdt_get_ram_bank(
 }
 
 /// int fdt_get_initrd(const void *dtb, uint64_t *start, uint64_t *end)
+///
+/// # Safety
+///
+/// `dtb` must be null (returns 0) or point to a `fdt_valid`-accepted blob;
+/// `start`/`end` must be non-null and valid for `u64` writes.
 /// — 1 with chosen/linux,initrd-start|end, 0 when missing/invalid.
 ///
 /// Trust boundary: `chosen` is QEMU-supplied hostile input; every offset,

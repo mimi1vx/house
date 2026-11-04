@@ -1,8 +1,4 @@
 #![allow(
-    clippy::missing_safety_doc,
-    reason = "compat exposes raw entry points mirroring C headers"
-)]
-#![allow(
     clippy::manual_c_str_literals,
     reason = "C-string literals mirror C initializers"
 )]
@@ -17,14 +13,32 @@
 )]
 use core::ffi::c_void;
 
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getauxval(_t: u64) -> u64 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __getauxval(_t: u64) -> u64 {
     0
 }
+/// 64-bit stat forwarder.
+///
+/// # Safety
+///
+/// Delegates to `stat`; `p` must be a NUL-terminated path and `s` valid
+/// for the stat buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stat64(_p: *const u8, _s: *mut c_void) -> i32 {
     unsafe extern "C" {
@@ -32,6 +46,11 @@ pub unsafe extern "C" fn stat64(_p: *const u8, _s: *mut c_void) -> i32 {
     }
     unsafe { stat(_p, _s) }
 }
+/// 64-bit fstat forwarder.
+///
+/// # Safety
+///
+/// Delegates to `fstat`; `s` must be valid for the stat buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstat64(_f: i32, _s: *mut c_void) -> i32 {
     unsafe extern "C" {
@@ -39,6 +58,12 @@ pub unsafe extern "C" fn fstat64(_f: i32, _s: *mut c_void) -> i32 {
     }
     unsafe { fstat(_f, _s) }
 }
+/// 64-bit lstat forwarder.
+///
+/// # Safety
+///
+/// Delegates to `lstat`; `p` must be a NUL-terminated path and `s` valid
+/// for the stat buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lstat64(_p: *const u8, _s: *mut c_void) -> i32 {
     unsafe extern "C" {
@@ -46,86 +71,212 @@ pub unsafe extern "C" fn lstat64(_p: *const u8, _s: *mut c_void) -> i32 {
     }
     unsafe { lstat(_p, _s) }
 }
+/// Unimplemented stub returning null (no dynamic loading).
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlopen(_f: *const u8, _fl: i32) -> *mut c_void {
     core::ptr::null_mut()
 }
+/// Unimplemented stub returning null (no dynamic loading).
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlsym(_h: *mut c_void, _n: *const u8) -> *mut c_void {
     core::ptr::null_mut()
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlclose(_h: *mut c_void) -> i32 {
     -1
 }
+/// Static "no dl" error string (no dynamic loading).
+///
+/// # Safety
+///
+/// Safe to call anytime; returns a pointer to a static NUL-terminated
+/// string that must not be freed or written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlerror() -> *mut u8 {
     b"no dl\0".as_ptr() as *mut u8
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlinfo(_h: *mut c_void, _r: i32, _v: *mut c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dl_iterate_phdr(_cb: *const c_void, _d: *mut c_void) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __xpg_strerror_r(_e: i32, _b: *mut u8, _n: usize) -> i32 {
     0
 }
+/// Unimplemented stub returning null (no FILE streams).
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fopen(_p: *const u8, _m: *const u8) -> *mut c_void {
     core::ptr::null_mut()
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fclose(_f: *mut c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fread(_b: *mut c_void, _s: usize, _n: usize, _f: *mut c_void) -> usize {
     0
 }
+/// Unimplemented stub returning null.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fgets(_b: *mut u8, _n: i32, _f: *mut c_void) -> *mut u8 {
     core::ptr::null_mut()
 }
+/// Unimplemented stub returning 1 (always EOF).
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn feof(_f: *mut c_void) -> i32 {
     1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fseek(_f: *mut c_void, _o: i64, _w: i32) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ftell(_f: *mut c_void) -> i64 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getc(_f: *mut c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getline(_b: *mut *mut u8, _n: *mut usize, _f: *mut c_void) -> isize {
     -1
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __isoc99_sscanf(_s: *const u8, _fmt: *const u8) -> i32 {
     0
 }
+/// Unimplemented stub returning null.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setmntent(_f: *const u8, _m: *const u8) -> *mut c_void {
     core::ptr::null_mut()
 }
+/// Unimplemented stub returning 1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn endmntent(_f: *mut c_void) -> i32 {
     1
 }
+/// Unimplemented stub returning null.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hasmntopt(_e: *mut c_void, _o: *const u8) -> *mut u8 {
     core::ptr::null_mut()
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getmntent_r(
     _f: *mut c_void,
@@ -135,22 +286,53 @@ pub unsafe extern "C" fn getmntent_r(
 ) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memfd_create(_n: *const u8, _fl: u32) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkstemp(_t: *mut u8) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn access(_p: *const u8, _m: i32) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ftruncate(_fd: i32, _len: i64) -> i32 {
     -1
 }
+/// Bounded insertion sort of the first min(nm, 1024) elements.
+///
+/// # Safety
+///
+/// `base` must be valid for `nm * sz` bytes and `cmp` a total order;
+/// a null `cmp`, `nm < 2`, or `sz == 0` sorts nothing. Only the first 1024
+/// elements participate (RTS-sized inputs).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qsort(
     base: *mut c_void,
@@ -187,18 +369,42 @@ pub unsafe extern "C" fn qsort(
         }
     }
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statfs(_p: *const u8, _b: *mut c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __fprintf_chk(_f: *mut c_void, _fl: i32, _fmt: *const u8) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __printf_chk(_fl: i32, _fmt: *const u8) -> i32 {
     0
 }
+/// Checked memcpy aborting (via `__assert_fail`) when `n > l`.
+///
+/// # Safety
+///
+/// `s` must be valid for `n` bytes and `d` for `l` bytes; `n > l` halts
+/// instead of copying. Null `d`/`s` or `n == 0` copies nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __memcpy_chk(d: *mut u8, s: *const u8, n: usize, l: usize) -> *mut u8 {
     // SAFETY: caller guarantees s valid for n bytes, d valid for l bytes.
@@ -217,6 +423,12 @@ pub unsafe extern "C" fn __memcpy_chk(d: *mut u8, s: *const u8, n: usize, l: usi
     }
     d
 }
+/// Checked memmove aborting (via `__assert_fail`) when `n > l`.
+///
+/// # Safety
+///
+/// `s` must be valid for `n` bytes and `d` for `l` bytes (overlap allowed);
+/// `n > l` halts instead of copying. Null `d`/`s` or `n == 0` copies nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __memmove_chk(d: *mut u8, s: *const u8, n: usize, l: usize) -> *mut u8 {
     // SAFETY: caller guarantees s valid for n bytes, d valid for l bytes; may overlap.
@@ -235,6 +447,12 @@ pub unsafe extern "C" fn __memmove_chk(d: *mut u8, s: *const u8, n: usize, l: us
     }
     d
 }
+/// Checked memset aborting (via `__assert_fail`) when `n > l`.
+///
+/// # Safety
+///
+/// `d` must be valid for `l` bytes; `n > l` halts instead of writing.
+/// Null `d` or `n == 0` writes nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __memset_chk(d: *mut u8, c: i32, n: usize, l: usize) -> *mut u8 {
     // SAFETY: caller guarantees d valid for l bytes.
@@ -253,12 +471,22 @@ pub unsafe extern "C" fn __memset_chk(d: *mut u8, c: i32, n: usize, l: usize) ->
     }
     d
 }
+/// Fail-stop: halts the core in `wfi`, never returns.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored); never returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __assert_fail(_a: *const u8, _f: *const u8, _l: u32, _fn: *const u8) -> ! {
     loop {
-        core::arch::asm!("wfi", options(nomem, nostack));
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }
+/// Stub reporting generous 1TB soft/hard limits.
+///
+/// # Safety
+///
+/// `_rl` must be null or valid for two `u64` writes (cur, max).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getrlimit(_r: i32, _rl: *mut c_void) -> i32 {
     // SAFETY: matches C compat.c getrlimit: generous 1TB limits.
@@ -270,6 +498,11 @@ pub unsafe extern "C" fn getrlimit(_r: i32, _rl: *mut c_void) -> i32 {
     }
     0
 }
+/// Stub reporting a zeroed rusage with uptime and maxrss.
+///
+/// # Safety
+///
+/// `_r` must be null (returns 0) or valid for 144 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getrusage(_w: i32, _r: *mut c_void) -> i32 {
     // SAFETY: matches C compat.c getrusage: zeroed rusage with uptime + maxrss.
@@ -292,30 +525,72 @@ pub unsafe extern "C" fn getrusage(_w: i32, _r: *mut c_void) -> i32 {
     }
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_getcpuclockid(_p: i32, _c: *mut i32) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn time(_t: *mut i64) -> i64 {
     0
 }
+/// Echo stub returning its buffer argument.
+///
+/// # Safety
+///
+/// Safe with any pointer values including null: `_b` is echoed, never
+/// dereferenced or written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ctime_r(_t: *const i64, _b: *mut u8) -> *mut u8 {
     _b
 }
+/// Echo stub returning its path argument.
+///
+/// # Safety
+///
+/// Safe with any pointer values including null: `_p` is echoed, never
+/// dereferenced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dirname(_p: *mut u8) -> *mut u8 {
     _p
 }
+/// Echo stub returning its destination argument.
+///
+/// # Safety
+///
+/// Safe with any pointer values including null: `_d` is echoed, never
+/// dereferenced; no copy is performed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stpcpy(_d: *mut u8, _s: *const u8) -> *mut u8 {
     _d
 }
+/// Unimplemented stub returning -1 (no regex).
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn regcomp(_p: *mut c_void, _pat: *const u8, _f: i32) -> i32 {
     -1
 }
+/// Unimplemented stub returning 1 (no match).
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn regexec(
     _p: *const c_void,
@@ -326,31 +601,80 @@ pub unsafe extern "C" fn regexec(
 ) -> i32 {
     1
 }
+/// Unimplemented no-op stub.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn regfree(_p: *mut c_void) {}
+/// Echo stub returning its base argument.
+///
+/// # Safety
+///
+/// Safe with any pointer values including null: `_b` is echoed, never
+/// dereferenced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn newlocale(_m: i32, _n: *const u8, _b: *mut c_void) -> *mut c_void {
     _b
 }
+/// Unimplemented no-op stub.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freelocale(_l: *mut c_void) {}
+/// Unimplemented stub returning null.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uselocale(_l: *mut c_void) -> *mut c_void {
     core::ptr::null_mut()
 }
+/// Static "C.UTF-8" locale string.
+///
+/// # Safety
+///
+/// Safe to call anytime; returns a pointer to a static NUL-terminated
+/// string that must not be freed or written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setlocale(_c: i32, _n: *const u8) -> *mut u8 {
     b"C.UTF-8\0".as_ptr() as *mut u8
 }
+/// Address of the internal ctype table slot.
+///
+/// # Safety
+///
+/// Safe to call anytime; returns the address of a static slot (initially
+/// null) reserved for the guest C library to populate. Never dereferenced here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __ctype_b_loc() -> *mut *const u16 {
     static mut TABLE: *const u16 = core::ptr::null();
     &raw mut TABLE as *mut *const u16
 }
+/// Unimplemented stub returning a nonzero sentinel.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iconv_open(_t: *const u8, _f: *const u8) -> *mut c_void {
     1 as *mut c_void
 }
+/// Byte-copy passthrough conversion (no charset work).
+///
+/// # Safety
+///
+/// `_in`/`_il`/`_out`/`_ol` must each be null or valid; copies
+/// `min(il, ol)` bytes and advances the pointers. Leftover input reports
+/// E2BIG via errno and returns `usize::MAX`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iconv(
     _cd: *mut c_void,
@@ -383,86 +707,211 @@ pub unsafe extern "C" fn iconv(
     }
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iconv_close(_cd: *mut c_void) -> i32 {
     0
 }
+/// Static "UTF-8" string.
+///
+/// # Safety
+///
+/// Safe to call anytime; returns a pointer to a static NUL-terminated
+/// string that must not be freed or written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nl_langinfo(_i: i32) -> *mut u8 {
     b"UTF-8\0".as_ptr() as *mut u8
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn link(_a: *const u8, _b: *const u8) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn creat(_p: *const u8, _m: u32) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chmod(_p: *const u8, _m: u32) -> i32 {
     -1
 }
+/// Echo stub returning its mask argument (no mask is kept).
+///
+/// # Safety
+///
+/// Safe with any value; no state is read or changed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn umask(_m: u32) -> u32 {
     _m
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkfifo(_p: *const u8, _m: u32) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn utime(_p: *const u8, _t: *const c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lstat(_p: *const u8, _s: *mut c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn waitpid(_p: i32, _s: *mut i32, _o: i32) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fork() -> i32 {
     -1
 }
+/// Unimplemented stub returning 1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getppid() -> i32 {
     1
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atexit(_f: *const c_void) -> i32 {
     0
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall(_n: i64) -> i64 {
     -1
 }
+/// Unimplemented stub returning 0 (advice accepted, ignored).
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn madvise(_a: *mut c_void, _l: usize, _a2: i32) -> i32 {
     0
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkdir(_p: *const u8, _m: u32) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mknod(_p: *const u8, _m: u32, _d: u64) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ftruncate64(_f: i32, _l: i64) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcgetattr(_fd: i32, _t: *mut core::ffi::c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning -1.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcsetattr(_fd: i32, _a: i32, _t: *const core::ffi::c_void) -> i32 {
     -1
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe to call with any argument values including null pointers:
+/// arguments are ignored, no memory is accessed, and a constant is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoull(_n: *const u8, _e: *mut *mut u8, _b: i32) -> u64 {
     0

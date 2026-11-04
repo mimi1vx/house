@@ -1,18 +1,10 @@
 #![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
-)]
-#![allow(
     static_mut_refs,
     reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
 )]
 #![allow(
     unused_unsafe,
     reason = "transliteration keeps explicit unsafe blocks for audit"
-)]
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "VM exposes raw map/unmap entry points mirroring C headers"
 )]
 #![allow(clippy::collapsible_if, reason = "nested guards mirror C control flow")]
 #![allow(
@@ -323,7 +315,13 @@ pub(crate) unsafe fn vm_split_slot(slot: *mut u64, level: u8) -> bool {
     true
 }
 
-// # Safety: caller must ensure addr/len valid, fd/off checked.
+/// Anonymous demand-zero mapping (file-backed `fd != -1` is ENOSYS).
+///
+/// # Safety
+///
+/// `addr`/`len` are rounded into the user window (`HOUSE_USER_VA_MIN..MAX`);
+/// `prot` is a subset of READ|WRITE (EXEC is ENOTSUP); `fd` must be -1 and
+/// `off` 0. Returns `usize::MAX` as MAP_FAILED with errno set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_mmap(
     addr: *mut u8,
@@ -843,6 +841,13 @@ pub unsafe extern "C" fn house_is_mmio_page(far: u64) -> i32 {
     }
 }
 
+/// Unmap user pages (freeing non-MMIO pages to buddy) or release the
+/// reservation outside the window.
+///
+/// # Safety
+///
+/// `addr`/`len` must lie in, or fully outside, the user window; MMIO leaves
+/// are cleared but never freed to buddy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
     if addr.is_null() {
@@ -909,6 +914,12 @@ pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
     0
 }
 
+/// Toggle READ/WRITE protection on mapped user pages (no EXEC).
+///
+/// # Safety
+///
+/// `addr` must be page-aligned inside the user window covering mapped pages
+/// only; `prot` a subset of READ|WRITE.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32) -> i32 {
     if addr.is_null() {
@@ -979,6 +990,12 @@ pub unsafe extern "C" fn house_vm_mprotect(addr: *mut u8, len: usize, prot: i32)
     0
 }
 
+/// Demand-pager self-test: fault in one page at 32GB and check it.
+///
+/// # Safety
+///
+/// Call at EL1 with the demand pager installed; writes a probe pattern to
+/// a fresh page (returns 1 on success).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_demand_single() -> i32 {
     // 32GB: above any RAM identity block, so the access truly faults and the
@@ -992,6 +1009,12 @@ pub unsafe extern "C" fn house_vm_demand_single() -> i32 {
     }
 }
 
+/// Demand-pager stress: fault in 100 pages at 32GB and verify each.
+///
+/// # Safety
+///
+/// Call at EL1 with the demand pager installed; writes probe patterns to
+/// fresh pages (returns 1 on success).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_vm_demand_100() -> i32 {
     for i in 0..100 {
@@ -1008,6 +1031,11 @@ pub unsafe extern "C" fn house_vm_demand_100() -> i32 {
     1
 }
 
+/// Post-boot diagnostics hook (currently a no-op).
+///
+/// # Safety
+///
+/// Safe to call anytime; emits no output and touches no state.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_puts_after() {}
 

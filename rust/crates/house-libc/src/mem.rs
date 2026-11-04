@@ -1,4 +1,3 @@
-#![allow(clippy::missing_safety_doc, reason = "memory ops mirror C headers")]
 #![allow(
     clippy::manual_range_contains,
     reason = "range checks mirror C comparisons"
@@ -10,6 +9,12 @@ use core::ptr;
 
 // 8-byte fast path mirrors C: while n>=8 && aligned d && aligned s, copy 8.
 
+/// Copy `n` bytes (must not overlap).
+///
+/// # Safety
+///
+/// `dst` and `src` must each be valid for `n` bytes; overlap is undefined
+/// (use `memmove`).
 // SAFETY: caller guarantees dst and src valid for n bytes, n <= isize::MAX,
 // dst/src not overlapping for memcpy (for memmove overlap direction is handled).
 #[cfg_attr(not(test), unsafe(no_mangle))]
@@ -32,6 +37,12 @@ pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut 
     dst
 }
 
+/// Copy `n` bytes handling overlap.
+///
+/// # Safety
+///
+/// `dst` and `src` must each be valid for `n` bytes; either overlap
+/// direction is handled by choosing the copy direction.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
@@ -69,6 +80,11 @@ pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
+/// Fill `n` bytes with `c`.
+///
+/// # Safety
+///
+/// `dst` must be valid for `n` bytes.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
@@ -85,6 +101,11 @@ pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
     dst
 }
 
+/// Compare `n` bytes.
+///
+/// # Safety
+///
+/// `a` and `b` must each be valid for `n` bytes.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
@@ -99,6 +120,11 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
+/// Search `n` bytes for `c`.
+///
+/// # Safety
+///
+/// `s` must be valid for `n` bytes.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
     let target = c as u8;
@@ -106,7 +132,8 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
         // SAFETY: caller valid for n.
         let v = unsafe { ptr::read(s.add(i)) };
         if v == target {
-            return s.add(i) as *mut u8;
+            // SAFETY: `i < n` and `s` valid for `n` bytes per contract.
+            return unsafe { s.add(i) } as *mut u8;
         }
     }
     core::ptr::null_mut()
@@ -117,6 +144,12 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
 // cap. Release keeps zero cost (debug_assert compiled out under panic=abort).
 const CSTR_DEBUG_CAP: usize = 4096;
 
+/// NUL-terminated string length.
+///
+/// # Safety
+///
+/// `s` must point to a NUL-terminated string; device/EL0 bytes must be
+/// `strnlen`-pre-bound before reaching here.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     // Trust boundary (rust/c-abi.md): caller guarantees NUL-termination —
@@ -134,6 +167,11 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     }
 }
 
+/// Bounded string length (at most `max`).
+///
+/// # Safety
+///
+/// `s` must be valid for `max` bytes (the scan stops at the first NUL).
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
     let mut p = s;
@@ -147,6 +185,12 @@ pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
     }
 }
 
+/// Compare NUL-terminated strings.
+///
+/// # Safety
+///
+/// `a` and `b` must each point to a NUL-terminated string; device/EL0
+/// bytes must be `strnlen`-pre-bound before reaching here.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
     // Trust boundary (rust/c-abi.md): both inputs NUL-terminated by the
@@ -169,6 +213,11 @@ pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
     }
 }
 
+/// Compare at most `n` bytes of two strings.
+///
+/// # Safety
+///
+/// `a` and `b` must each be valid for `n` bytes (the scan also stops at NUL).
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     for i in 0..n {
@@ -184,6 +233,12 @@ pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
+/// Copy a NUL-terminated string.
+///
+/// # Safety
+///
+/// `src` must point to a NUL-terminated string and `dst` must hold it
+/// (NUL included); device/EL0 bytes must be `strnlen`-pre-bound.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): src NUL-terminated and dst sized by the
@@ -205,6 +260,12 @@ pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     dst
 }
 
+/// Copy at most `n` bytes, NUL-padding the tail.
+///
+/// # Safety
+///
+/// `dst` must be valid for `n` bytes; `src` must be readable until NUL
+/// or `n` bytes (no NUL is written when `src` is longer than `n`).
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut d = dst;
@@ -239,6 +300,12 @@ pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
+/// Append a NUL-terminated string.
+///
+/// # Safety
+///
+/// `src` must be NUL-terminated and `dst` must hold its own string plus
+/// `src` (NUL included); device/EL0 bytes must be `strnlen`-pre-bound.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): both inputs NUL-terminated and dst
@@ -247,11 +314,19 @@ pub unsafe extern "C" fn strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
     debug_assert!(unsafe { strnlen(dst, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     debug_assert!(unsafe { strnlen(src, CSTR_DEBUG_CAP) } < CSTR_DEBUG_CAP);
     // dst + strlen(dst)
-    let len = strlen(dst);
-    strcpy(dst.add(len), src);
+    // SAFETY: `dst` NUL-terminated per contract; both debug-probed above.
+    let len = unsafe { strlen(dst) };
+    // SAFETY: `dst` has room per contract; `src` NUL-terminated.
+    unsafe { strcpy(dst.add(len), src) };
     dst
 }
 
+/// Find `c` in a NUL-terminated string (null when absent).
+///
+/// # Safety
+///
+/// `s` must point to a NUL-terminated string; device/EL0 bytes must be
+/// `strnlen`-pre-bound.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): s NUL-terminated by the caller;
@@ -271,6 +346,12 @@ pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *mut u8 {
     }
 }
 
+/// Find the last `c` in a NUL-terminated string.
+///
+/// # Safety
+///
+/// `s` must point to a NUL-terminated string; device/EL0 bytes must be
+/// `strnlen`-pre-bound.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *mut u8 {
     // Trust boundary (rust/c-abi.md): s NUL-terminated by the caller;
@@ -292,6 +373,12 @@ pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *mut u8 {
     last
 }
 
+/// Case-insensitive compare of NUL-terminated strings.
+///
+/// # Safety
+///
+/// `a` and `b` must each point to a NUL-terminated string; device/EL0
+/// bytes must be `strnlen`-pre-bound.
 #[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn strcasecmp(a: *const u8, b: *const u8) -> i32 {
     // Trust boundary (rust/c-abi.md): both inputs NUL-terminated by the

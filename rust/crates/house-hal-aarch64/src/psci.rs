@@ -15,6 +15,11 @@ unsafe fn psci_call3(fid: u64, a1: u64, a2: u64, a3: u64, use_smc: bool) -> i64 
     x0 as i64
 }
 
+/// Power the system off via PSCI; never returns.
+///
+/// # Safety
+///
+/// Call at EL1 or higher with PSCI firmware present. Never returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_system_off() -> ! {
     unsafe {
@@ -25,6 +30,11 @@ pub unsafe extern "C" fn psci_system_off() -> ! {
     }
 }
 
+/// Reset the system via PSCI; never returns.
+///
+/// # Safety
+///
+/// Call at EL1 or higher with PSCI firmware present. Never returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_system_reset() -> ! {
     unsafe {
@@ -35,6 +45,12 @@ pub unsafe extern "C" fn psci_system_reset() -> ! {
     }
 }
 
+/// Boot a secondary core via PSCI CPU_ON (HVC with SMC fallback).
+///
+/// # Safety
+///
+/// Call at EL1 or higher: `mpidr` must address a present core and `entry`
+/// must be a valid EL1 entry point for that core.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_cpu_on(mpidr: u64, entry: u64, ctx: u64) -> i64 {
     let r = unsafe { psci_call3(0xC4000003, mpidr, entry, ctx, false) };
@@ -46,6 +62,12 @@ pub unsafe extern "C" fn psci_cpu_on(mpidr: u64, entry: u64, ctx: u64) -> i64 {
     }
 }
 
+/// Take the calling core offline via PSCI CPU_OFF.
+///
+/// # Safety
+///
+/// Call at EL1 or higher on a secondary core the scheduler has parked.
+/// Never returns on success.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_cpu_off() -> i64 {
     let r = unsafe { psci_call3(0x84000002, 0, 0, 0, false) };
@@ -56,6 +78,11 @@ pub unsafe extern "C" fn psci_cpu_off() -> i64 {
     }
 }
 
+/// Query a core's PSCI affinity state (query only, no state change).
+///
+/// # Safety
+///
+/// Call at EL1 or higher; safe with any values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn psci_affinity_info(mpidr: u64, lowest: u64) -> i64 {
     let r = unsafe { psci_call3(0xC4000004, mpidr, lowest, 0, false) };

@@ -1,9 +1,5 @@
 #![cfg_attr(not(test), no_std)] // hosted tests link std (Miri gate, step 9)
 #![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
-)]
-#![allow(
     static_mut_refs,
     reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
 )]

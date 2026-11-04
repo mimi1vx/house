@@ -1,8 +1,4 @@
 #![allow(
-    clippy::missing_safety_doc,
-    reason = "syscall surface mirrors C headers"
-)]
-#![allow(
     clippy::manual_c_str_literals,
     reason = "C-string literals mirror C initializers"
 )]
@@ -24,10 +20,6 @@
     reason = "transliteration keeps C parameter names for ABI parity"
 )]
 #![allow(unexpected_cfgs, reason = "bare-metal cfg gates have host test stubs")]
-#![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
-)]
 #![allow(
     static_mut_refs,
     reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
@@ -139,6 +131,12 @@ unsafe fn house_uptime_ns_raw() -> u64 {
 
 const FAKE_EPOCH: u64 = 1785000000;
 
+/// Write to a pipe/eventfd, or UART for fd 1/2 (EBADF otherwise).
+///
+/// # Safety
+///
+/// `buf` must be valid for `n` bytes (eventfd reads a `u64` when `n >= 8`);
+/// unknown fds set EBADF and return -1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn write(fd: i32, buf: *const u8, n: usize) -> isize {
     if let Some(s) = fd_slot(fd) {
@@ -184,6 +182,12 @@ pub unsafe extern "C" fn write(fd: i32, buf: *const u8, n: usize) -> isize {
     -1
 }
 
+/// Read from a timer/eventfd/pipe (0 on empty/unknown, EAGAIN noted).
+///
+/// # Safety
+///
+/// `buf` must be null or valid for `n` bytes; timer/event reads require
+/// `n >= 8` for the `u64` payload, pipe reads copy `min(len, n)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: i32, buf: *mut u8, n: usize) -> isize {
     let Some(s) = fd_slot(fd) else {
@@ -250,6 +254,11 @@ pub unsafe extern "C" fn read(fd: i32, buf: *mut u8, n: usize) -> isize {
     }
 }
 
+/// Create a 1K pipe pair (returns 0, -1 when the table is full).
+///
+/// # Safety
+///
+/// `fds` must be null (EFAULT) or valid for two `i32` writes `(read, write)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pipe(fds: *mut i32) -> i32 {
     if fds.is_null() {
@@ -285,6 +294,11 @@ pub unsafe extern "C" fn pipe(fds: *mut i32) -> i32 {
     0
 }
 
+/// Release an fd slot (unknown fds are a silent 0).
+///
+/// # Safety
+///
+/// Safe with any `fd` value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn close(fd: i32) -> i32 {
     if let Some(s) = fd_slot(fd) {
@@ -299,6 +313,11 @@ pub unsafe extern "C" fn close(fd: i32) -> i32 {
     0
 }
 
+/// Create an eventfd counter (returns fd, -1 when full).
+///
+/// # Safety
+///
+/// Safe with any values; `flags` are ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
     let _ = flags;
@@ -316,6 +335,11 @@ pub unsafe extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
     -1
 }
 
+/// Add `value` to a live eventfd counter.
+///
+/// # Safety
+///
+/// The fd must be a live eventfd (EBADF otherwise).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
     let Some(s) = fd_slot(fd) else {
@@ -331,6 +355,11 @@ pub unsafe extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
     0
 }
 
+/// Take an eventfd count (EAGAIN when zero, then cleared).
+///
+/// # Safety
+///
+/// `fd` must be a live eventfd and `value` non-null valid for a `u64` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
     if value.is_null() {
@@ -355,6 +384,11 @@ pub unsafe extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
     0
 }
 
+/// Create an epoll set (returns fd, -1 when full).
+///
+/// # Safety
+///
+/// Safe with any size (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_create(_size: i32) -> i32 {
     for i in 0..FAKE_FD_N {
@@ -370,6 +404,11 @@ pub unsafe extern "C" fn epoll_create(_size: i32) -> i32 {
     -1
 }
 
+/// Create an epoll set (delegates to `epoll_create`).
+///
+/// # Safety
+///
+/// Safe with any flags (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_create1(flags: i32) -> i32 {
     let _ = flags;
@@ -384,6 +423,12 @@ struct EpollEvent {
 
 const EPOLLIN: u32 = 0x001;
 
+/// Add/modify/remove an fd in an epoll set (16-entry cap).
+///
+/// # Safety
+///
+/// Both fds must be live with `epfd` an epoll set; `ev` may be null
+/// (zero mask) or valid for `EpollEvent { u32, u64 }`. Misuse sets errno.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, ev: *mut c_void) -> i32 {
     let Some(s) = fd_slot(epfd) else {
@@ -465,6 +510,12 @@ unsafe fn fd_ready(fd: i32) -> bool {
     }
 }
 
+/// Wait for EPOLLIN on an epoll set (blocks per `timeout`).
+///
+/// # Safety
+///
+/// `events` must be null (returns 0) or valid for `maxevents` entries;
+/// `maxevents <= 0` returns 0. Ready entries report EPOLLIN plus stored data.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_wait(
     epfd: i32,
@@ -559,6 +610,11 @@ pub unsafe extern "C" fn epoll_wait(
     }
 }
 
+/// `epoll_wait` with a signal mask (mask ignored).
+///
+/// # Safety
+///
+/// Same contract as `epoll_wait`; `sigmask` is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_pwait(
     epfd: i32,
@@ -571,6 +627,12 @@ pub unsafe extern "C" fn epoll_pwait(
     unsafe { epoll_wait(epfd, events, maxevents, timeout) }
 }
 
+/// `epoll_wait` with a timespec timeout (converted to ms).
+///
+/// # Safety
+///
+/// `ts` may be null (infinite) or valid for two `i64` (secs, nsecs); other
+/// args follow `epoll_wait`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn epoll_pwait2(
     epfd: i32,
@@ -589,6 +651,11 @@ pub unsafe extern "C" fn epoll_pwait2(
     unsafe { epoll_pwait(epfd, events, maxevents, to, sigmask) }
 }
 
+/// Create a timerfd (returns fd, -1 when full).
+///
+/// # Safety
+///
+/// Safe with any values; clock and flags are ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     let _ = clockid;
@@ -607,6 +674,12 @@ pub unsafe extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     -1
 }
 
+/// Set the global tick interval from an itimerspec.
+///
+/// # Safety
+///
+/// `nv` may be null or valid for itimerspec (reads words [2]/[3] as u64
+/// secs/nsecs); `ov` may be null or is zeroed for 16 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timerfd_settime(
     _fd: i32,
@@ -628,6 +701,12 @@ pub unsafe extern "C" fn timerfd_settime(
     0
 }
 
+/// Report the tick interval (32-byte itimerspec shape).
+///
+/// # Safety
+///
+/// `_fd` is ignored; `v` may be null (returns 0) or must be valid for
+/// 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timerfd_gettime(_fd: i32, v: *mut c_void) -> i32 {
     if v.is_null() {
@@ -645,6 +724,11 @@ pub unsafe extern "C" fn timerfd_gettime(_fd: i32, v: *mut c_void) -> i32 {
     0
 }
 
+/// Whether a timerfd is due (0 for unknown/non-timer fds).
+///
+/// # Safety
+///
+/// Safe with any `fd` value; ISR-active consults the pending ring.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timerfd_due(fd: i32) -> i32 {
     let Some(s) = fd_slot(fd) else {
@@ -676,6 +760,11 @@ pub unsafe extern "C" fn house_timerfd_due(fd: i32) -> i32 {
     }
 }
 
+/// Whether an fd is a non-empty pipe read end.
+///
+/// # Safety
+///
+/// Safe with any `fd` value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_fd_pipe_readable(fd: i32) -> i32 {
     let Some(s) = fd_slot(fd) else {
@@ -689,29 +778,59 @@ pub unsafe extern "C" fn house_fd_pipe_readable(fd: i32) -> i32 {
     }
 }
 
+/// Unimplemented: ENOENT, returns -1.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 // ---- remaining stubs (keep minimal) ----
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn open(_p: *const u8, _f: i32) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
+/// Unimplemented: ESPIPE, returns -1.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lseek(_fd: i32, _o: i64, _w: i32) -> i64 {
     unsafe { *__errno_location() = 29 };
     -1
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fcntl(_fd: i32, _c: i32) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ioctl(_fd: i32, _r: u64) -> i32 {
     0
 }
+/// 1 for fd 0..=2, else 0.
+///
+/// # Safety
+///
+/// Safe with any `fd` value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn isatty(fd: i32) -> i32 {
     if fd <= 2 { 1 } else { 0 }
 }
+/// Zeroed 128-byte stat reporting S_IFCHR|0666, blksize 4096.
+///
+/// # Safety
+///
+/// `_st` may be null (returns 0) or must be valid for 128 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstat(_fd: i32, _st: *mut u8) -> i32 {
     // SAFETY: matches tinylibc/sys.c fstat: zeroed stat, S_IFCHR|0666, blksize 4096.
@@ -726,21 +845,42 @@ pub unsafe extern "C" fn fstat(_fd: i32, _st: *mut u8) -> i32 {
     }
     0
 }
+/// Unimplemented: ENOENT, returns -1.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stat(_p: *const u8, _st: *mut u8) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
+/// Unimplemented: ENOENT, returns -1.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(_p: *const u8) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
+/// Unimplemented: ENOENT, returns -1.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(_p: *const u8) -> i32 {
     unsafe { *__errno_location() = 2 };
     -1
 }
+/// Report the root directory (`/`) into `buf`.
+///
+/// # Safety
+///
+/// `buf` must be null (returns null) or valid for at least 2 bytes (`n < 2`
+/// returns null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getcwd(buf: *mut u8, n: usize) -> *mut u8 {
     if buf.is_null() || n < 2 {
@@ -752,6 +892,11 @@ pub unsafe extern "C" fn getcwd(buf: *mut u8, n: usize) -> *mut u8 {
     };
     buf
 }
+/// Look up LANG/LC_ALL/LC_TYPE (static C.UTF-8) else null.
+///
+/// # Safety
+///
+/// `n` must be null (returns null) or point to a NUL-terminated name.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getenv(n: *const u8) -> *mut u8 {
     if n.is_null() {
@@ -766,35 +911,76 @@ pub unsafe extern "C" fn getenv(n: *const u8) -> *mut u8 {
     }
     core::ptr::null_mut()
 }
+/// Unimplemented: EBADF, returns -1.
+///
+/// # Safety
+///
+/// Safe with any `fd` value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dup(_fd: i32) -> i32 {
     unsafe { *__errno_location() = 9 };
     -1
 }
+/// Echo stub returning `n`.
+///
+/// # Safety
+///
+/// Safe with any values; no descriptor is changed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dup2(_o: i32, n: i32) -> i32 {
     n
 }
+/// Fixed pid 42 (single address space).
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpid() -> i32 {
     42
 }
+/// Fixed uid 0.
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getuid() -> u32 {
     0
 }
+/// Fixed euid 0.
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn geteuid() -> u32 {
     0
 }
+/// Fixed gid 0.
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgid() -> u32 {
     0
 }
+/// Fixed egid 0.
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getegid() -> u32 {
     0
 }
+/// Uptime (plus fake epoch for clk 0) into `tp`.
+///
+/// # Safety
+///
+/// `tp` may be null (returns 0) or must be valid for two `u64` writes
+/// (secs, nsecs).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_gettime(clk: i32, tp: *mut u8) -> i32 {
     if tp.is_null() {
@@ -814,6 +1000,11 @@ pub unsafe extern "C" fn clock_gettime(clk: i32, tp: *mut u8) -> i32 {
     }
     0
 }
+/// Report 100ns resolution into `res`.
+///
+/// # Safety
+///
+/// `res` may be null (returns 0) or must be valid for two `u64` writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_getres(_c: i32, res: *mut u8) -> i32 {
     if res.is_null() {
@@ -825,6 +1016,12 @@ pub unsafe extern "C" fn clock_getres(_c: i32, res: *mut u8) -> i32 {
     }
     0
 }
+/// Wall time (uptime plus fake epoch) into `tv`.
+///
+/// # Safety
+///
+/// `tv` may be null (returns 0) or must be valid for two `u64` writes
+/// (secs, usecs); `_tz` is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gettimeofday(tv: *mut u8, _tz: *mut c_void) -> i32 {
     if tv.is_null() {
@@ -837,6 +1034,11 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut u8, _tz: *mut c_void) -> i32 {
     }
     0
 }
+/// Process times (all four fields equal the current tick).
+///
+/// # Safety
+///
+/// `t` may be null or must be valid for four `i64` writes; returns the tick.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn times(t: *mut u8) -> i64 {
     let ticks = (unsafe { house_uptime_ns_raw() } / 10000000) as i64;
@@ -851,6 +1053,11 @@ pub unsafe extern "C" fn times(t: *mut u8) -> i64 {
     }
     ticks
 }
+/// Zero a 16-byte signal set.
+///
+/// # Safety
+///
+/// `s` may be null (returns 0) or must be valid for 16 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigemptyset(s: *mut u8) -> i32 {
     if !s.is_null() {
@@ -858,6 +1065,11 @@ pub unsafe extern "C" fn sigemptyset(s: *mut u8) -> i32 {
     }
     0
 }
+/// Fill a 16-byte signal set with ones.
+///
+/// # Safety
+///
+/// `s` may be null (returns 0) or must be valid for 16 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigfillset(s: *mut u8) -> i32 {
     if !s.is_null() {
@@ -865,6 +1077,12 @@ pub unsafe extern "C" fn sigfillset(s: *mut u8) -> i32 {
     }
     0
 }
+/// Set bit `n` in a signal set.
+///
+/// # Safety
+///
+/// `s` must be null (returns 0) or valid for 16 bytes with `n` in 1..=128;
+/// smaller `n` values address bits within the set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaddset(s: *mut u8, n: i32) -> i32 {
     if s.is_null() || n <= 0 {
@@ -874,6 +1092,11 @@ pub unsafe extern "C" fn sigaddset(s: *mut u8, n: i32) -> i32 {
     unsafe { *w.add(((n - 1) as usize) / 64) |= 1u64 << ((n - 1) % 64) };
     0
 }
+/// Clear bit `n` in a signal set.
+///
+/// # Safety
+///
+/// `s` must be null (returns 0) or valid for 16 bytes with `n` in 1..=128.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigdelset(s: *mut u8, n: i32) -> i32 {
     if s.is_null() || n <= 0 {
@@ -883,6 +1106,11 @@ pub unsafe extern "C" fn sigdelset(s: *mut u8, n: i32) -> i32 {
     unsafe { *w.add(((n - 1) as usize) / 64) &= !(1u64 << ((n - 1) % 64)) };
     0
 }
+/// Test bit `n` in a signal set (1/0).
+///
+/// # Safety
+///
+/// `s` must be null (returns 0) or valid for 16 bytes with `n` in 1..=128.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigismember(s: *const u8, n: i32) -> i32 {
     if s.is_null() || n <= 0 {
@@ -921,6 +1149,14 @@ const SIG_UNBLOCK: i32 = 1;
 const SIG_SETMASK: i32 = 2;
 const EINVAL: i32 = 22;
 
+/// Record/replay a signal handler locally (no kernel delivery).
+///
+/// # Safety
+///
+/// `sig` must be 1..=31 (else EINVAL); `act`/`old` may be null or must be
+/// valid for `SigAction` (32 bytes). A recorded non-null, non-ignored
+/// handler is invoked on replay with the C calling convention (`(sig)` or
+/// `(sig, null, null)` for `SA_SIGINFO`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(sig: i32, act: *const c_void, old: *mut c_void) -> i32 {
     // SAFETY: sig validated 1..31, act/old valid for SigAction if non-null
@@ -973,6 +1209,12 @@ unsafe fn deliver(sig: i32) {
     }
 }
 
+/// Update the process signal mask (global fallback).
+///
+/// # Safety
+///
+/// `set`/`old` may be null or must be valid for 16 bytes (two `u64`);
+/// unknown `how` leaves the mask unchanged.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigprocmask(how: i32, set: *const c_void, old: *mut c_void) -> i32 {
     // SAFETY: per-thread sigmask when house_thr_mode, else global CURMASK
@@ -1018,12 +1260,22 @@ pub unsafe extern "C" fn sigprocmask(how: i32, set: *const c_void, old: *mut c_v
     }
     0
 }
+/// Deliver `sig` to the recorded handler (replay, no kernel).
+///
+/// # Safety
+///
+/// Safe with any `sig` (out-of-range 1..=31 is ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn raise(sig: i32) -> i32 {
     // SAFETY: deliver replays handler
     unsafe { deliver(sig) };
     0
 }
+/// Deliver `sig` to this address space (pid 42/-1/0/-42), else ESRCH.
+///
+/// # Safety
+///
+/// Safe with any values; other pids cannot exist here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     // Single address space: only self-directed kills are meaningful.
@@ -1034,6 +1286,11 @@ pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     unsafe { deliver(sig) };
     0
 }
+/// Deliver SIGVTALRM to the recorded handler (RTS tick).
+///
+/// # Safety
+///
+/// Safe to call anytime at EL1; a no-op in threaded mode.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_rts_tick() {
     // SAFETY: only deliver when not in threaded mode, matches tinylibc/sys.c
@@ -1046,6 +1303,12 @@ pub unsafe extern "C" fn house_rts_tick() {
     }
     unsafe { deliver(SIGVTALRM) };
 }
+/// Set the global tick interval from an itimerval.
+///
+/// # Safety
+///
+/// `nv` may be null or valid for itimerval (reads words [2]/[3] as i64
+/// secs/usecs); `ov` may be null or is zeroed for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setitimer(_w: i32, nv: *const c_void, ov: *mut c_void) -> i32 {
     // SAFETY: nv/ov point to itimerval (32 bytes: two timevals).
@@ -1064,6 +1327,11 @@ pub unsafe extern "C" fn setitimer(_w: i32, nv: *const c_void, ov: *mut c_void) 
     }
     0
 }
+/// Report the tick interval (32-byte itimerval shape).
+///
+/// # Safety
+///
+/// `v` may be null (returns 0) or must be valid for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getitimer(_w: i32, v: *mut c_void) -> i32 {
     if v.is_null() {
@@ -1080,6 +1348,11 @@ pub unsafe extern "C" fn getitimer(_w: i32, v: *mut c_void) -> i32 {
     }
     0
 }
+/// Hand out a timer id (timers share the global interval).
+///
+/// # Safety
+///
+/// `_t` may be null (returns 0) or must be valid for a `u64` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_create(_c: i32, _e: *const c_void, _t: *mut u64) -> i32 {
     static mut NEXT: u64 = 1;
@@ -1092,6 +1365,12 @@ pub unsafe extern "C" fn timer_create(_c: i32, _e: *const c_void, _t: *mut u64) 
     }
     0
 }
+/// Set the global tick interval from an itimerspec.
+///
+/// # Safety
+///
+/// `_n` may be null or valid (reads words [2]/[3] as u64 secs/nsecs);
+/// `_o` may be null or is zeroed for 16 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_settime(
     _t: u64,
@@ -1109,6 +1388,11 @@ pub unsafe extern "C" fn timer_settime(
     }
     0
 }
+/// Report the tick interval (32-byte itimerspec shape).
+///
+/// # Safety
+///
+/// `_v` may be null (returns 0) or must be valid for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_gettime(_t: u64, _v: *mut c_void) -> i32 {
     if _v.is_null() {
@@ -1123,14 +1407,30 @@ pub unsafe extern "C" fn timer_gettime(_t: u64, _v: *mut c_void) -> i32 {
     }
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any values (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_getoverrun(_t: u64) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any values (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_delete(_t: u64) -> i32 {
     0
 }
+/// Answer _SC_PAGESIZE/NPROCESSORS/PHYS_PAGES/AVPHYS_PAGES/
+/// CLK_TCK/OPEN_MAX.
+///
+/// # Safety
+///
+/// Safe with any `n`; unknown names set EINVAL and return -1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sysconf(n: i32) -> i64 {
     // SAFETY: matches tinylibc/sys.c sysconf cases
@@ -1162,28 +1462,53 @@ pub unsafe extern "C" fn sysconf(n: i32) -> i64 {
         }
     }
 }
+/// Fixed page size 4096.
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpagesize() -> i32 {
     4096
 }
+/// Halt the core in `wfi`, never returns.
+///
+/// # Safety
+///
+/// Safe with any code (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(_s: i32) -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
     }
 }
+/// Halt the core in `wfi`, never returns.
+///
+/// # Safety
+///
+/// Safe with any code (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _exit(_s: i32) -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
     }
 }
+/// Halt the core in `wfi`, never returns.
+///
+/// # Safety
+///
+/// Safe with any code (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _Exit(_s: i32) -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
     }
 }
+/// Halt the core in `wfi`, never returns.
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn abort() -> ! {
     loop {
@@ -1202,6 +1527,13 @@ fn digit_val(c: u8) -> i32 {
         -1
     }
 }
+/// Parse an integer with C whitespace/sign/base-prefix rules.
+///
+/// # Safety
+///
+/// `n` must be null (returns 0) or point to a NUL-terminated string;
+/// `end` may be null or must be valid for a `*mut u8` write. Wraps like C
+/// on overflow.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtol(n: *const u8, end: *mut *mut u8, base: i32) -> i64 {
     // SAFETY: n is NUL-terminated per C contract, end may be null
@@ -1252,15 +1584,31 @@ pub unsafe extern "C" fn strtol(n: *const u8, end: *mut *mut u8, base: i32) -> i
     }
     if neg { -(v as i64) } else { v as i64 }
 }
+/// Parse an unsigned integer (delegates to `strtol` bits).
+///
+/// # Safety
+///
+/// Same contract as `strtol`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoul(n: *const u8, end: *mut *mut u8, base: i32) -> u64 {
     // SAFETY: delegate to strtol bit pattern
     unsafe { strtol(n, end, base) as u64 }
 }
+/// Parse a base-10 integer (delegates to `strtol`).
+///
+/// # Safety
+///
+/// `n` must be null (returns 0) or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoi(n: *const u8) -> i32 {
     unsafe { strtol(n, core::ptr::null_mut(), 10) as i32 }
 }
+/// Static "house error" string (errno numbers unmapped).
+///
+/// # Safety
+///
+/// Safe with any `_e`; returns a static NUL-terminated string that must
+/// not be freed or written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strerror(_e: i32) -> *mut u8 {
     b"house error\0".as_ptr() as *mut u8

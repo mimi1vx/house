@@ -184,6 +184,11 @@ unsafe fn poke_park() {
     }
 }
 
+/// Return the EL0 park-pipe read end, creating the pipe on first call.
+///
+/// # Safety
+///
+/// Call at EL1; returns -1 if pipe creation failed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_el0_park_pipe_fd() -> i32 {
     unsafe {
@@ -198,12 +203,22 @@ pub unsafe extern "C" fn house_el0_park_pipe_fd() -> i32 {
     }
 }
 
+/// Poll a descriptor for park-pipe readability (no state change).
+///
+/// # Safety
+///
+/// Safe with any `fd` value (poll-like check).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_el0_park_pipe_readable(fd: i32) -> i32 {
     // SAFETY: pipe readability probe, no state change.
     unsafe { house_fd_pipe_readable(fd) }
 }
 
+/// Drain pending bytes from the EL0 park pipe.
+///
+/// # Safety
+///
+/// Call at EL1 after `house_el0_park_pipe_fd` created the pipe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_el0_park_pipe_drain() {
     unsafe {
@@ -279,6 +294,13 @@ fn check_user_words(pdir: *mut u8, va: u64, io: *const u64, nwords: u64) -> i64 
     0
 }
 
+/// Copy up to 8 words from a user VA to `out` (0 ok, -14/-22).
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); `pdir` must be a live 4K-aligned
+/// root (Haskell holds `userSem` so `freePDir` cannot race); `va` 8-aligned
+/// in 0x01000000..0x100000000 with `nwords` <= 8; `out` valid for `nwords` u64.
 // SAFETY: EL1 thread context (Haskell park loop, capability free); `out` must
 // hold `nwords` u64. Page-table reads + PA loads only, no locks.
 #[unsafe(no_mangle)]
@@ -306,6 +328,13 @@ pub unsafe extern "C" fn house_user_read(
     }
 }
 
+/// Copy up to 8 words from `inp` to a user VA (0 ok, -14/-22).
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); `pdir` must be a live 4K-aligned
+/// root; `va` 8-aligned in 0x01000000..0x100000000 with `nwords` <= 8;
+/// `inp` valid for `nwords` u64.
 // SAFETY: EL1 thread context (Haskell park loop, capability free); `inp` must
 // hold `nwords` u64. Page-table reads + PA stores only, no locks.
 #[unsafe(no_mangle)]
@@ -475,6 +504,12 @@ unsafe fn validate_dir(op: u32, x0: u64, x1: u64, x2: u64) -> i64 {
     }
 }
 
+/// Dir-svc park gate: 1 park, 0 fail-through, -22 unknown op.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any register values (integer plus
+/// page-table validation only, never blocks).
 // SAFETY: trap context (`c_handle_sync` park gate); integer + page-table
 // validation only, no locks or allocation. Returns 1 when validated and the
 // caller should park, 0 when validation failed (caller falls through to
@@ -492,6 +527,12 @@ pub unsafe extern "C" fn house_dir_should_park(op: u32, x0: u64, x1: u64, x2: u6
     }
 }
 
+/// Fd-svc park gate: 1 park, 0 fail-through, -22 unknown op.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any register values (integer plus
+/// page-table validation only, never blocks).
 // SAFETY: trap context (`c_handle_sync` park gate); integer + page-table
 // validation only, no locks or allocation. Returns 1 when validated and the
 // caller should park, 0 when validation failed (caller falls through to
@@ -509,6 +550,12 @@ pub unsafe extern "C" fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64
     }
 }
 
+/// BRK park gate: 1 when op is BRK, -22 otherwise.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any values (BRK carries no user
+/// memory, Haskell decides window/ENOMEM).
 // SAFETY: trap context (`c_handle_sync` park gate); brk carries no user
 // memory (x0 = new break), so every op == 0x03 parks and Haskell decides
 // window/ENOMEM. Returns 1 park / -22 unknown op.
@@ -541,6 +588,12 @@ unsafe fn validate_sock(op: u32, x0: u64, x1: u64, _x2: u64) -> i64 {
     }
 }
 
+/// Sock-svc park gate: 1 park, 0 fail-through, -22 unknown op.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any register values (integer plus
+/// page-table validation only, never blocks).
 // SAFETY: trap context (`c_handle_sync` park gate); integer + page-table
 // validation only, no locks or allocation. Returns 1 when validated and the
 // caller should park, 0 when validation failed (caller falls through to
@@ -558,6 +611,12 @@ pub unsafe extern "C" fn house_sock_should_park(op: u32, x0: u64, x1: u64, x2: u
     }
 }
 
+/// Fork park gate: 1 when op is FORK, -22 otherwise.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any values (fork carries no user
+/// memory, Haskell decides pid/ENOMEM).
 // SAFETY: trap context (`c_handle_sync` park gate); fork carries no user
 // memory (child inherits the parent trap frame via `house_el0_clone_slot`,
 // x0 = 0 in the child, parent resumes with the child pid), so every
@@ -568,6 +627,12 @@ pub unsafe extern "C" fn house_fork_should_park(op: u32, _x0: u64) -> i32 {
     if op == HOUSE_SVC_FORK { 1 } else { -22 }
 }
 
+/// Wait park gate: 1 when op is WAIT, -22 otherwise.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any values (Haskell validates
+/// membership and reaps).
 // SAFETY: trap context (`c_handle_sync` park gate); wait carries only a pid
 // in x0 (Haskell validates membership, blocks until the child exits, reaps,
 // and resumes with the exit code), so every op == 0x09 parks and Haskell
@@ -577,6 +642,12 @@ pub unsafe extern "C" fn house_wait_should_park(op: u32, _x0: u64) -> i32 {
     if op == HOUSE_SVC_WAIT { 1 } else { -22 }
 }
 
+/// Exec park gate with 256B path validation.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any values (path checked against
+/// the trapping pdir with page-table reads only).
 // SAFETY: trap context (`c_handle_sync` park gate); exec carries a
 // NUL-terminated path in x0 (same 256B bound as OPEN, checked against the
 // trapping pdir with page-table reads only, no locks). Returns 1 when
@@ -592,6 +663,13 @@ pub unsafe extern "C" fn house_exec_should_park(op: u32, x0: u64) -> i32 {
     if r == 0 { 1 } else { 0 }
 }
 
+/// Copy up to 64K bytes from a user VA to `out` (0 ok, -14/-22).
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); `pdir` must be a live 4K-aligned
+/// root; `va`/`len` (<= 65536) window-checked in-call; `out` must hold
+/// `len` bytes.
 // Byte-granular user copy against an explicit pdir for the fd ring. While a
 // pid is parked the recorded `current_pdir` is the kernel root, so Haskell
 // passes the pid slot's pdir. Bounds: len <= 65536, VA window, no wrapping;
@@ -635,6 +713,13 @@ pub unsafe extern "C" fn house_user_read_bytes(
     }
 }
 
+/// Copy up to 64K bytes from `inp` to a user VA (0 ok, -14/-22).
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); `pdir` must be a live 4K-aligned
+/// root; `va`/`len` (<= 65536) window-checked in-call; `inp` must hold
+/// `len` bytes.
 // SAFETY: EL1 thread context (Haskell park loop, capability free); `inp`
 // must hold `len` bytes. Page-table reads + PA stores only, no locks.
 #[unsafe(no_mangle)]
@@ -673,6 +758,12 @@ pub unsafe extern "C" fn house_user_write_bytes(
     }
 }
 
+/// Bounded strlen (max 4K) of a user string into `out_len`.
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); `pdir` must be a live 4K-aligned
+/// root; `max` in 1..=4096; `out_len` valid for a `u64` write.
 // NUL-terminated string length against an explicit pdir for OPEN path
 // resolution. Scans at most `max` bytes; on success `*out_len` holds the
 // length excluding NUL. Returns 0 ok, -14 fault, -22 no NUL within max.
@@ -713,6 +804,11 @@ pub unsafe extern "C" fn house_user_strlen(
     }
 }
 
+/// Record an exit code for the current pid (or the legacy global).
+///
+/// # Safety
+///
+/// Call from EL1 trap or thread context; lock-free routing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_set_exit(code: i32) {
     unsafe {
@@ -740,6 +836,12 @@ pub unsafe extern "C" fn house_set_exit(code: i32) {
     }
 }
 
+/// Claim (or re-arm) an EL0 pid slot for `pdir`.
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell FFI); `pdir` must be non-null (null returns
+/// -22, a full table -28); the key must outlive the registration.
 // SAFETY: EL1 thread context (Haskell FFI); lock-free slot claim, `pdir`
 // published last so a concurrent trap scan never sees a half-claimed slot.
 #[unsafe(no_mangle)]
@@ -774,6 +876,12 @@ pub unsafe extern "C" fn house_el0_register(pdir: *mut u8) -> i32 {
     }
 }
 
+/// Release the EL0 pid slot for `pdir`.
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell FFI); safe with any pointer (null is a
+/// no-op); retracts the slot before the memory can be freed.
 // SAFETY: EL1 thread context (Haskell FFI); `pdir` retracted first so a
 // concurrent trap scan stops routing to the freed slot.
 #[unsafe(no_mangle)]
@@ -796,6 +904,12 @@ pub unsafe extern "C" fn house_el0_unregister(pdir: *mut u8) {
     }
 }
 
+/// Query a pid's exit status: 1 with `*code_out` set when exited.
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell FFI); null `pdir`/`code_out` returns -14,
+/// otherwise `code_out` must be valid for an `i32` write.
 // SAFETY: EL1 thread context (Haskell FFI); returns 1 with `*code_out` set
 // when the pid exited, 0 when still live/unknown, negative errno on bad args.
 #[unsafe(no_mangle)]
@@ -818,6 +932,12 @@ pub unsafe extern "C" fn house_el0_exit_status(pdir: *mut u8, code_out: *mut i32
     }
 }
 
+/// Park the trapping EL0 frame as an svc request.
+///
+/// # Safety
+///
+/// Trap context (`c_handle_sync` PARK path); `gpr` must be null or valid
+/// for 112 `u64` reads (the 896B frame); `elr` recorded as-delivered.
 // SAFETY: trap context (`c_handle_sync` PARK path); bounded 112-word copy
 // with no locks or allocation. `elr` is recorded as-delivered (already the
 // next pc — resume must NOT add 4). Returns 1 when the frame was parked,
@@ -854,6 +974,12 @@ pub unsafe extern "C" fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *c
     }
 }
 
+/// Park a faulting EL0 frame (RO perm guard on a COW page).
+///
+/// # Safety
+///
+/// Fault context; `gpr` must be null or valid for 112 `u64` reads; `far`
+/// is the window-checked fault VA.
 // SAFETY: fault context (`c_handle_sync` RO perm guard on a COW page);
 // bounded 112-word copy with no locks or allocation. `elr` is recorded
 // as-delivered (the faulting instruction — resume retries it, never +4).
@@ -896,6 +1022,12 @@ pub unsafe extern "C" fn house_el0_park_fault(
     }
 }
 
+/// Park a fatally-aborting EL0 frame for reaping.
+///
+/// # Safety
+///
+/// Fatal context (unhandled EL0 abort); `gpr` must be null or valid for 112
+/// `u64` reads. The frame never resumes (Haskell reaps the pid).
 // SAFETY: fatal-context (`c_handle_sync` unhandled EL0 abort); bounded
 // 112-word copy with no locks or allocation. Parks the faulting frame as
 // FAULT_KILL with the page-aligned VA so Haskell reaps the pid instead of
@@ -936,6 +1068,12 @@ pub unsafe extern "C" fn house_el0_park_kill(
     }
 }
 
+/// Test-only: synthesize a FAULT_KILL park for an enrolled driver domain.
+///
+/// # Safety
+///
+/// EL1 test context; null/misaligned/unknown `pdir` and on-window VAs
+/// fail closed (return 0).
 // S3 (house-oz9.11): test-only fault trigger for the driver fault-injection
 // gate (`driver fault` shell verb). Parks a genuine 0x1D FAULT_KILL against
 // an enrolled driver root's EL0 slot using the same slot protocol the trap
@@ -994,6 +1132,11 @@ pub unsafe extern "C" fn house_driver_inject_fault(pdir: *mut u8, va: u64) -> i3
     }
 }
 
+/// Return the parked fault VA for a pid (0 when none).
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); null `pdir` returns 0.
 // SAFETY: EL1 thread context (Haskell park loop); returns the parked fault
 // VA (page-aligned) for the pid, 0 when the pid holds no FAULT/FAULT_KILL
 // request. VA 0 is never a parked fault (user window starts at 0x01000000).
@@ -1018,6 +1161,11 @@ pub unsafe extern "C" fn house_el0_fault_addr(pdir: *mut u8) -> u64 {
     }
 }
 
+/// Test whether a pid is parked awaiting resume.
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell FFI poll); lock-free single-word read.
 // SAFETY: EL1 thread context (Haskell FFI poll); lock-free read, 1 when the
 // pid parked and awaits `house_resume_el0`, 0 when live/exited/unknown.
 #[unsafe(no_mangle)]
@@ -1036,6 +1184,12 @@ pub unsafe extern "C" fn house_el0_parked(pdir: *mut u8) -> i32 {
     }
 }
 
+/// Take a parked pid's request code plus x0..x3.
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); null `pdir`/`req_out`/`args_out`
+/// returns -14, otherwise `args_out` must hold 4 `u64`.
 // SAFETY: EL1 thread context (Haskell park loop); on 1 copies the request
 // code plus the parked x0..x3 (`save[0..4]`) out. `args_out` must hold 4 u64.
 // Returns 1 parked, 0 live/exited/unknown, negative errno on bad pointers.
@@ -1065,6 +1219,12 @@ pub unsafe extern "C" fn house_el0_take_request(
     }
 }
 
+/// Copy a parent's parked trap frame into a child slot (fork).
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell fork handler); both `pdir`s must be
+/// registered slots with the parent parked; the child frame is staged x0 = 0.
 // SAFETY: EL1 thread context (Haskell fork handler, capability free); both
 // pdirs must be registered slots. Copies the parent's parked trap frame
 // (896B save + ELR as-delivered + SP_EL0) into the child slot, stages the
@@ -1116,6 +1276,12 @@ pub unsafe extern "C" fn house_el0_clone_slot(parent: *mut u8, child: *mut u8) -
     }
 }
 
+/// Redirect a parked session at `entry`/`sp` (exec).
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell exec handler); `pdir` must be a registered
+/// parked slot; `entry`/`sp` become the resumed ELR/SP_EL0.
 // SAFETY: EL1 thread context (Haskell exec handler, capability free); pdir
 // must be a registered parked slot. Redirects the session at `entry` with
 // `sp`: ELR/sp_EL0 updated, general + SIMD save cleared (x0 staged by the
@@ -1144,6 +1310,12 @@ pub unsafe extern "C" fn house_el0_set_entry(pdir: *mut u8, entry: u64, sp: u64)
     }
 }
 
+/// Resume a parked EL0 session with x0 set to `res`.
+///
+/// # Safety
+///
+/// EL1 thread context (Haskell park loop); `pdir` must be a registered
+/// parked slot and `asid` its bound ASID. Re-enters EL0 via `eret`.
 // SAFETY: EL1 thread context (Haskell park loop, capability free while the
 // caller was blocked). Stages `res` as the resumed x0, clears parked, then
 // re-enters EL0 via `house_resume_asm`; control returns here (0) on the next
@@ -1194,6 +1366,11 @@ static SCHED_LEFT: [core::sync::atomic::AtomicU64; 32] =
     [const { core::sync::atomic::AtomicU64::new(SCHED_QUANTUM_DEFAULT_TICKS) }; 32];
 static SCHED_RUNNABLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Set the scheduler's runnable-process count.
+///
+/// # Safety
+///
+/// Callable from any EL1 context; a single atomic store.
 // SAFETY: callable from any EL1 context; a single atomic store.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_set_runnable(n: u64) {
@@ -1201,6 +1378,11 @@ pub unsafe extern "C" fn house_sched_set_runnable(n: u64) {
     SCHED_RUNNABLE.store(n, Ordering::SeqCst);
 }
 
+/// Set the scheduler quantum in timer ticks.
+///
+/// # Safety
+///
+/// Callable from any EL1 context; a single atomic store (0 means 1).
 // SAFETY: callable from any EL1 context; a single atomic store (0 means 1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_set_quantum(n: u64) {
@@ -1227,6 +1409,12 @@ fn sched_reset_quantum() {
     }
 }
 
+/// Timer-IRQ quantum tick; parks the EL0 frame on expiry when oversubscribed.
+///
+/// # Safety
+///
+/// Timer-IRQ context (`c_handle_irq`, intid 27) with EL0 confirmed;
+/// `gpr` must be null or the vec_irq frame. Rearms on every path.
 // SAFETY: timer-IRQ context (`c_handle_irq`, intid 27) after the caller
 // confirmed EL0 (`is_el0 != 0`, SPSR.M == 0) and passed the vec_irq frame;
 // integer, atomic, and table ops only, no locks or allocation. Decrements
@@ -1287,11 +1475,21 @@ pub unsafe extern "C" fn house_sched_tick_preempt(
     }
 }
 
+/// Read the legacy global exit code.
+///
+/// # Safety
+///
+/// Safe to call from any EL1 context (single-word read).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_get_exit_code() -> i32 {
     unsafe { HOUSE_USER_EXIT_CODE }
 }
 
+/// Clear the legacy global exit flag.
+///
+/// # Safety
+///
+/// Call from EL1 thread context; issues a barrier before return.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_clear_exit() {
     unsafe {
@@ -1301,11 +1499,22 @@ pub unsafe extern "C" fn house_clear_exit() {
     }
 }
 
+/// Test whether the legacy global exit flag is set.
+///
+/// # Safety
+///
+/// Safe to call from any EL1 context (single-word read).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_is_exited() -> i32 {
     unsafe { HOUSE_USER_EXITED }
 }
 
+/// EL1 sync-trap dispatch for EL0 svc immediates (inline errno or park code).
+///
+/// # Safety
+///
+/// Call from EL1 trap context with the vec_sync `gpr` frame (null `gpr`
+/// tolerated); integer and register validation only, never blocks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_svc_dispatch(
     imm: u32,

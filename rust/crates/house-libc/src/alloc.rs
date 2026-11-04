@@ -1,7 +1,3 @@
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "allocator exposes raw entry points mirroring C headers"
-)]
 #![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
 //! alloc.rs — tinylibc/alloc.c transliteration (172 SLoC).
 
@@ -219,11 +215,24 @@ unsafe fn pool_alloc(n: usize, align: usize) -> *mut u8 {
     p
 }
 
+/// Allocate `n` bytes from the 64M pool (16-byte aligned).
+///
+/// # Safety
+///
+/// Safe with any `n`; returns null when empty. The block is owned by the
+/// caller until `free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn malloc(n: usize) -> *mut u8 {
     unsafe { pool_alloc(n, 16) }
 }
 
+/// Return a block to the pool; foreign/null pointers are a no-op + EINVAL.
+///
+/// # Safety
+///
+/// Safe with any pointer: null is a no-op, pool blocks are recycled,
+/// anything else is ignored (never faults). Double-free fails validation
+/// instead of cycling the list.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free(p: *mut u8) {
     // C free(NULL) is a silent no-op; anything outside the pool (buddy /
@@ -256,6 +265,11 @@ pub unsafe extern "C" fn free(p: *mut u8) {
 }
 
 /// void house_malloc_stats(uint64_t *used_out, uint64_t *high_out) — Track O
+///
+/// # Safety
+///
+/// `used_out`/`high_out` must each be null or valid for a `u64` write;
+/// counters are read under the allocator lock.
 /// observability for the allocator-aware `mem` line (lock-protected snapshot).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_malloc_stats(used_out: *mut u64, high_out: *mut u64) {
@@ -274,6 +288,12 @@ pub unsafe extern "C" fn house_malloc_stats(used_out: *mut u64, high_out: *mut u
     }
 }
 
+/// Allocate zeroed `a * b` bytes (fails closed on overflow).
+///
+/// # Safety
+///
+/// Safe with any sizes; overflow or exhaustion returns null with errno
+/// set. The block is owned by the caller until `free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn calloc(a: usize, b: usize) -> *mut u8 {
     let n = match a.checked_mul(b) {
@@ -290,6 +310,13 @@ pub unsafe extern "C" fn calloc(a: usize, b: usize) -> *mut u8 {
     p
 }
 
+/// Resize a pool block, preserving content up to the smaller size.
+///
+/// # Safety
+///
+/// Null `old` allocates fresh; non-pool `old` (or oversized `n`) returns
+/// null with errno set and leaves `old` valid. The returned block holds
+/// the copied content; `old` is left allocated (never moved or freed).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn realloc(old: *mut u8, n: usize) -> *mut u8 {
     if old.is_null() {
@@ -328,6 +355,12 @@ pub unsafe extern "C" fn realloc(old: *mut u8, n: usize) -> *mut u8 {
     p
 }
 
+/// Allocate `n` bytes with `align` alignment.
+///
+/// # Safety
+///
+/// `out` must be non-null and valid for a pointer write; `align` must be
+/// a nonzero power of two. Returns 0 with `*out` set, or errno.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_memalign(out: *mut *mut u8, align: usize, n: usize) -> i32 {
     if out.is_null() {
@@ -344,6 +377,12 @@ pub unsafe extern "C" fn posix_memalign(out: *mut *mut u8, align: usize, n: usiz
     0
 }
 
+/// Duplicate a NUL-terminated string from the pool.
+///
+/// # Safety
+///
+/// `s` must be null (returns null) or point to a NUL-terminated string;
+/// device/EL0 bytes must be `strnlen`-pre-bound. Returns null on exhaustion.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     if s.is_null() {
@@ -379,6 +418,12 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     p
 }
 
+/// Anonymous demand-zero mapping (delegates to `house_vm_mmap`).
+///
+/// # Safety
+///
+/// `addr`/`len` round into the user window; `prot` excludes EXEC; `fd`
+/// must be -1 and `off` 0. Returns MAP_FAILED (`usize::MAX`) with errno set.
 // mmap delegation thin wrappers
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmap(
@@ -391,10 +436,21 @@ pub unsafe extern "C" fn mmap(
 ) -> *mut u8 {
     unsafe { house_vm_mmap(addr, len, prot, flags, fd, off) }
 }
+/// Unmap user pages (delegates to `house_vm_munmap`).
+///
+/// # Safety
+///
+/// `a`/`len` must lie in, or fully outside, the user window.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn munmap(a: *mut u8, len: usize) -> i32 {
     unsafe { house_vm_munmap(a, len) }
 }
+/// Toggle READ/WRITE on mapped user pages (delegates to `house_vm_mprotect`).
+///
+/// # Safety
+///
+/// `a` must be page-aligned inside the user window over mapped pages;
+/// `prot` excludes EXEC.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mprotect(a: *mut u8, len: usize, prot: i32) -> i32 {
     unsafe { house_vm_mprotect(a, len, prot) }

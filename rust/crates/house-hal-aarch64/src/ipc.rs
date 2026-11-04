@@ -54,6 +54,12 @@ unsafe fn inline_words_ok(va: u64, nwords: u64) -> i64 {
     }
 }
 
+/// Validate and dispatch an EL0 IPC svc call.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any register values (integer
+/// validation plus page-table reads only, never blocks on the Haskell rendezvous).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_ipc_svc_dispatch(
     op: u32,
@@ -119,6 +125,12 @@ unsafe fn validate_ipc(op: u32, x1: u64, x2: u64) -> i64 {
     }
 }
 
+/// Park gate for an EL0 IPC svc: 1 means validated (park for Haskell
+/// pairing), 0 means validation failed (caller falls through for the errno).
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any argument values.
 // SAFETY: trap context (`c_handle_sync` park gate); same integer + page-table
 // validation as dispatch, no locks or allocation. Returns 1 when the call
 // validated and should park for Haskell pairing, 0 when validation failed
@@ -141,6 +153,13 @@ fn range_in_window(ptr: u64, end: u64) -> bool {
     ptr >= HOUSE_USER_VA_MIN && end <= HOUSE_USER_VA_MAX.wrapping_add(1) && end >= ptr
 }
 
+/// Copy an IPC message between user buffers (length-capped, window-checked).
+///
+/// # Safety
+///
+/// Safe with any pointer/length values: null, oversized (`len > 4096`),
+/// wrapping, or out-of-window ranges copy nothing. In-window ranges must
+/// stay mapped for the copy (trap context).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_ipc_copy_msg(src: *const u8, dst: *mut u8, len: usize) {
     if src.is_null() || dst.is_null() {

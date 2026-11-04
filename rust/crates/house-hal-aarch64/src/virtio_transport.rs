@@ -58,6 +58,12 @@ fn slot_valid(slot: i32) -> bool {
     slot >= 0 && slot < NUM_SLOTS_H
 }
 
+/// Clean a guest RAM range to the point of coherency before device notify.
+///
+/// # Safety
+///
+/// `pa`/`len` describe Normal WB guest RAM; `len == 0` and wrapping ranges
+/// flush nothing. Must precede every `virtio_transport_notify`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_dc_flush(pa: u64, len: usize) {
     if len == 0 {
@@ -85,6 +91,11 @@ pub unsafe extern "C" fn virtio_transport_dc_flush(pa: u64, len: usize) {
     }
 }
 
+/// Read the device status byte into `status`.
+///
+/// # Safety
+///
+/// `slot` must be valid; `status` non-null valid for a `u32` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_get_status(slot: i32, status: *mut u32) -> i32 {
     if !slot_valid(slot) {
@@ -100,6 +111,11 @@ pub unsafe extern "C" fn virtio_transport_get_status(slot: i32, status: *mut u32
     VIRTIO_OK
 }
 
+/// Write the device status byte (ACK/DRIVER/FEATURES_OK/DRIVER_OK/FAILED).
+///
+/// # Safety
+///
+/// `slot` must be valid; follow the virtio status-bit order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_set_status(slot: i32, status: u32) -> i32 {
     if !slot_valid(slot) {
@@ -113,6 +129,11 @@ pub unsafe extern "C" fn virtio_transport_set_status(slot: i32, status: u32) -> 
     VIRTIO_OK
 }
 
+/// Reset a transport and negotiate the ACK/DRIVER status, reporting features.
+///
+/// # Safety
+///
+/// `slot` must be valid; `lo`/`hi` null or valid for `u32` writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_init(slot: i32, lo: *mut u32, hi: *mut u32) -> i32 {
     if !slot_valid(slot) {
@@ -154,6 +175,11 @@ pub unsafe extern "C" fn virtio_transport_init(slot: i32, lo: *mut u32, hi: *mut
     }
 }
 
+/// Write the negotiated (device & wanted) feature bits and set FEATURES_OK.
+///
+/// # Safety
+///
+/// `slot` must be valid with `virtio_transport_init` done.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_set_features(slot: i32, wanted: u64) -> i32 {
     if !slot_valid(slot) {
@@ -201,6 +227,11 @@ pub unsafe extern "C" fn virtio_transport_set_features(slot: i32, wanted: u64) -
     }
 }
 
+/// Read the queue-0 maximum size into `max`.
+///
+/// # Safety
+///
+/// `slot` must be valid; `max` non-null valid for a `u32` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_max(slot: i32, max: *mut u32) -> i32 {
     if !slot_valid(slot) {
@@ -218,6 +249,11 @@ pub unsafe extern "C" fn virtio_transport_queue_max(slot: i32, max: *mut u32) ->
     VIRTIO_OK
 }
 
+/// Read queue `qidx`'s maximum size into `max`.
+///
+/// # Safety
+///
+/// `slot` must be valid, `qidx` 0..=127; `max` non-null valid for a `u32` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_max_q(slot: i32, qidx: i32, max: *mut u32) -> i32 {
     if !slot_valid(slot) {
@@ -240,6 +276,12 @@ pub unsafe extern "C" fn virtio_transport_queue_max_q(slot: i32, qidx: i32, max:
     VIRTIO_OK
 }
 
+/// Program queue 0's addresses/size and mark it ready.
+///
+/// # Safety
+///
+/// `slot` must be valid; `desc_pa`/`avail_pa`/`used_pa` 4K-aligned guest
+/// pages owned by the driver, `qsize` within the queue maximum.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_setup(
     slot: i32,
@@ -251,6 +293,11 @@ pub unsafe extern "C" fn virtio_transport_queue_setup(
     unsafe { virtio_transport_queue_setup_q(slot, 0, desc_pa, avail_pa, used_pa, qsize) }
 }
 
+/// Program queue `qidx`'s addresses/size and mark it ready.
+///
+/// # Safety
+///
+/// `slot` must be valid, `qidx` 0..=127; queue pages as in `queue_setup`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_queue_setup_q(
     slot: i32,
@@ -285,6 +332,12 @@ pub unsafe extern "C" fn virtio_transport_queue_setup_q(
     VIRTIO_OK
 }
 
+/// Ring the queue-notify doorbell for queue `qidx`.
+///
+/// # Safety
+///
+/// `slot` must be valid with the queue set up; the queue's dirty cache
+/// lines must be flushed first (`dc_flush`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_notify(slot: i32, qidx: u32) -> i32 {
     if !slot_valid(slot) {
@@ -298,6 +351,11 @@ pub unsafe extern "C" fn virtio_transport_notify(slot: i32, qidx: u32) -> i32 {
     VIRTIO_OK
 }
 
+/// Read the transport interrupt-status register (0 when no interrupt).
+///
+/// # Safety
+///
+/// `slot` must be valid; safe anytime (MMIO read only).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_interrupt_status(slot: i32) -> u32 {
     if !slot_valid(slot) {
@@ -306,6 +364,11 @@ pub unsafe extern "C" fn virtio_transport_interrupt_status(slot: i32) -> u32 {
     unsafe { mmio_r32(slot_base(slot) + OFF_INTERRUPT_STATUS) }
 }
 
+/// Acknowledge (clear) interrupt bits in `mask`.
+///
+/// # Safety
+///
+/// `slot` must be valid; level-triggered sources stay asserted until acked.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_transport_ack(slot: i32, mask: u32) {
     if !slot_valid(slot) {

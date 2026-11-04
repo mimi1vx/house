@@ -1,9 +1,5 @@
 #![cfg_attr(not(test), no_std)] // hosted tests link std
 #![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
-)]
-#![allow(
     static_mut_refs,
     reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
 )]
@@ -212,7 +208,8 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
     while i < n {
         let v = unsafe { ptr::read(s.add(i)) };
         if v == target {
-            return s.add(i) as *mut u8;
+            // SAFETY: `i < n` and `s` valid for `n` bytes per contract.
+            return unsafe { s.add(i) } as *mut u8;
         }
         i += 1;
     }

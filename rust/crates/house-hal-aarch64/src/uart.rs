@@ -27,6 +27,11 @@ unsafe fn mmio_r32_u(addr: u64) -> u32 {
 }
 
 /// void uart_init(void)
+///
+/// # Safety
+///
+/// Call once at EL1 before any other `uart_*`; programs the PL011
+/// (base 0x09000000, identity-mapped).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_init() {
     // SAFETY: PL011 base 0x09000000 identity-mapped by TTBR1 L1 block 0 (Device).
@@ -47,6 +52,11 @@ pub unsafe extern "C" fn uart_init() {
 }
 
 /// void uart_putc(char c)
+///
+/// # Safety
+///
+/// Call at EL1 with the PL011 mapped; takes the UART spinlock, so do
+/// not call with the lock already held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_putc(c: u8) {
     UART_LOCK.lock();
@@ -94,6 +104,11 @@ pub(crate) fn uart_unlock() {
 }
 
 /// void uart_puts(const char *s) — null-terminated, 4K cap.
+///
+/// # Safety
+///
+/// `s` must be null (returns immediately) or point to a NUL-terminated
+/// string with the NUL within 4096 bytes; call at EL1 with the PL011 mapped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_puts(s: *const u8) {
     if s.is_null() {
@@ -128,6 +143,10 @@ pub unsafe extern "C" fn uart_puts(s: *const u8) {
 }
 
 /// int uart_getc_blocking(void)
+///
+/// # Safety
+///
+/// Call at EL1 with the PL011 mapped; spins until a byte arrives.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_getc_blocking() -> i32 {
     // SAFETY: PL011 MMIO valid.
@@ -140,6 +159,10 @@ pub unsafe extern "C" fn uart_getc_blocking() -> i32 {
 }
 
 /// int uart_getc_nonblock(void) — returns -1 if RXFE.
+///
+/// # Safety
+///
+/// Call at EL1 with the PL011 mapped; returns -1 when RX is empty.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uart_getc_nonblock() -> i32 {
     // SAFETY: PL011 MMIO valid.

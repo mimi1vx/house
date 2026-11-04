@@ -1,14 +1,6 @@
 #![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
-)]
-#![allow(
     static_mut_refs,
     reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
-)]
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "virtio transport exposes raw queue entry points"
 )]
 #![allow(
     clippy::manual_range_contains,
@@ -128,6 +120,11 @@ fn check_ready(slot: i32) -> i32 {
     VIRTIO_OK
 }
 
+/// Invalidate a guest console buffer range before the driver reads it.
+///
+/// # Safety
+///
+/// `pa`/`len` describe a Normal WB guest buffer; `len == 0` flushes nothing.
 // SAFETY: pa/len describe a Normal WB guest buffer; len 0 flushes nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_invalidate(pa: u64, len: usize) {
@@ -137,6 +134,11 @@ pub unsafe extern "C" fn virtio_con_invalidate(pa: u64, len: usize) {
     unsafe { dc_ivac_range(pa, len) };
 }
 
+/// Record port-queue addresses for a slot (resets port indices to 0/1).
+///
+/// # Safety
+///
+/// `slot` must be valid; queue PAs are 4 KiB guest pages owned by the driver.
 // SAFETY: queue PAs are 4 KiB Grant-backed pages owned by the guest driver.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_save_queues(
@@ -170,6 +172,12 @@ pub unsafe extern "C" fn virtio_con_save_queues(
     VIRTIO_OK
 }
 
+/// Reset a console slot's guest-side indices and port mapping.
+///
+/// # Safety
+///
+/// `slot` must be valid; clears guest-side state only, device re-init goes
+/// through the transport.
 // SAFETY: slot reset only clears guest-side indices; device re-init via transport.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_reset_slot(slot: i32) {
@@ -254,6 +262,13 @@ fn submit_inner(
     }
 }
 
+/// Post a WRITE descriptor lending a guest buffer for console/port input.
+///
+/// # Safety
+///
+/// `slot` must be valid with a ready console device; `data_pa` a guest page,
+/// `len` 1..=4096 with no wrap; `req_id` non-null. Posts to state pair 0,
+/// notifying the mapped port queue.
 // SAFETY: data_pa is a guest Grant page; len 1..4096; req_id non-null.
 // Port RX uses state pair 0 and notifies the mapped port queue
 // (0/1 console default, 2*id/2*id+1 after con_set_port_queues).
@@ -271,6 +286,13 @@ pub unsafe extern "C" fn virtio_con_submit_rx(
     submit_inner(slot, 0, notify_q, data_pa, len, DESC_F_WRITE, false, req_id)
 }
 
+/// Post a console/port output transfer from a guest buffer.
+///
+/// # Safety
+///
+/// `slot` must be valid with a ready console device; `data_pa` a nonzero
+/// guest page, `data_len` 1..=4096 with no wrap; `req_id` non-null. Posts
+/// to state pair 1, notifying the mapped port queue; flushes before notify.
 // SAFETY: data_pa is a guest Grant page; data_len 1..4096; req_id non-null.
 // Port TX uses state pair 1 and notifies the mapped port queue.
 #[unsafe(no_mangle)]
@@ -287,6 +309,12 @@ pub unsafe extern "C" fn virtio_con_submit_tx(
     submit_inner(slot, 1, notify_q, data_pa, data_len, 0, true, req_id)
 }
 
+/// Post a control-queue RX descriptor for device-written event bytes.
+///
+/// # Safety
+///
+/// `slot` must be valid; `data_pa` a guest page, `len` 1..=4096, no wrap;
+/// `req_id` non-null. Targets control queue 2.
 // SAFETY: data_pa is a guest Grant page; len 1..4096; req_id non-null.
 // Control RX (queue 2): device-written event bytes, same contract as port RX.
 #[unsafe(no_mangle)]
@@ -299,6 +327,12 @@ pub unsafe extern "C" fn virtio_con_submit_ctrl_rx(
     submit_inner(slot, 2, 2, data_pa, len, DESC_F_WRITE, false, req_id)
 }
 
+/// Post a control-queue TX event message (8-byte id/event/value).
+///
+/// # Safety
+///
+/// `slot` must be valid; `data_pa` a nonzero guest page, `data_len` 1..=4096,
+/// no wrap; `req_id` non-null. Targets control queue 3.
 // SAFETY: data_pa is a guest Grant page; data_len 1..4096; req_id non-null.
 // Control TX (queue 3): 8-byte {id LE32, event LE16, value LE16} messages
 // (DEVICE_READY 0 / PORT_READY 3 / PORT_OPEN 6 per Linux virtio_console.h).
@@ -312,6 +346,13 @@ pub unsafe extern "C" fn virtio_con_submit_ctrl_tx(
     submit_inner(slot, 3, 3, data_pa, data_len, 0, true, req_id)
 }
 
+/// Drain one console completion: 0 with `out_id`/`out_len` filled, 1 when idle.
+///
+/// # Safety
+///
+/// `slot` must be valid, `qidx` 0..=3 (0/1 port queues, 2/3 control);
+/// `out_id`/`out_len` non-null valid for `u32` writes; the used ring is
+/// owned by the slot.
 // SAFETY: qidx 0|1 port queues, 2|3 serial control queues; out_id/out_len non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_poll_used(
@@ -330,7 +371,7 @@ pub unsafe extern "C" fn virtio_con_poll_used(
         return VIRTIO_ERR_INVAL;
     }
     let base = slot_base(slot);
-    let magic = mmio_r32(base + OFF_MAGIC);
+    let magic = unsafe { mmio_r32(base + OFF_MAGIC) };
     if magic != MAGIC_H {
         return VIRTIO_ERR_BAD_VERSION;
     }
@@ -340,9 +381,9 @@ pub unsafe extern "C" fn virtio_con_poll_used(
         return VIRTIO_ERR_NOT_READY;
     }
     let used_idx_ptr = (used_pa + 2) as *const u16;
-    dc_ivac_range(used_pa, 8);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    let uidx = *used_idx_ptr;
+    unsafe { dc_ivac_range(used_pa, 8) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    let uidx = unsafe { *used_idx_ptr };
     if uidx == ss.used_idx[qidx as usize] {
         return 1;
     }
@@ -351,19 +392,25 @@ pub unsafe extern "C" fn virtio_con_poll_used(
         qsize = 64;
     }
     let local = (ss.used_idx[qidx as usize] % qsize as u16) as usize;
-    dc_ivac_range(used_pa + 4 + local as u64 * 8, 8);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
+    unsafe { dc_ivac_range(used_pa + 4 + local as u64 * 8, 8) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
     let used_ring = (used_pa + 4) as *const u32;
-    let id = *used_ring.add(local * 2);
-    let len = *used_ring.add(local * 2 + 1);
-    mmio_w32(base + OFF_INTERRUPT_ACK, 1);
-    core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+    let id = unsafe { *used_ring.add(local * 2) };
+    let len = unsafe { *used_ring.add(local * 2 + 1) };
+    unsafe { mmio_w32(base + OFF_INTERRUPT_ACK, 1) };
+    unsafe { core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags)) };
     ss.used_idx[qidx as usize] = ss.used_idx[qidx as usize].wrapping_add(1);
-    *out_id = id;
-    *out_len = len;
+    unsafe { *out_id = id };
+    unsafe { *out_len = len };
     0
 }
 
+/// Read the device's max-ports config (1..=32); pure 2-queue consoles report INVAL.
+///
+/// # Safety
+///
+/// `slot` must be valid with a console/serial device; `out_ports` non-null
+/// valid for a `u32` write. Reads device config only.
 // SAFETY: reads device config only; out_ports non-null. Accepts the serial
 // bus (3, multipoint when control queues exist) and rproc-serial (11).
 // Rejects 0 and values above MAX_SERIAL_PORTS (untrusted device config is
@@ -400,6 +447,12 @@ pub unsafe extern "C" fn virtio_con_max_ports(slot: i32, out_ports: *mut u32) ->
     VIRTIO_OK
 }
 
+/// Record control-queue addresses for a slot (resets indices).
+///
+/// # Safety
+///
+/// `slot` must be valid; control-queue PAs are 4 KiB guest pages owned by
+/// the driver.
 // SAFETY: queue PAs are 4 KiB Grant-backed pages owned by the guest driver.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_con_save_ctrl_queues(
@@ -432,6 +485,12 @@ pub unsafe extern "C" fn virtio_con_save_ctrl_queues(
     VIRTIO_OK
 }
 
+/// Map the port pair to transport queue indices (serial 2*id/2*id+1).
+///
+/// # Safety
+///
+/// `slot` must be valid; `rx_qidx`/`tx_qidx` bounded to real queues
+/// (<= 127). Pure index mapping, no DMA.
 // Transport queue indices for the port pair (submit notify values).
 // Defaults 0/1 (console); serial sets 2*id/2*id+1 after PORT_ADD discovery.
 // SAFETY: pure index mapping, no DMA; qidx values are bounded to real queues.

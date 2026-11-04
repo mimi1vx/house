@@ -9,6 +9,12 @@ const VIRTIO_STRIDE: u64 = 0x200;
 const VIRTIO_NUM_SLOTS: i32 = 32;
 const VIRTIO_MAGIC: u32 = 0x74726976;
 
+/// Probe a virtio-mmio slot, reporting device/vendor/version.
+///
+/// # Safety
+///
+/// `dev`, `vendor` and `ver` must each be null or valid for a `u32` write.
+/// Call at EL1 with the virtio MMIO window (0x0a000000) identity-mapped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_probe_slot(
     slot: i32,
@@ -43,6 +49,12 @@ pub unsafe extern "C" fn virtio_probe_slot(
     }
 }
 
+/// Translate a RAM pointer to its physical address (identity map).
+///
+/// # Safety
+///
+/// Safe with any pointer value including null: the pointer is only cast,
+/// never dereferenced. The result is meaningful only for identity-mapped RAM.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_page_pa(p: *mut u8) -> u64 {
     // Identity-mapped RAM at 0x40000000.

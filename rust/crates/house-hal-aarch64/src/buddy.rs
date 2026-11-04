@@ -22,6 +22,11 @@ static mut FREE_PAGES: u64 = 0;
 static mut FREE_HEAD: *mut FreeBlock = core::ptr::null_mut();
 
 /// void buddy_init(uint64_t start, uint64_t end)
+///
+/// # Safety
+///
+/// Call once at EL1 during early boot on a single core, with `[start, end)`
+/// a RAM window; re-init is a no-op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_init(start: u64, end: u64) {
     let mut s = start;
@@ -53,6 +58,11 @@ pub unsafe extern "C" fn buddy_init(start: u64, end: u64) {
 }
 
 /// void *buddy_alloc_page(void)
+///
+/// # Safety
+///
+/// Call at EL1 after `buddy_init`; returns null when empty. A returned 4K
+/// zeroed page is owned by the caller until `buddy_free_page`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_alloc_page() -> *mut u8 {
     let mut p: *mut u8 = core::ptr::null_mut();
@@ -89,6 +99,11 @@ pub unsafe extern "C" fn buddy_alloc_page() -> *mut u8 {
 }
 
 /// void buddy_free_page(void *p)
+///
+/// # Safety
+///
+/// Safe with any pointer: null, out-of-range, or misaligned frees are
+/// ignored. Only pages from `buddy_alloc_page` may be freed, exactly once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_free_page(p: *mut u8) {
     if p.is_null() {
@@ -117,6 +132,10 @@ pub unsafe extern "C" fn buddy_free_page(p: *mut u8) {
 }
 
 /// int buddy_free_count(void) — compat shim, saturates at INT_MAX.
+///
+/// # Safety
+///
+/// Safe to call anytime; lock-free single-word read (may race alloc/free).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_free_count() -> i32 {
     // SAFETY: reading FREE_PAGES is racy but single word; no lock needed for count query (C does same).
@@ -124,12 +143,20 @@ pub unsafe extern "C" fn buddy_free_count() -> i32 {
 }
 
 /// int buddy_total_count(void) — compat shim, saturates at INT_MAX.
+///
+/// # Safety
+///
+/// Safe to call anytime; lock-free single-word read (stable after init).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_total_count() -> i32 {
     unsafe { TOTAL_PAGES.min(i32::MAX as u64) as i32 }
 }
 
 /// void house_mem_stats(uint64_t *total, uint64_t *free_pages_out)
+///
+/// # Safety
+///
+/// `total` and `free_out` must each be null or valid for a `u64` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mem_stats(total: *mut u64, free_out: *mut u64) {
     let (tp, fp): (u64, u64);
@@ -156,6 +183,10 @@ pub(crate) fn buddy_in_heap(addr: u64) -> bool {
 }
 
 /// int buddy_contains(void *p)
+///
+/// # Safety
+///
+/// Safe with any pointer value including null (null and misaligned return 0).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buddy_contains(p: *mut u8) -> i32 {
     if p.is_null() {

@@ -25,6 +25,12 @@ unsafe fn cntfrq() -> u64 {
     if f == 0 { 62500000 } else { f }
 }
 
+/// Seconds since boot (CNTVCT minus the per-core boot tick).
+///
+/// # Safety
+///
+/// Call at EL1 or higher with the generic timer initialized
+/// (`house_timer_init`); reads CNTVCT_EL0/CNTFRQ_EL0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_uptime_secs() -> u64 {
     let now: u64;
@@ -82,16 +88,32 @@ unsafe fn timer_init_for_core(core: u32) {
     }
 }
 
+/// Start the EL1 virtual and physical timers on the boot core.
+///
+/// # Safety
+///
+/// Call once on the boot core at EL1; programs CNTV/CNTP and records
+/// the boot tick.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_init() {
     unsafe { timer_init_for_core(0) }
 }
 
+/// Start the EL1 virtual and physical timers on a secondary core.
+///
+/// # Safety
+///
+/// Call once per secondary core at EL1, with `core` the caller's own id (< 32).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_init_secondary(core: u32) {
     unsafe { timer_init_for_core(core) }
 }
 
+/// Rearm the EL1 virtual countdown timer.
+///
+/// # Safety
+///
+/// Call at EL1 on the owning core with the timer initialized.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_rearm_virt() {
     unsafe {
@@ -101,6 +123,11 @@ pub unsafe extern "C" fn house_timer_rearm_virt() {
     }
 }
 
+/// Rearm the EL1 physical countdown timer.
+///
+/// # Safety
+///
+/// Call at EL1 on the owning core with the timer initialized.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_timer_rearm_phys() {
     unsafe {

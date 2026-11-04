@@ -1,8 +1,4 @@
 #![allow(
-    clippy::missing_safety_doc,
-    reason = "scheduler exposes raw entry points mirroring C headers"
-)]
-#![allow(
     clippy::needless_range_loop,
     reason = "index loops mirror C array walks"
 )]
@@ -26,10 +22,6 @@
 #![allow(
     unused_unsafe,
     reason = "transliteration keeps explicit unsafe blocks for audit"
-)]
-#![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
 )]
 #![allow(
     static_mut_refs,
@@ -280,6 +272,12 @@ unsafe fn queued_anywhere(thr: *mut HouseThread) -> bool {
     false
 }
 
+/// Zero all thread/scheduler tables.
+///
+/// # Safety
+///
+/// Call once at EL1 during early boot on a single core, before any thread
+/// exists (`house_thread_init_main` claims tid 1 next).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_threads_init() {
     for i in 0..HOUSE_MAX_THREADS {
@@ -298,6 +296,11 @@ pub unsafe extern "C" fn house_threads_init() {
     unsafe { sched_lock = 0 };
 }
 
+/// Boot the tid-1 main thread on core 0 (TLS plus TPIDR_EL0).
+///
+/// # Safety
+///
+/// Call once at EL1 on core 0 after `house_threads_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_thread_init_main() {
     unsafe { house_threads_init() };
@@ -332,6 +335,11 @@ pub unsafe extern "C" fn house_thread_init_main() {
     }
 }
 
+/// Boot an idle thread record for a secondary core.
+///
+/// # Safety
+///
+/// Call once per secondary core at EL1 with `core` its own id (< 32).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_threads_init_secondary(core: u32) {
     if core as usize >= HOUSE_MAX_SMP {
@@ -377,6 +385,12 @@ pub unsafe extern "C" fn house_threads_init_secondary(core: u32) {
     }
 }
 
+/// Re-affine small-tid runnables across online cores.
+///
+/// # Safety
+///
+/// Call at EL1 with the scheduler running; takes the sched lock (never
+/// with it held).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_threads_rebalance() {
     unsafe { house_sched_lock_acquire() };
@@ -435,6 +449,12 @@ pub unsafe extern "C" fn house_threads_rebalance() {
     unsafe { house_sched_lock_release() };
 }
 
+/// Current thread pointer (null outside threading).
+///
+/// # Safety
+///
+/// Call at EL1; the returned pointer is valid only while the thread is
+/// registered.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_thread_current() -> *mut HouseThread {
     let core = unsafe { cpu_id() } as usize;
@@ -442,6 +462,11 @@ pub unsafe extern "C" fn house_thread_current() -> *mut HouseThread {
     unsafe { house_current_thr[c] }
 }
 
+/// Take the scheduler spinlock (IRQ-masked).
+///
+/// # Safety
+///
+/// EL1 only; strictly paired with `house_sched_lock_release`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_lock_acquire() {
     unsafe { core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags)) };
@@ -462,6 +487,12 @@ pub unsafe extern "C" fn house_sched_lock_acquire() {
     }
 }
 
+/// Release the scheduler spinlock (may yield if deferred).
+///
+/// # Safety
+///
+/// EL1 only; must pair a matching acquire; a deferred wake yields before
+/// returning.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_lock_release() {
     let core = unsafe { cpu_id() } as usize;
@@ -486,6 +517,11 @@ pub unsafe extern "C" fn house_sched_lock_release() {
     }
 }
 
+/// Enqueue a blocked thread as runnable.
+///
+/// # Safety
+///
+/// Safe with any pointer (null is a no-op); takes the sched lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_wake(thr: *mut HouseThread) {
     if thr.is_null() {
@@ -500,6 +536,11 @@ pub unsafe extern "C" fn house_sched_wake(thr: *mut HouseThread) {
     }
 }
 
+/// Record an IPI wake for this core.
+///
+/// # Safety
+///
+/// Call from the SGI handler at EL1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_ipi_handler() {
     let core = unsafe { cpu_id() } as usize;
@@ -509,6 +550,11 @@ pub unsafe extern "C" fn house_sched_ipi_handler() {
     unsafe { core::arch::asm!("dsb sy; sev; isb", options(nostack, preserves_flags)) };
 }
 
+/// SGI-kick a core (no-op for offline/out-of-range ids).
+///
+/// # Safety
+///
+/// Safe with any `core` id.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_kick(core: i32) {
     if core < 0 {
@@ -529,9 +575,19 @@ pub unsafe extern "C" fn house_sched_kick(core: i32) {
     unsafe { core::arch::asm!("dsb sy; sev; isb", options(nostack, preserves_flags)) };
 }
 
+/// No-op hook (preemption lives in the IRQ handler).
+///
+/// # Safety
+///
+/// Safe to call from any EL1 context.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_maybe_preempt_from_isr() {}
 
+/// Block the current thread until woken.
+///
+/// # Safety
+///
+/// Call at EL1 with the scheduler running; the thread must be registered.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_block() {
     let core = unsafe { cpu_id() };
@@ -561,6 +617,11 @@ pub unsafe extern "C" fn house_sched_block() {
     unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
 }
 
+/// Yield to the next runnable on this core.
+///
+/// # Safety
+///
+/// Call at EL1 with the scheduler running.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_sched_yield() {
     let core = unsafe { cpu_id() } as i32;
@@ -657,6 +718,12 @@ pub unsafe extern "C" fn house_sched_yield() {
     unsafe { house_thread_switch(old, next) };
 }
 
+/// Allocate a zeroed 32-byte thread control block.
+///
+/// # Safety
+///
+/// Safe to call at EL1; returns null on exhaustion. The block is owned by
+/// the caller until freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_tls_alloc() -> *mut u8 {
     unsafe extern "C" {
@@ -675,6 +742,13 @@ pub unsafe extern "C" fn house_tls_alloc() -> *mut u8 {
     p
 }
 
+/// Create a thread with a stack, TCB, and trampoline frame.
+///
+/// # Safety
+///
+/// `thr` must be null (EINVAL) or valid for a `u64` tid write; `start` is
+/// recorded and invoked once as `fn(*mut u8) -> *mut u8` with `arg`.
+/// Returns 0 with the tid stored, ENOMEM/errno otherwise.
 // -- pthread stubs kept minimal --
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_create(
@@ -775,11 +849,16 @@ pub unsafe extern "C" fn pthread_create(
     0
 }
 
+/// Thread entry: runs `start(arg)`, then `pthread_exit`.
+///
+/// # Safety
+///
+/// Scheduler-installed only (reads this core's current thread); never returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_thread_trampoline() {
-    let core = cpu_id() as usize;
+    let core = unsafe { cpu_id() } as usize;
     let thr = if core < HOUSE_MAX_SMP {
-        house_current_thr[core]
+        unsafe { house_current_thr[core] }
     } else {
         core::ptr::null_mut()
     };
@@ -809,6 +888,12 @@ pub unsafe extern "C" fn house_thread_trampoline() {
     unsafe { pthread_exit(ret) };
 }
 
+/// Wait for a tid, take its retval, and reap stack/TCB.
+///
+/// # Safety
+///
+/// ESRCH for unknown tids, EINVAL for detached ones; `r` may be null or
+/// must be valid for a pointer write. May block at EL1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_join(t: u64, r: *mut *mut u8) -> i32 {
     let mut target: *mut HouseThread = core::ptr::null_mut();
@@ -879,6 +964,11 @@ pub unsafe extern "C" fn pthread_join(t: u64, r: *mut *mut u8) -> i32 {
     unsafe { house_sched_lock_release() };
     0
 }
+/// Mark a tid detached (reaps immediately if already exited).
+///
+/// # Safety
+///
+/// Safe with any tid (unknown tids return 0 without effect).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_detach(t: u64) -> i32 {
     unsafe { house_sched_lock_acquire() };
@@ -906,10 +996,15 @@ pub unsafe extern "C" fn pthread_detach(t: u64) -> i32 {
     unsafe { house_sched_lock_release() };
     0
 }
+/// Exit the current thread, waking its joiner; never returns.
+///
+/// # Safety
+///
+/// `r` is stored as the thread's retval (may be any value).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
-    let core = cpu_id() as usize;
-    let cur = house_current_thr[core];
+    let core = unsafe { cpu_id() } as usize;
+    let cur = unsafe { house_current_thr[core] };
     if !cur.is_null() {
         unsafe { (*cur).retval = r };
         unsafe { (*cur).exited = 1 };
@@ -927,7 +1022,7 @@ pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
                 target.trailing_zeros() as i32
             };
             unsafe { enqueue_run(joiner) };
-            let cur_core = cpu_id() as i32;
+            let cur_core = unsafe { cpu_id() } as i32;
             if target != cur_core {
                 unsafe { house_sched_kick(target) };
             }
@@ -977,6 +1072,11 @@ pub unsafe extern "C" fn pthread_exit(r: *mut u8) -> ! {
         unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) }
     }
 }
+/// Current thread id (1 outside threading).
+///
+/// # Safety
+///
+/// Safe to call anytime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_self() -> u64 {
     let cur = unsafe { house_thread_current() };
@@ -986,10 +1086,20 @@ pub unsafe extern "C" fn pthread_self() -> u64 {
         unsafe { (*cur).tid as u64 }
     }
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_kill(_t: u64, _s: i32) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setname_np(_t: u64, _n: *const u8) -> i32 {
     0
@@ -1007,6 +1117,11 @@ struct HouseCond {
     wait_tail: *mut HouseThread,
 }
 
+/// Initialize a mutex (zeroed, unowned).
+///
+/// # Safety
+///
+/// `m` must be null (EINVAL) or valid for a `HouseMutex`; `_a` is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_init(m: *mut u8, _a: *const u8) -> i32 {
     // SAFETY: m points to HouseMutex per caller
@@ -1022,10 +1137,21 @@ pub unsafe extern "C" fn pthread_mutex_init(m: *mut u8, _a: *const u8) -> i32 {
     }
     0
 }
+/// Unimplemented no-op returning 0.
+///
+/// # Safety
+///
+/// Safe with any pointer (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_destroy(_m: *mut u8) -> i32 {
     0
 }
+/// Lock a mutex, blocking the thread until owned.
+///
+/// # Safety
+///
+/// `m` must be a mutex from `pthread_mutex_init` (null or thread-less
+/// callers get EINVAL).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_lock(m: *mut u8) -> i32 {
     // SAFETY: spin_lock with dmb sy, queue wait_next + SGI0 kick mirrors tinylibc/threads.c
@@ -1069,6 +1195,11 @@ pub unsafe extern "C" fn pthread_mutex_lock(m: *mut u8) -> i32 {
         }
     }
 }
+/// Try to lock a mutex (0 locked, 16 busy).
+///
+/// # Safety
+///
+/// `m` must be a mutex from `pthread_mutex_init` (null returns EINVAL).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut u8) -> i32 {
     if m.is_null() {
@@ -1093,6 +1224,12 @@ pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut u8) -> i32 {
         16
     }
 }
+/// Unlock a mutex, waking one waiter.
+///
+/// # Safety
+///
+/// `m` must be a locked mutex from `pthread_mutex_init` (null returns
+/// EINVAL).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut u8) -> i32 {
     if m.is_null() {
@@ -1135,6 +1272,11 @@ pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut u8) -> i32 {
     }
     0
 }
+/// Initialize a condition variable (empty queue).
+///
+/// # Safety
+///
+/// `c` must be null (EINVAL) or valid for a `HouseCond`; `_a` is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_init(c: *mut u8, _a: *const u8) -> i32 {
     if c.is_null() {
@@ -1147,10 +1289,20 @@ pub unsafe extern "C" fn pthread_cond_init(c: *mut u8, _a: *const u8) -> i32 {
     }
     0
 }
+/// Unimplemented no-op returning 0.
+///
+/// # Safety
+///
+/// Safe with any pointer (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_destroy(_c: *mut u8) -> i32 {
     0
 }
+/// Wake one waiter on a condition variable.
+///
+/// # Safety
+///
+/// `c` must be a condvar from `pthread_cond_init` (null returns EINVAL).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_signal(c: *mut u8) -> i32 {
     if c.is_null() {
@@ -1188,6 +1340,11 @@ pub unsafe extern "C" fn pthread_cond_signal(c: *mut u8) -> i32 {
     }
     0
 }
+/// Wake all waiters on a condition variable.
+///
+/// # Safety
+///
+/// `c` must be a condvar from `pthread_cond_init` (null returns EINVAL).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_broadcast(c: *mut u8) -> i32 {
     if c.is_null() {
@@ -1223,6 +1380,12 @@ pub unsafe extern "C" fn pthread_cond_broadcast(c: *mut u8) -> i32 {
     }
     0
 }
+/// Wait on a condvar, releasing the mutex while blocked.
+///
+/// # Safety
+///
+/// `c`/`m` must be an initialized condvar/mutex pair (null returns EINVAL);
+/// the mutex must be held by the calling thread and is re-held on return.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> i32 {
     // SAFETY: mirrors tinylibc/threads.c pthread_cond_wait with mutex handoff and queue
@@ -1330,6 +1493,12 @@ pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> i32 {
     }
     0
 }
+/// Wait on a condvar until signal or absolute timeout (110).
+///
+/// # Safety
+///
+/// `t` may be null (plain wait) or must be valid for a timespec (absolute
+/// seconds/nsecs, fake-epoch adjusted); `c`/`m` follow `pthread_cond_wait`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *const u8) -> i32 {
     if t.is_null() {
@@ -1484,26 +1653,56 @@ pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, t: *cons
         if timed_out { 110 } else { 0 }
     }
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_init(_a: *mut u8) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_destroy(_a: *mut u8) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_setclock(_a: *mut u8, _c: i32) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_init(_a: *mut u8) -> i32 {
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_destroy(_a: *mut u8) -> i32 {
     0
 }
+/// Report the fixed 512K stack size.
+///
+/// # Safety
+///
+/// `_s` may be null or must be valid for a `usize` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getstacksize(_a: *const u8, _s: *mut usize) -> i32 {
     if !_s.is_null() {
@@ -1511,6 +1710,11 @@ pub unsafe extern "C" fn pthread_attr_getstacksize(_a: *const u8, _s: *mut usize
     };
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_setaffinity_np(
     _a: *mut u8,
@@ -1519,6 +1723,11 @@ pub unsafe extern "C" fn pthread_attr_setaffinity_np(
 ) -> i32 {
     0
 }
+/// Report the live online mask (zero-padded past 8 bytes).
+///
+/// # Safety
+///
+/// `_m` may be null or, with `_sz >= 8`, must be valid for `_sz` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getaffinity_np(_a: *mut u8, _sz: usize, _m: *mut u8) -> i32 {
     // SAFETY: reports the live online mask, not (1<<SMP_N)-1.
@@ -1531,10 +1740,20 @@ pub unsafe extern "C" fn pthread_attr_getaffinity_np(_a: *mut u8, _sz: usize, _m
     }
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setaffinity_np(_t: u64, _sz: usize, _m: *const u8) -> i32 {
     0
 }
+/// Report the live online mask (zero-padded past 8 bytes).
+///
+/// # Safety
+///
+/// `_m` may be null or, with `_sz >= 8`, must be valid for `_sz` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_getaffinity_np(_t: u64, _sz: usize, _m: *mut u8) -> i32 {
     // SAFETY: live online mask like sched_getaffinity.
@@ -1585,11 +1804,21 @@ pub unsafe extern "C" fn house_threads_on_core_down(core: u32) {
         house_sched_kick(dst);
     }
 }
+/// Yield to the next runnable on this core (returns 0).
+///
+/// # Safety
+///
+/// Call at EL1 with the scheduler running.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_yield() -> i32 {
     unsafe { house_sched_yield() };
     0
 }
+/// Report the live online mask (zero-padded past 8 bytes).
+///
+/// # Safety
+///
+/// `_m` may be null or, with `_s >= 8`, must be valid for `_s` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_getaffinity(_p: i32, _s: usize, _m: *mut u8) -> i32 {
     if !_m.is_null() && _s >= 8 {
@@ -1601,6 +1830,11 @@ pub unsafe extern "C" fn sched_getaffinity(_p: i32, _s: usize, _m: *mut u8) -> i
     }
     0
 }
+/// Record an affinity mask into the current thread.
+///
+/// # Safety
+///
+/// `_m` may be null (no-op) or must be valid for a `u32` read.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_setaffinity(_p: i32, _s: usize, _m: *const u8) -> i32 {
     if !_m.is_null() {
@@ -1611,10 +1845,22 @@ pub unsafe extern "C" fn sched_setaffinity(_p: i32, _s: usize, _m: *const u8) ->
     }
     0
 }
+/// Unimplemented stub returning 0.
+///
+/// # Safety
+///
+/// Safe with any arguments (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_sigmask(_h: i32, _s: *const u8, _o: *mut u8) -> i32 {
     0
 }
+/// Sleep until an absolute deadline (blocks or spins).
+///
+/// # Safety
+///
+/// `rq` must be null (returns 0) or valid for a timespec; blocks the
+/// calling thread when scheduled, else spins on the timer. `rm` is zeroed
+/// on completion when non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanosleep(rq: *const u8, rm: *mut u8) -> i32 {
     if rq.is_null() {
@@ -1691,6 +1937,12 @@ struct PollFd {
     events: i16,
     revents: i16,
 }
+/// Poll timerfd/pipe fds for POLLIN, blocking per `timeout`.
+///
+/// # Safety
+///
+/// `fds` must be null (returns 0) or valid for `nfds` `PollFd` entries
+/// (`fd`, `events`, `revents`); returns the ready count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32 {
     if fds.is_null() {
@@ -1777,6 +2029,12 @@ pub unsafe extern "C" fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32 {
     }
     ready2
 }
+/// Wait up to `timeout_us` for a pipe fd to become readable.
+///
+/// # Safety
+///
+/// Safe with any `fd` (negative returns 0); returns 1 when readable
+/// within the timeout, else 0.
 // SAFETY: fd is a pipe read end owned by the caller; timeout is bounded.
 // Single-fd wfe wait extracted from poll so Haskell can block instead of polling.
 #[unsafe(no_mangle)]
@@ -1804,6 +2062,12 @@ pub unsafe extern "C" fn house_pipe_wait(fd: i32, timeout_us: u64) -> i32 {
         }
     }
 }
+/// Sleep out a timeval (fd sets ignored, always 0 ready).
+///
+/// # Safety
+///
+/// `tv` may be null (yields once) or must be valid for a timeval, which
+/// is slept out and zeroed; fd sets are ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn select(
     nfds: i32,
@@ -1832,6 +2096,11 @@ pub unsafe extern "C" fn select(
     };
     0
 }
+/// Block the current thread until kicked (returns -1).
+///
+/// # Safety
+///
+/// Call at EL1 with the scheduler running.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pause() -> i32 {
     let core = unsafe { cpu_id() } as usize;
@@ -1856,13 +2125,33 @@ pub unsafe extern "C" fn pause() -> i32 {
     }
     -1
 }
+/// No-op stub (the spinlock family is HAL-owned).
+///
+/// # Safety
+///
+/// Safe with any pointer (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_lock(_l: *mut u32) {}
+/// No-op stub (the spinlock family is HAL-owned).
+///
+/// # Safety
+///
+/// Safe with any pointer (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_unlock(_l: *mut u32) {}
+/// Stub returning 0 (uncontended).
+///
+/// # Safety
+///
+/// Safe with any pointer (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_trylock(_l: *mut u32) -> i32 {
     0
 }
+/// No-op stub (the spinlock family is HAL-owned).
+///
+/// # Safety
+///
+/// Safe with any pointer (ignored).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_spin_init(_l: *mut u32) {}

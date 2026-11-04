@@ -32,6 +32,11 @@ unsafe extern "C" {
     fn house_fd_pipe_readable(fd: i32) -> i32;
 }
 
+/// Init the IRQ layer: GIC plus the IRQ SPSC ring and wake pipe.
+///
+/// # Safety
+///
+/// Call once at EL1 during early boot on a single core.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_init() {
     // SAFETY: called early, single core, BSS clear.
@@ -55,6 +60,12 @@ pub unsafe extern "C" fn house_irq_init() {
     }
 }
 
+/// Push an interrupt id onto the IRQ ring (level-triggered virtio sources
+/// are acked at the source first).
+///
+/// # Safety
+///
+/// Call from IRQ context (IRQ masked) with the raw interrupt id.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_push(intid: u32) {
     // SAFETY: producer is c_handle_irq (IRQ masked, single core) — lock-free, no races on head.
@@ -90,6 +101,11 @@ pub unsafe extern "C" fn house_irq_push(intid: u32) {
     }
 }
 
+/// Pop an interrupt id from the IRQ ring; -1 when empty.
+///
+/// # Safety
+///
+/// Call at EL1; single consumer (the producer is IRQ context).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pop() -> i32 {
     unsafe {
@@ -105,16 +121,31 @@ pub unsafe extern "C" fn house_irq_pop() -> i32 {
     }
 }
 
+/// Return the IRQ pipe read end (-1 if pipe setup failed).
+///
+/// # Safety
+///
+/// Call after `house_irq_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pipe_fd() -> i32 {
     unsafe { PIPE_R }
 }
 
+/// Monotonic count of ring-full drops.
+///
+/// # Safety
+///
+/// Safe to call anytime (atomic load).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_ring_drops() -> u32 {
     RING_DROPS.load(Ordering::Relaxed)
 }
 
+/// Drain pending bytes from the IRQ pipe.
+///
+/// # Safety
+///
+/// Call at EL1 after `house_irq_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pipe_drain() {
     unsafe {
@@ -127,6 +158,11 @@ pub unsafe extern "C" fn house_irq_pipe_drain() {
     }
 }
 
+/// Poll-like readability check for an fd.
+///
+/// # Safety
+///
+/// Safe with any `fd` value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_pipe_readable(fd: i32) -> i32 {
     // SAFETY: house_fd_pipe_readable is poll-like check.

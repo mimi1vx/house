@@ -1,7 +1,3 @@
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "errno entry point mirrors C provenance"
-)]
 //! errno dispatch per tinylibc/sys.c __errno_location
 
 use core::ptr;
@@ -36,6 +32,12 @@ unsafe extern "C" {
 
 static mut STATIC_ERRNO: i32 = 0;
 
+/// Address of the calling thread's errno cell.
+///
+/// # Safety
+///
+/// Safe to call anytime at EL1; returns a static cell, or the current
+/// thread's cell when threading is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __errno_location() -> *mut i32 {
     unsafe {

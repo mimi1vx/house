@@ -59,6 +59,11 @@ unsafe extern "C" {
     fn house_mmu_set_ttbr0(pdir: *mut u8, asid: u64);
 }
 
+/// Record the boot TTBR0 and init the user page-pool bounds.
+///
+/// # Safety
+///
+/// Call once at EL1 during early boot on a single core.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_userspace_init() {
     unsafe {
@@ -272,6 +277,12 @@ fn evict_asid(pdir: *mut u8) -> bool {
     }
 }
 
+/// Install a page directory as this core's TTBR0 with its ASID.
+///
+/// # Safety
+///
+/// EL1 only; null or misaligned `pdir` is a no-op. `pdir` must be a live
+/// root that outlives use (Haskell owns reaping).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn init_page_dir(pdir: *mut u8) {
     if pdir.is_null() || (pdir as usize & 4095) != 0 {
@@ -292,11 +303,21 @@ pub(crate) unsafe fn userspace_set_recorded_for_test(pdir: *mut u8) {
     }
 }
 
+/// This core's recorded TTBR0 root (null before init).
+///
+/// # Safety
+///
+/// Call at EL1; the returned root is valid only while registered.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn current_pdir() -> *mut u8 {
     unsafe { RECORDED_PDIRS[recorded_idx()] }
 }
 
+/// Set this core's recorded root (resume path).
+///
+/// # Safety
+///
+/// EL1 only; `pdir` must be a live root, or null to clear.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_set_recorded_pdir(pdir: *mut u8) {
     unsafe {
@@ -304,6 +325,11 @@ pub unsafe extern "C" fn house_set_recorded_pdir(pdir: *mut u8) {
     }
 }
 
+/// ASID binding for a page directory (0 for null).
+///
+/// # Safety
+///
+/// EL1 only; takes the ASID lock (never in trap context with it held).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_asid_for_pdir(pdir: *mut u8) -> u64 {
     if pdir.is_null() {
@@ -312,6 +338,11 @@ pub unsafe extern "C" fn house_asid_for_pdir(pdir: *mut u8) -> u64 {
     unsafe { asid_for_pdir(pdir) as u64 }
 }
 
+/// Whether the VA's descriptor is read-only in the recorded pdir.
+///
+/// # Safety
+///
+/// Call at EL1; page-table reads only, unmapped VAs report 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
     let va = va & !4095;
@@ -353,6 +384,13 @@ pub unsafe extern "C" fn house_is_ro_page(va: u64) -> i32 {
     }
 }
 
+/// Whether the VA names a copy-on-write page (RO plus SW mark, bit 57).
+///
+/// # Safety
+///
+/// EL1 fault context; page-table reads against the recorded pdir only.
+/// Unmapped, writable, or plain-RO pages report 0; block descriptors never
+/// carry COW.
 // SAFETY: EL1 fault context (RO perm guard in `c_handle_sync`); page-table
 // reads against the recorded pdir only, no locks. Reports whether the L3
 // page descriptor carries RO permission plus the SW COW mark (bit 57, set
@@ -403,6 +441,11 @@ pub unsafe extern "C" fn house_is_cow_page(va: u64) -> i32 {
     }
 }
 
+/// Invalidate one page's local TLB entry.
+///
+/// # Safety
+///
+/// Call at EL1; any page VA (ASID-scoped `vae1is` plus barriers).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn invalidate_page(vaddr: u64) {
     unsafe {
@@ -695,6 +738,12 @@ fn ack_satisfies(ack: u32, seq: u32) -> bool {
     ack.wrapping_sub(seq) < 0x80000000
 }
 
+/// Invalidate a VA cluster-wide (local flush plus SGI + ack protocol).
+///
+/// # Safety
+///
+/// Call at EL1 with the SMP online mask and GIC up; waits for online peers
+/// (cores that go offline are dropped, never hung on).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
     unsafe extern "C" {
@@ -752,6 +801,10 @@ pub unsafe extern "C" fn house_tlb_shootdown(vaddr: u64) {
 }
 
 /// The shootdown generation a handler acknowledges: the newest flush any
+///
+/// # Safety
+///
+/// Safe to call anytime (single atomic load).
 /// requester has asked for.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_tlb_shootdown_seq() -> u32 {
@@ -759,6 +812,10 @@ pub unsafe extern "C" fn house_tlb_shootdown_seq() -> u32 {
 }
 
 /// Report that this core has completed a shootdown covering `seq`.
+///
+/// # Safety
+///
+/// Call from this core's shootdown handler once its own flush is visible.
 ///
 /// A shootdown handler calls this once its own flush is visible, so a requester
 /// that sees the ack knows the peer is past the invalidation it waited for.
@@ -826,6 +883,12 @@ pub unsafe extern "C" fn house_is_demand_va(va: u64) -> i32 {
     }
 }
 
+/// Demand-page/CoW fault handler: 1 handled, 0 fall through to kill.
+///
+/// # Safety
+///
+/// EL1 fault context; refuses buddy-heap, out-of-window, demand-unmarked,
+/// and driver-root VAs before taking `VM_LOCK`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_handle_user_fault(far: u64) -> i32 {
     use crate::mm::vm::{HOUSE_USER_VA_MAX, HOUSE_USER_VA_MIN};

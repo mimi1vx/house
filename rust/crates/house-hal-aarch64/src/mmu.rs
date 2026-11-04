@@ -116,6 +116,12 @@ unsafe fn get_ram_bytes() -> u64 {
     unsafe { core::ptr::read_volatile(&raw const house_ram_bytes) }
 }
 
+/// Build the early MMU: TTBR1 device block plus identity blocks for RAM.
+///
+/// # Safety
+///
+/// Call once at EL1 on the boot core during early boot (single core,
+/// BSS clear); enables the MMU.
 /// void house_mmu_early(void)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_early() {
@@ -163,6 +169,11 @@ pub unsafe extern "C" fn house_mmu_early() {
     }
 }
 
+/// Install MAIR/TCR/TTBRs and enable the MMU on a secondary core.
+///
+/// # Safety
+///
+/// Call once per secondary core at EL1 before it touches mapped memory.
 /// void house_mmu_enable_secondary(void)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_enable_secondary() {
@@ -184,6 +195,11 @@ pub unsafe extern "C" fn house_mmu_enable_secondary() {
 }
 
 /// void house_mmu_set_ttbr0(void *pdir, uint64_t asid) — TTBR0 update with TLBI ordering.
+///
+/// # Safety
+///
+/// `pdir` must be a valid 4K-aligned L0 table, `asid` 8-bit (0 reserved);
+/// EL1 only; issues the TTBR-write barrier sequence.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_set_ttbr0(pdir: *mut u8, asid: u64) {
     // SAFETY: pdir is page-aligned, asid 8-bit (0 reserved), EL1 only. Ordering per mmu.c.
@@ -197,6 +213,10 @@ pub unsafe extern "C" fn house_mmu_set_ttbr0(pdir: *mut u8, asid: u64) {
 }
 
 /// void house_mmu_clone_kernel_l1(void *new_l1)
+///
+/// # Safety
+///
+/// `new_l1` must be null (no-op) or valid for 512 `u64` writes; EL1 only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_clone_kernel_l1(new_l1: *mut u64) {
     if new_l1.is_null() {
@@ -219,6 +239,10 @@ pub unsafe extern "C" fn house_mmu_clone_kernel_l1(new_l1: *mut u64) {
 }
 
 /// void house_mmu_clone_kernel_l2(void *new_l2)
+///
+/// # Safety
+///
+/// `new_l2` must be null (no-op) or valid for 512 `u64` writes; EL1 only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_clone_kernel_l2(new_l2: *mut u64) {
     if new_l2.is_null() {
@@ -297,6 +321,11 @@ unsafe fn trim_ram_blocks() {
     }
 }
 
+/// Rebuild the identity and RTS-alias maps after a RAM size change.
+///
+/// # Safety
+///
+/// Call at EL1 with the MMU on.
 /// void house_mmu_update_alias(void)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_update_alias() {
@@ -309,10 +338,19 @@ pub unsafe extern "C" fn house_mmu_update_alias() {
 }
 
 /// void house_mmu_map_kernel(uint64_t pa, uint64_t va, uint64_t size, uint64_t attr) — stub.
+///
+/// # Safety
+///
+/// Stub: ignores all arguments and maps nothing; safe with any values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_mmu_map_kernel(_pa: u64, _va: u64, _size: u64, _attr: u64) {}
 
 /// void house_get_ttbrs(uint64_t *ttbr0, uint64_t *ttbr1, uint64_t *tcr)
+///
+/// # Safety
+///
+/// Each of `ttbr0`/`ttbr1`/`tcr` must be null or valid for a `u64` write;
+/// EL1 only (reads TTBR0/TTBR1/TCR).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_get_ttbrs(ttbr0: *mut u64, ttbr1: *mut u64, tcr: *mut u64) {
     let mut a: u64;

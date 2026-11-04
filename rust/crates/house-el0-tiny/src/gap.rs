@@ -49,20 +49,24 @@ macro_rules! null_ptr {
 // and PSTATE, so only x0 is declared clobbered; the trap reads user memory
 // for path/buffer calls, hence no `nomem`.
 macro_rules! house_svc {
-    // `house_brk` is the only safe-`fn` caller, and it is `unsafe fn`
-    // itself, so every expansion site is an unsafe body and no extra
-    // `unsafe` block is needed (see `unsafe_op_in_unsafe_fn` in `lib.rs`).
+    // Expands in both safe-`fn` (`house_brk`) and `unsafe fn` bodies, so
+    // the trap itself carries the block; callers add no extra `unsafe`.
     ($num:literal, $x0:expr, $x1:expr, $x2:expr, $x3:expr) => {{
         let r: i64;
-        core::arch::asm!(
-            concat!("svc #", $num),
-            in("x0") $x0,
-            in("x1") $x1,
-            in("x2") $x2,
-            in("x3") $x3,
-            lateout("x0") r,
-            options(preserves_flags, nostack),
-        );
+        // SAFETY: `svc #imm` with four `in` regs and `lateout("x0") r`;
+        // only x0 is clobbered, matching the park/resume path, and the trap
+        // reads user memory for path/buffer calls, hence no `nomem`.
+        unsafe {
+            core::arch::asm!(
+                concat!("svc #", $num),
+                in("x0") $x0,
+                in("x1") $x1,
+                in("x2") $x2,
+                in("x3") $x3,
+                lateout("x0") r,
+                options(preserves_flags, nostack),
+            );
+        }
         r
     }};
 }

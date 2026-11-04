@@ -40,6 +40,11 @@ unsafe fn gic_enable_sre() {
     }
 }
 
+/// Init the GIC on the boot core: SRE enable, redistributor-0 wake, group setup.
+///
+/// # Safety
+///
+/// Call once at EL1 on the boot core with the GICD/GICR windows mapped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_init() {
     unsafe {
@@ -79,6 +84,11 @@ pub unsafe extern "C" fn house_gic_init() {
     }
 }
 
+/// Init the GIC redistributor for a secondary core.
+///
+/// # Safety
+///
+/// Call once per secondary core at EL1, with `core` the caller's own id.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_init_secondary(core: u32) {
     unsafe {
@@ -119,6 +129,11 @@ pub unsafe extern "C" fn house_gic_init_secondary(core: u32) {
     }
 }
 
+/// Enable an interrupt id (SGI <32 goes to this core's redistributor).
+///
+/// # Safety
+///
+/// Call at EL1 with the GIC mapped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_enable_int(intid: u32) {
     unsafe {
@@ -139,6 +154,11 @@ pub unsafe extern "C" fn house_gic_enable_int(intid: u32) {
     }
 }
 
+/// Disable an interrupt id (SGI <32 goes to this core's redistributor).
+///
+/// # Safety
+///
+/// Call at EL1 with the GIC mapped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_disable_int(intid: u32) {
     unsafe {
@@ -155,6 +175,11 @@ pub unsafe extern "C" fn house_gic_disable_int(intid: u32) {
     }
 }
 
+/// Send an SGI to one core via ICC_SGI1R_EL1.
+///
+/// # Safety
+///
+/// Call at EL1 with SRE enabled; `core` addresses an online core, `sgi_id` < 16.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_send_sgi_to_core(sgi_id: u32, core: u32) {
     let aff3 = (core >> 24) & 0xff;
@@ -174,6 +199,11 @@ pub unsafe extern "C" fn house_gic_send_sgi_to_core(sgi_id: u32, core: u32) {
     }
 }
 
+/// Send an SGI to each core set in the aff0 mask.
+///
+/// # Safety
+///
+/// Call at EL1 with SRE enabled; mask bits address online cores, `sgi_id` < 16.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_send_sgi(sgi_id: u32, aff0_mask: u32) {
     if aff0_mask == 0 {
@@ -191,11 +221,21 @@ pub unsafe extern "C" fn house_gic_send_sgi(sgi_id: u32, aff0_mask: u32) {
     }
 }
 
+/// Enable an SGI id on this core.
+///
+/// # Safety
+///
+/// Call at EL1 with the GIC mapped; `id` is an SGI number (< 16).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_enable_sgi(id: u32) {
     unsafe { house_gic_enable_int(id) }
 }
 
+/// Signal end-of-interrupt for a claimed interrupt.
+///
+/// # Safety
+///
+/// Call from IRQ context at EL1 with the `iar` value read from ICC_IAR1_EL1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_gic_eoi(iar: u32) {
     unsafe {
@@ -204,6 +244,11 @@ pub unsafe extern "C" fn house_gic_eoi(iar: u32) {
     }
 }
 
+/// Unmask IRQs on this core (DAIF I-bit clear).
+///
+/// # Safety
+///
+/// Call at EL1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_enable() {
     unsafe {
@@ -212,6 +257,11 @@ pub unsafe extern "C" fn house_irq_enable() {
     }
 }
 
+/// Mask IRQs on this core (DAIF I-bit set).
+///
+/// # Safety
+///
+/// Call at EL1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_irq_disable() {
     unsafe {

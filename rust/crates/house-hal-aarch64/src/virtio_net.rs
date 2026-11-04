@@ -1,14 +1,6 @@
 #![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
-)]
-#![allow(
     static_mut_refs,
     reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
-)]
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "virtio transport exposes raw queue entry points"
 )]
 #![allow(
     clippy::manual_range_contains,
@@ -91,6 +83,11 @@ fn slot_valid(slot: i32) -> bool {
     slot >= 0 && slot < NUM_SLOTS_H
 }
 
+/// Invalidate a guest RX buffer range before the driver reads it.
+///
+/// # Safety
+///
+/// `pa`/`len` describe a Normal WB guest buffer; `len == 0` flushes nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_invalidate(pa: u64, len: usize) {
     if len == 0 {
@@ -99,6 +96,11 @@ pub unsafe extern "C" fn virtio_net_invalidate(pa: u64, len: usize) {
     unsafe { dc_ivac_range(pa, len) };
 }
 
+/// Record RX/TX queue addresses for a slot (resets indices).
+///
+/// # Safety
+///
+/// `slot` must be valid; queue PAs are 4 KiB guest pages owned by the driver.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_save_queues(
     slot: i32,
@@ -131,6 +133,12 @@ pub unsafe extern "C" fn virtio_net_save_queues(
     VIRTIO_OK
 }
 
+/// Read the MAC address from a ready virtio-net device into `mac`.
+///
+/// # Safety
+///
+/// `slot` must be valid with a ready virtio-net device; `mac` must be
+/// non-null and valid for a 6-byte write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_probe_mac(slot: i32, mac: *mut u8) -> i32 {
     if !slot_valid(slot) {
@@ -140,22 +148,22 @@ pub unsafe extern "C" fn virtio_net_probe_mac(slot: i32, mac: *mut u8) -> i32 {
         return VIRTIO_ERR_INVAL;
     }
     let base = slot_base(slot);
-    let magic = mmio_r32(base + OFF_MAGIC);
-    let ver = mmio_r32(base + OFF_VERSION);
+    let magic = unsafe { mmio_r32(base + OFF_MAGIC) };
+    let ver = unsafe { mmio_r32(base + OFF_VERSION) };
     if magic != MAGIC_H {
         return VIRTIO_ERR_BAD_VERSION;
     }
     if ver != 1 && ver != 2 {
         return VIRTIO_ERR_BAD_VERSION;
     }
-    let did = mmio_r32(base + OFF_DEVICE_ID);
+    let did = unsafe { mmio_r32(base + OFF_DEVICE_ID) };
     if did == 0 {
         return VIRTIO_ERR_BAD_VERSION;
     }
     if did != DEVICE_ID_NET {
         return VIRTIO_ERR_INVAL;
     }
-    let st = mmio_r32(base + OFF_STATUS);
+    let st = unsafe { mmio_r32(base + OFF_STATUS) };
     if st & STATUS_FAILED != 0 {
         return VIRTIO_ERR_NEEDS_RESET;
     }
@@ -164,14 +172,22 @@ pub unsafe extern "C" fn virtio_net_probe_mac(slot: i32, mac: *mut u8) -> i32 {
     }
     for i in 0..6 {
         let addr = base + NET_CFG_OFF_MAC + i as u64;
-        let v = mmio_r32(addr & !3) >> ((addr & 3) * 8) & 0xff;
+        let v = unsafe { mmio_r32(addr & !3) >> ((addr & 3) * 8) & 0xff };
         // Use ldrb via mmio_r32 shift; C uses ldrb.
         unsafe { *mac.add(i) = v as u8 };
-        core::arch::asm!("", options(nostack, preserves_flags));
+        unsafe { core::arch::asm!("", options(nostack, preserves_flags)) };
     }
     VIRTIO_OK
 }
 
+/// Post a WRITE descriptor lending a guest buffer for an RX frame.
+///
+/// # Safety
+///
+/// `slot` must be valid with a ready virtio-net device; `data_pa` 4K-aligned
+/// nonzero guest RAM, `len` 1..=4096 with no `pa+len` wrap; `req_id` non-null
+/// valid for a `u32` write. Flushes cache lines before notify (device reads
+/// guest RAM).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_submit_rx(
     slot: i32,
@@ -197,19 +213,19 @@ pub unsafe extern "C" fn virtio_net_submit_rx(
         return VIRTIO_ERR_INVAL;
     }
     let base = slot_base(slot);
-    let magic = mmio_r32(base + OFF_MAGIC);
-    let ver = mmio_r32(base + OFF_VERSION);
+    let magic = unsafe { mmio_r32(base + OFF_MAGIC) };
+    let ver = unsafe { mmio_r32(base + OFF_VERSION) };
     if magic != MAGIC_H {
         return VIRTIO_ERR_BAD_VERSION;
     }
     if ver != 1 && ver != 2 {
         return VIRTIO_ERR_BAD_VERSION;
     }
-    let did = mmio_r32(base + OFF_DEVICE_ID);
+    let did = unsafe { mmio_r32(base + OFF_DEVICE_ID) };
     if did != DEVICE_ID_NET {
         return VIRTIO_ERR_INVAL;
     }
-    let st = mmio_r32(base + OFF_STATUS);
+    let st = unsafe { mmio_r32(base + OFF_STATUS) };
     if st & STATUS_FAILED != 0 {
         return VIRTIO_ERR_NEEDS_RESET;
     }
@@ -231,26 +247,33 @@ pub unsafe extern "C" fn virtio_net_submit_rx(
     let avail_ring = (avail_pa + 4) as *mut u16;
     let idx = ss.avail_idx[0];
     let head = (idx % qsize as u16) as usize;
-    (*desc.add(head)).addr = data_pa;
-    (*desc.add(head)).len = len;
-    (*desc.add(head)).flags = DESC_F_WRITE;
-    (*desc.add(head)).next = 0;
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    dc_cvac_range(desc_pa + head as u64 * 16, 16);
-    dc_cvac_range(data_pa, len as usize);
-    *avail_ring.add((idx % qsize as u16) as usize) = head as u16;
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    *avail_idx_ptr = idx.wrapping_add(1);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    dc_cvac_range(avail_pa, 4096);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    mmio_w32(base + OFF_QUEUE_NOTIFY, 0);
-    core::arch::asm!("dsb sy; dmb ish", options(nostack, preserves_flags));
+    unsafe { (*desc.add(head)).addr = data_pa };
+    unsafe { (*desc.add(head)).len = len };
+    unsafe { (*desc.add(head)).flags = DESC_F_WRITE };
+    unsafe { (*desc.add(head)).next = 0 };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { dc_cvac_range(desc_pa + head as u64 * 16, 16) };
+    unsafe { dc_cvac_range(data_pa, len as usize) };
+    unsafe { *avail_ring.add((idx % qsize as u16) as usize) = head as u16 };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { *avail_idx_ptr = idx.wrapping_add(1) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { dc_cvac_range(avail_pa, 4096) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { mmio_w32(base + OFF_QUEUE_NOTIFY, 0) };
+    unsafe { core::arch::asm!("dsb sy; dmb ish", options(nostack, preserves_flags)) };
     ss.avail_idx[0] = idx.wrapping_add(1);
-    *req_id = idx as u32;
+    unsafe { *req_id = idx as u32 };
     VIRTIO_OK
 }
 
+/// Post a chained TX transfer (12-byte header plus payload).
+///
+/// # Safety
+///
+/// `slot` must be valid with a ready virtio-net device; `hdr_pa`/`data_pa`
+/// guest RAM with `data_len` 1..=(4096-12) and no address wrap; `req_id`
+/// non-null valid for a `u32` write. Flushes cache lines before notify.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_submit_tx(
     slot: i32,
@@ -279,19 +302,19 @@ pub unsafe extern "C" fn virtio_net_submit_tx(
         return VIRTIO_ERR_INVAL;
     }
     let base = slot_base(slot);
-    let magic = mmio_r32(base + OFF_MAGIC);
-    let ver = mmio_r32(base + OFF_VERSION);
+    let magic = unsafe { mmio_r32(base + OFF_MAGIC) };
+    let ver = unsafe { mmio_r32(base + OFF_VERSION) };
     if magic != MAGIC_H {
         return VIRTIO_ERR_BAD_VERSION;
     }
     if ver != 1 && ver != 2 {
         return VIRTIO_ERR_BAD_VERSION;
     }
-    let did = mmio_r32(base + OFF_DEVICE_ID);
+    let did = unsafe { mmio_r32(base + OFF_DEVICE_ID) };
     if did != DEVICE_ID_NET {
         return VIRTIO_ERR_INVAL;
     }
-    let st = mmio_r32(base + OFF_STATUS);
+    let st = unsafe { mmio_r32(base + OFF_STATUS) };
     if st & STATUS_FAILED != 0 {
         return VIRTIO_ERR_NEEDS_RESET;
     }
@@ -317,32 +340,38 @@ pub unsafe extern "C" fn virtio_net_submit_tx(
     let idx = ss.avail_idx[1];
     let head = (idx % qsize as u16) as usize;
     let next1 = ((head as u32 + 1) % qsize) as usize;
-    (*desc.add(head)).addr = hdr_pa;
-    (*desc.add(head)).len = HDR_SIZE;
-    (*desc.add(head)).flags = DESC_F_NEXT;
-    (*desc.add(head)).next = next1 as u16;
-    (*desc.add(next1)).addr = data_pa;
-    (*desc.add(next1)).len = data_len;
-    (*desc.add(next1)).flags = 0;
-    (*desc.add(next1)).next = 0;
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    dc_cvac_range(desc_pa + head as u64 * 16, 16);
-    dc_cvac_range(desc_pa + next1 as u64 * 16, 16);
-    dc_cvac_range(hdr_pa, HDR_SIZE as usize);
-    dc_cvac_range(data_pa, data_len as usize);
-    *avail_ring.add((idx % qsize as u16) as usize) = head as u16;
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    *avail_idx_ptr = idx.wrapping_add(1);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    dc_cvac_range(avail_pa, 4096);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    mmio_w32(base + OFF_QUEUE_NOTIFY, 1);
-    core::arch::asm!("dsb sy; dmb ish", options(nostack, preserves_flags));
+    unsafe { (*desc.add(head)).addr = hdr_pa };
+    unsafe { (*desc.add(head)).len = HDR_SIZE };
+    unsafe { (*desc.add(head)).flags = DESC_F_NEXT };
+    unsafe { (*desc.add(head)).next = next1 as u16 };
+    unsafe { (*desc.add(next1)).addr = data_pa };
+    unsafe { (*desc.add(next1)).len = data_len };
+    unsafe { (*desc.add(next1)).flags = 0 };
+    unsafe { (*desc.add(next1)).next = 0 };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { dc_cvac_range(desc_pa + head as u64 * 16, 16) };
+    unsafe { dc_cvac_range(desc_pa + next1 as u64 * 16, 16) };
+    unsafe { dc_cvac_range(hdr_pa, HDR_SIZE as usize) };
+    unsafe { dc_cvac_range(data_pa, data_len as usize) };
+    unsafe { *avail_ring.add((idx % qsize as u16) as usize) = head as u16 };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { *avail_idx_ptr = idx.wrapping_add(1) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { dc_cvac_range(avail_pa, 4096) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    unsafe { mmio_w32(base + OFF_QUEUE_NOTIFY, 1) };
+    unsafe { core::arch::asm!("dsb sy; dmb ish", options(nostack, preserves_flags)) };
     ss.avail_idx[1] = idx.wrapping_add(1);
-    *req_id = idx as u32;
+    unsafe { *req_id = idx as u32 };
     VIRTIO_OK
 }
 
+/// Drain one TX/RX completion: 0 with `out_id`/`out_len` filled, 1 when idle.
+///
+/// # Safety
+///
+/// `slot` must be valid, `qidx` 0/1, `out_id`/`out_len` non-null valid for
+/// `u32` writes; the used ring is owned by the slot and invalidated before read.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_net_poll_used(
     slot: i32,
@@ -360,7 +389,7 @@ pub unsafe extern "C" fn virtio_net_poll_used(
         return VIRTIO_ERR_INVAL;
     }
     let base = slot_base(slot);
-    let magic = mmio_r32(base + OFF_MAGIC);
+    let magic = unsafe { mmio_r32(base + OFF_MAGIC) };
     if magic != MAGIC_H {
         return VIRTIO_ERR_BAD_VERSION;
     }
@@ -370,9 +399,9 @@ pub unsafe extern "C" fn virtio_net_poll_used(
         return VIRTIO_ERR_NOT_READY;
     }
     let used_idx_ptr = (used_pa + 2) as *const u16;
-    dc_ivac_range(used_pa, 8);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
-    let uidx = *used_idx_ptr;
+    unsafe { dc_ivac_range(used_pa, 8) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
+    let uidx = unsafe { *used_idx_ptr };
     if uidx == ss.used_idx[qidx as usize] {
         return 1;
     }
@@ -381,15 +410,15 @@ pub unsafe extern "C" fn virtio_net_poll_used(
         qsize = 64;
     }
     let local = (ss.used_idx[qidx as usize] % qsize as u16) as usize;
-    dc_ivac_range(used_pa + 4 + local as u64 * 8, 8);
-    core::arch::asm!("dmb ish", options(nostack, preserves_flags));
+    unsafe { dc_ivac_range(used_pa + 4 + local as u64 * 8, 8) };
+    unsafe { core::arch::asm!("dmb ish", options(nostack, preserves_flags)) };
     let used_ring = (used_pa + 4) as *const u32;
-    let id = *used_ring.add(local * 2);
-    let len = *used_ring.add(local * 2 + 1);
-    mmio_w32(base + OFF_INTERRUPT_ACK, 1);
-    core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
+    let id = unsafe { *used_ring.add(local * 2) };
+    let len = unsafe { *used_ring.add(local * 2 + 1) };
+    unsafe { mmio_w32(base + OFF_INTERRUPT_ACK, 1) };
+    unsafe { core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags)) };
     ss.used_idx[qidx as usize] = ss.used_idx[qidx as usize].wrapping_add(1);
-    *out_id = id;
-    *out_len = len;
+    unsafe { *out_id = id };
+    unsafe { *out_len = len };
     0
 }

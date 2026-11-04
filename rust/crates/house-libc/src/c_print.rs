@@ -1,7 +1,9 @@
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "console entry point mirrors C provenance"
-)]
+/// Write a NUL-terminated string to the UART.
+///
+/// # Safety
+///
+/// `s` must be null (returns immediately) or point to a NUL-terminated
+/// string; call at EL1 with the UART initialized.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_print(s: *const u8) {
     if s.is_null() {

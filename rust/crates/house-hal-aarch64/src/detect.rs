@@ -56,6 +56,12 @@ unsafe fn puthex(v: u64) {
     }
 }
 
+/// Detect RAM size and core count (DTB, then fault probe, then fallback).
+///
+/// # Safety
+///
+/// Call once at EL1 during early boot: single core, BSS clear, DAIF masked,
+/// UART up, and the fault handler installed (probe fallback faults by design).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_detect_early() {
     // SAFETY: called early with BSS clear, single core, DAIF masked.
@@ -148,6 +154,11 @@ pub unsafe extern "C" fn house_detect_early() {
     }
 }
 
+/// Count present cores via PSCI affinity-info probes (query only).
+///
+/// # Safety
+///
+/// Call at EL1 or higher with PSCI firmware present; safe with no arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_detect_psci() -> i32 {
     // SAFETY: PSCI HVC may trap, but psci_affinity_info handles fallback.
@@ -164,6 +175,11 @@ pub unsafe extern "C" fn house_smp_detect_psci() -> i32 {
     }
 }
 
+/// Count cores via GICR_TYPER walks (query only).
+///
+/// # Safety
+///
+/// Call at EL1 with the GICR window (0x080A0000) mapped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_smp_detect_gicr() -> i32 {
     // SAFETY: GICR_TYPER at 0x080A0000+i*0x20000+0x08 MMIO, valid for virt.
@@ -193,6 +209,12 @@ pub unsafe extern "C" fn house_smp_detect_gicr() -> i32 {
     }
 }
 
+/// Publish the final SMP count: max(DTB, PSCI, GICR), clamped to 32.
+///
+/// # Safety
+///
+/// Call after all cores are online, with heap and UART up; writes
+/// `house_smp`/`house_smp_n`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_detect_late() {
     // SAFETY: called after all cores possible, with heap.

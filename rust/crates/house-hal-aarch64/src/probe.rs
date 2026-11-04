@@ -69,6 +69,13 @@ unsafe fn probe_addr(addr: u64) -> bool {
     }
 }
 
+/// Probe installed RAM size by fault-trapped reads, doubling from 128M.
+///
+/// # Safety
+///
+/// Call at EL1 during early boot on a single core, with the data-abort
+/// handler installed (it watches `house_in_probe` and resumes at
+/// `house_probe_recovery`). Deliberately faults on unmapped addresses.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_ram_probe() -> u64 {
     // SAFETY: called early, single core, fault handler watches house_in_probe.

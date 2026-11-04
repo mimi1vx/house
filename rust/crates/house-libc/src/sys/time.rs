@@ -1,7 +1,9 @@
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "timer entry point mirrors C provenance"
-)]
+/// Nanoseconds since boot (CNTVCT/CNTFRQ).
+///
+/// # Safety
+///
+/// Call at EL1 or higher with the generic timer running; reads
+/// CNTVCT_EL0/CNTFRQ_EL0 only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_uptime_ns() -> u64 {
     let c: u64;
