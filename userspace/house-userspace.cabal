@@ -32,6 +32,7 @@ library
     Userspace.Tool.Write
     Userspace.Tool.Cat
     Userspace.Tool.Sh
+    Userspace.Tool.Init
   build-depends:
     base >= 4.22 && < 5
 
@@ -133,6 +134,7 @@ executable house-gen
     Userspace.Tool.Write
     Userspace.Tool.Cat
     Userspace.Tool.Sh
+    Userspace.Tool.Init
   build-depends:
     base >= 4.22 && < 5
     , house-userspace
@@ -154,6 +156,7 @@ test-suite house-userspace-test
     Userspace.Tool.Write
     Userspace.Tool.Cat
     Userspace.Tool.Sh
+    Userspace.Tool.Init
   build-depends:
     base >= 4.22 && < 5
     , house-userspace

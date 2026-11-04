@@ -28,7 +28,7 @@ PYTHON3=${PYTHON3:-python3}
 # Tools with a Haskell builder behind `house-gen` (parity-proven, one per
 # line as step 5 migrates hello -> echo -> mkdir/rm -> ls/stat/write ->
 # cat -> init/sh). assemblies for other tools skip the drift gate.
-EDSL_TOOLS="hello echo mkdir rm ls stat write cat sh"
+EDSL_TOOLS="hello echo mkdir rm ls stat write cat sh init"
 
 build_one() {
 	src="$1" ldfile="$2" out="$3"
@@ -101,6 +101,18 @@ for prog in hello ls cat echo mkdir rm stat write sh; do
 	build_user_one "userspace/$prog.s" userspace/userspace.ld \
 		"initramfs-staging/bin/$prog" "$TINY_A" "$CORE_A" "$CB_A"
 done
+case " $EDSL_TOOLS " in
+*" init "*)
+	tmpgen=$(mktemp)
+	"$GEN" init >"$tmpgen"
+	if ! diff -u userspace/init.s "$tmpgen"; then
+		echo "drift: house-gen init != userspace/init.s" >&2
+		rm -f "$tmpgen"
+		exit 1
+	fi
+	rm -f "$tmpgen"
+	;;
+esac
 build_one userspace/init.s userspace/userspace.ld initramfs-staging/sbin/init
 
 # Existing probes (reference sources until userspace/ supersedes them).

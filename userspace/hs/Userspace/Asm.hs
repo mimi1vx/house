@@ -81,6 +81,7 @@ data Cond
   | Eq
   | Ne
   | Hi
+  | Lt
   deriving (Eq, Show)
 
 {- | Assembly unit. One constructor per emitted line shape, so the
@@ -212,6 +213,7 @@ renderCond Hs = "hs"
 renderCond Eq = "eq"
 renderCond Ne = "ne"
 renderCond Hi = "hi"
+renderCond Lt = "lt"
 
 -- | Drop the 4-space instruction indent (for same-line local labels).
 stripIndent :: String -> String

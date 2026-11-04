@@ -8,6 +8,7 @@ import System.IO (hPutStrLn, stderr)
 import Userspace.Tool.Cat (catText)
 import Userspace.Tool.Echo (echoText)
 import Userspace.Tool.Hello (helloText)
+import Userspace.Tool.Init (initText)
 import Userspace.Tool.Ls (lsText)
 import Userspace.Tool.Mkdir (mkdirText)
 import Userspace.Tool.Rm (rmText)
@@ -28,6 +29,7 @@ main = do
     ["write"] -> putStr writeText
     ["cat"] -> putStr catText
     ["sh"] -> putStr shText
+    ["init"] -> putStr initText
     _ -> do
-      hPutStrLn stderr "usage: house-gen hello|echo|mkdir|rm|ls|stat|write|cat|sh"
+      hPutStrLn stderr "usage: house-gen hello|echo|mkdir|rm|ls|stat|write|cat|sh|init"
       exitFailure

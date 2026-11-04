@@ -11,6 +11,7 @@ import Userspace.Asm (mkSvc, mkU12, mkW, mkX)
 import Userspace.Tool.Cat (catText)
 import Userspace.Tool.Echo (echoText)
 import Userspace.Tool.Hello (helloText)
+import Userspace.Tool.Init (initText)
 import Userspace.Tool.Ls (lsText)
 import Userspace.Tool.Mkdir (mkdirText)
 import Userspace.Tool.Rm (rmText)
@@ -73,3 +74,4 @@ main = do
   checkGolden "write" writeText
   checkGolden "cat" catText
   checkGolden "sh" shText
+  checkGolden "init" initText
