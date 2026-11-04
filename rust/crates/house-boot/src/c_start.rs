@@ -1117,12 +1117,18 @@ pub unsafe extern "C" fn c_start() {
             puthex(spike_addr as u64);
             uart_puts(b"\n\0".as_ptr());
             if has_house {
+                // SAFETY: `house_addr` is the nonzero GOT address of weak symbol
+                // `house_main`, exported by Haskell as `ccall IO ()` (no args).
                 let f: extern "C" fn() = core::mem::transmute(house_addr as *const ());
                 f();
             } else if has_irq {
+                // SAFETY: `irq_addr` is the nonzero GOT address of weak symbol
+                // `house_irqcheck_main`, same no-arg `ccall IO ()` contract.
                 let f: extern "C" fn() = core::mem::transmute(irq_addr as *const ());
                 f();
             } else if has_spike {
+                // SAFETY: `spike_addr` is the nonzero GOT address of weak symbol
+                // `house_spike_main`, same no-arg `ccall IO ()` contract.
                 let f: extern "C" fn() = core::mem::transmute(spike_addr as *const ());
                 f();
             } else {
