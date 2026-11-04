@@ -1101,6 +1101,9 @@ mod tests {
     // an EL0 fault under a driver TTBR0 context falls through to the generic
     // fault-kill park instead of zero-mapping RAM into the allowlist window.
     // Runs on host: refusal touches no allocator and no barriers.
+    // Miri cannot execute the `dsb`/`isb` barriers on the unmarked-root map
+    // path (fault_locked), so this runs on host/QEMU only.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pager_refuses_driver_root() {
         use crate::mm::vm::{driver_unmark, house_vm_narrow_driver_root};
@@ -1110,9 +1113,15 @@ mod tests {
             let mut l0 = Box::new(A512([0; 512]));
             let mut l1 = Box::new(A512([0; 512]));
             let mut l2 = Box::new(A512([0; 512]));
-            let l0p = l0.0.as_mut_ptr() as *mut u8;
-            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
-            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            // One retag per table (see mm::vm::tests::mmio_walk_layout): a
+            // fresh as_mut_ptr per write would pop the tag the pager and
+            // narrow walks read through.
+            let l0w = l0.0.as_mut_ptr();
+            let l1w = l1.0.as_mut_ptr();
+            let l2w = l2.0.as_mut_ptr();
+            let l0p = l0w as *mut u8;
+            *l0w.add(0) = (l1w as u64) | 0x3;
+            *l1w.add(0) = (l2w as u64) | 0x3;
             let prev = current_pdir();
             house_set_recorded_pdir(l0p);
             // Unmarked: the pager owns it (maps or refuses on alloc — either

@@ -144,7 +144,9 @@ unsafe extern "C" {
 #[cfg(test)]
 unsafe fn house_fd_pipe_readable(fd: i32) -> i32 {
     unsafe extern "C" {
-        fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32;
+        // `nfds_t` is 32-bit on the macOS host and in Miri's `poll` model;
+        // the previous `u64` mismatched both (Miri: parameter #2 is `u32`).
+        fn poll(fds: *mut u8, nfds: u32, timeout: i32) -> i32;
     }
     #[repr(C)]
     struct PollFd {
@@ -1824,6 +1826,9 @@ mod tests {
     // with the hostile VA against an enrolled, supervised driver root, and
     // refuses everything else fail-closed. Mirrors the userspace pager-test
     // chain setup (Box L0/L1/L2/L3, window Device leaf at L2[80]/L3[0]).
+    // Miri cannot execute the `dsb`/`sev` barriers on the EL0 park path
+    // (house_driver_inject_fault/poke_park), so this runs on host/QEMU only.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn driver_inject_parks_kill_for_enrolled_domain() {
         use crate::mm::vm::{driver_unmark, house_vm_narrow_driver_root, mmio_leaf_desc};
@@ -1834,11 +1839,18 @@ mod tests {
             let mut l1 = Box::new(A512([0; 512]));
             let mut l2 = Box::new(A512([0; 512]));
             let mut l3 = Box::new(A512([0; 512]));
-            let l0p = l0.0.as_mut_ptr() as *mut u8;
-            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
-            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
-            *l2.0.as_mut_ptr().add(80) = (l3.0.as_mut_ptr() as u64) | 0x3;
-            *l3.0.as_mut_ptr().add(0) = mmio_leaf_desc(0x0a000000);
+            // One retag per table (see mm::vm::tests::mmio_walk_layout): a
+            // fresh as_mut_ptr per write would pop the tag the narrow and
+            // fault-probe walks read through.
+            let l0w = l0.0.as_mut_ptr();
+            let l1w = l1.0.as_mut_ptr();
+            let l2w = l2.0.as_mut_ptr();
+            let l3w = l3.0.as_mut_ptr();
+            let l0p = l0w as *mut u8;
+            *l0w.add(0) = (l1w as u64) | 0x3;
+            *l1w.add(0) = (l2w as u64) | 0x3;
+            *l2w.add(80) = (l3w as u64) | 0x3;
+            *l3w.add(0) = mmio_leaf_desc(0x0a000000);
             // Unenrolled root: refused (attribution predicate), bad pointers
             // refused, and nothing parked.
             assert_eq!(house_driver_inject_fault(l0p, 0x0a001000), 0);

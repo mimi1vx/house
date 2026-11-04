@@ -782,6 +782,9 @@ pub unsafe extern "C" fn house_vm_narrow_driver_root(pdir: *mut u8) -> i32 {
         }
         // Never installed, so no stale TLB entry exists; order the clears
         // before the mark becomes observable to a concurrent trap reader.
+        // Miri cannot execute `asm!`: hosted tests are single-threaded, so
+        // the barrier is elided there (logic under test is unaffected).
+        #[cfg(not(miri))]
         core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
         VM_LOCK.unlock();
         1
@@ -1106,24 +1109,31 @@ mod tests {
         let mut l0 = Box::new(Aligned512([0; 512]));
         let mut l1 = Box::new(Aligned512([0; 512]));
         let mut l2 = Box::new(Aligned512([0; 512]));
-        let l0p = l0.0.as_mut_ptr() as *mut u8;
+        // One retag per table: every access below derives from these
+        // bindings, so no later retag pops the root tag Miri tracks
+        // for `l0p` (a fresh as_mut_ptr per write invalidated it).
+        let l0w = l0.0.as_mut_ptr();
+        let l1w = l1.0.as_mut_ptr();
+        let l2w = l2.0.as_mut_ptr();
+        let l0p = l0w as *mut u8;
         unsafe {
-            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
-            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            *l0w.add(0) = (l1w as u64) | 0x3;
+            *l1w.add(0) = (l2w as u64) | 0x3;
             // Free slot: every driver window lands in L2[80] (0x0a000000
             // / 2MB == 80), L3 index varies by page.
             let s = mmio_l2_slot(l0p, 0x0a003000).expect("free slot");
-            assert_eq!(s, l2.0.as_mut_ptr().add(80));
+            assert_eq!(s, l2w.add(80));
             let s0 = mmio_l2_slot(l0p, 0x0a000000).expect("free slot");
-            assert_eq!(s0, l2.0.as_mut_ptr().add(80));
+            assert_eq!(s0, l2w.add(80));
             // Occupied slot refuses (overlap backstop): VALID block or leaf.
-            *l2.0.as_mut_ptr().add(80) = 0x0a000000 | 0x3;
+            *l2w.add(80) = 0x0a000000 | 0x3;
             assert!(mmio_l2_slot(l0p, 0x0a003000).is_err());
-            *l2.0.as_mut_ptr().add(80) = 0;
+            *l2w.add(80) = 0;
             // Malformed roots refuse: invalid L0, block L1.
             let mut bare = Box::new(Aligned512([0; 512]));
-            assert!(mmio_l2_slot(bare.0.as_mut_ptr() as *mut u8, 0x0a000000).is_err());
-            *l0.0.as_mut_ptr().add(0) = 0x40000000 | 0x401;
+            let barew = bare.0.as_mut_ptr();
+            assert!(mmio_l2_slot(barew as *mut u8, 0x0a000000).is_err());
+            *l0w.add(0) = 0x40000000 | 0x401;
             assert!(mmio_l2_slot(l0p, 0x0a000000).is_err());
         }
     }
@@ -1140,58 +1150,68 @@ mod tests {
     /// at 1/5, RTS-alias-style table at 264), L2 UART/GIC Device blocks +
     /// L2[80]->L3 with one Device leaf. The fifth box backs the shared
     /// alias table so the root owns every page it names.
-    fn fake_driver_root() -> (
-        Box<Narrow512>,
-        Box<Narrow512>,
-        Box<Narrow512>,
-        Box<Narrow512>,
-        Box<Narrow512>,
-    ) {
-        let mut l0 = Box::new(Narrow512([0; 512]));
-        let mut l1 = Box::new(Narrow512([0; 512]));
-        let mut l2 = Box::new(Narrow512([0; 512]));
-        let mut l3 = Box::new(Narrow512([0; 512]));
-        let mut shared = Box::new(Narrow512([0; 512]));
+    // Initializes the five backing boxes (owned by the caller, never moved
+    // afterwards) and returns one raw handle per table. Each handle is its
+    // Box's single retag for the whole helper-plus-test flow (see
+    // mmio_walk_layout): the narrow walk reads through the tags exposed by
+    // the integer casts below, so the tests must use these handles and never
+    // call as_mut_ptr -- or move the boxes -- again. Either pops the exposed
+    // tag and the walk faults under Miri.
+    fn fake_driver_init(
+        l0: &mut Box<Narrow512>,
+        l1: &mut Box<Narrow512>,
+        l2: &mut Box<Narrow512>,
+        l3: &mut Box<Narrow512>,
+        shared: &mut Box<Narrow512>,
+    ) -> (*mut u64, *mut u64, *mut u64, *mut u64) {
+        let l0w = l0.0.as_mut_ptr();
+        let l1w = l1.0.as_mut_ptr();
+        let l2w = l2.0.as_mut_ptr();
+        let l3w = l3.0.as_mut_ptr();
+        let sharedw = shared.0.as_mut_ptr();
         unsafe {
-            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
-            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            *l0w.add(0) = (l1w as u64) | 0x3;
+            *l1w.add(0) = (l2w as u64) | 0x3;
             // RAM-identity clone: 1GB blocks the kernel L1 lends every root.
-            *l1.0.as_mut_ptr().add(1) = 0x40000000 | 0x401;
-            *l1.0.as_mut_ptr().add(5) = 0x80000000 | 0x401;
+            *l1w.add(1) = 0x40000000 | 0x401;
+            *l1w.add(5) = 0x80000000 | 0x401;
             // RTS-alias-style table ref (shared tables stay alive via the
             // kernel root; narrowing drops only this root's reference).
-            *l1.0.as_mut_ptr().add(264) = (shared.0.as_mut_ptr() as u64) | 0x3;
+            *l1w.add(264) = (sharedw as u64) | 0x3;
             // UART/GIC identity Device blocks from clone_kernel_l2.
-            *l2.0.as_mut_ptr().add(super::DRIVER_L2_UART) = 0x08000000 | 0x405;
-            *l2.0.as_mut_ptr().add(super::DRIVER_L2_GIC) = 0x09000000 | 0x405;
+            *l2w.add(super::DRIVER_L2_UART) = 0x08000000 | 0x405;
+            *l2w.add(super::DRIVER_L2_GIC) = 0x09000000 | 0x405;
             // The S1 MMIO window leaf.
-            *l2.0.as_mut_ptr().add(80) = (l3.0.as_mut_ptr() as u64) | 0x3;
-            *l3.0.as_mut_ptr().add(0) = super::mmio_leaf_desc(0x0a000000);
+            *l2w.add(80) = (l3w as u64) | 0x3;
+            *l3w.add(0) = super::mmio_leaf_desc(0x0a000000);
         }
-        (l0, l1, l2, l3, shared)
+        (l0w, l1w, l2w, l3w)
     }
 
     #[test]
     fn narrow_strips_clone_keeps_window() {
         use super::{DRIVER_L2_GIC, DRIVER_L2_UART, driver_unmark, is_driver_root};
-        let (mut l0, _l1, _l2, _l3, _shared) = fake_driver_root();
-        let l0p = l0.0.as_mut_ptr() as *mut u8;
+        let mut l0 = Box::new(Narrow512([0; 512]));
+        let mut l1 = Box::new(Narrow512([0; 512]));
+        let mut l2 = Box::new(Narrow512([0; 512]));
+        let mut l3 = Box::new(Narrow512([0; 512]));
+        let mut shared = Box::new(Narrow512([0; 512]));
+        let (l0w, l1w, l2w, l3w) =
+            fake_driver_init(&mut l0, &mut l1, &mut l2, &mut l3, &mut shared);
+        let l0p = l0w as *mut u8;
         unsafe {
             assert_eq!(super::house_vm_narrow_driver_root(l0p), 1);
             assert!(is_driver_root(l0p), "narrow enrolls the fault domain");
-            let l1p = (l0.0.as_mut_ptr().add(0).read() & !0xFFF) as *mut u64;
             // RAM clone + alias ref gone; user-window link intact.
-            assert_eq!(*l1p.add(0) & 1, 1, "L1[0] user chain kept");
-            assert_eq!(*l1p.add(1), 0, "RAM block stripped");
-            assert_eq!(*l1p.add(5), 0, "RAM block stripped");
-            assert_eq!(*l1p.add(264), 0, "alias ref stripped");
-            let l2p = (*l1p.add(0) & !0xFFF) as *mut u64;
-            assert_eq!(*l2p.add(DRIVER_L2_UART), 0, "UART block stripped");
-            assert_eq!(*l2p.add(DRIVER_L2_GIC), 0, "GIC block stripped");
+            assert_eq!(*l1w.add(0) & 1, 1, "L1[0] user chain kept");
+            assert_eq!(*l1w.add(1), 0, "RAM block stripped");
+            assert_eq!(*l1w.add(5), 0, "RAM block stripped");
+            assert_eq!(*l1w.add(264), 0, "alias ref stripped");
+            assert_eq!(*l2w.add(DRIVER_L2_UART), 0, "UART block stripped");
+            assert_eq!(*l2w.add(DRIVER_L2_GIC), 0, "GIC block stripped");
             // Window leaf untouched.
-            assert_ne!(*l2p.add(80) & 1, 0, "MMIO L2 link kept");
-            let l3p = (*l2p.add(80) & !0xFFF) as *mut u64;
-            assert_eq!((*l3p.add(0) >> 2) & 0x7, 1, "MMIO leaf still Device");
+            assert_ne!(*l2w.add(80) & 1, 0, "MMIO L2 link kept");
+            assert_eq!((*l3w.add(0) >> 2) & 0x7, 1, "MMIO leaf still Device");
             driver_unmark(l0p);
             assert!(!is_driver_root(l0p), "unmark retracts");
         }
@@ -1208,23 +1228,28 @@ mod tests {
             assert_eq!(super::house_vm_narrow_driver_root(0x1234 as *mut u8), 0);
             // Bare root (no user chain) refuses.
             let mut bare = Box::new(A512([0; 512]));
-            let bp = bare.0.as_mut_ptr() as *mut u8;
+            let barew = bare.0.as_mut_ptr();
+            let bp = barew as *mut u8;
             assert_eq!(super::house_vm_narrow_driver_root(bp), 0);
             assert!(!is_driver_root(bp), "refusal enrolls nothing");
             // Block at L0[0] refuses.
-            *bare.0.as_mut_ptr().add(0) = 0x40000000 | 0x401;
+            *barew.add(0) = 0x40000000 | 0x401;
             assert_eq!(super::house_vm_narrow_driver_root(bp), 0);
             assert!(!is_driver_root(bp));
             // Table where a Device block is expected refuses (no partial
             // clear: L1[1] must survive the refusal).
-            let (mut l0, _l1, _l2, _l3, _shared) = fake_driver_root();
-            let l0p = l0.0.as_mut_ptr() as *mut u8;
-            let l1p = (l0.0.as_mut_ptr().add(0).read() & !0xFFF) as *mut u64;
-            let l2p = (*l1p.add(0) & !0xFFF) as *mut u64;
-            *l2p.add(super::DRIVER_L2_UART) = (l2p as u64) | 0x3;
+            let mut l0 = Box::new(Narrow512([0; 512]));
+            let mut l1 = Box::new(Narrow512([0; 512]));
+            let mut l2 = Box::new(Narrow512([0; 512]));
+            let mut l3 = Box::new(Narrow512([0; 512]));
+            let mut shared = Box::new(Narrow512([0; 512]));
+            let (l0w, l1w, l2w, _) =
+                fake_driver_init(&mut l0, &mut l1, &mut l2, &mut l3, &mut shared);
+            let l0p = l0w as *mut u8;
+            *l2w.add(super::DRIVER_L2_UART) = (l2w as u64) | 0x3;
             assert_eq!(super::house_vm_narrow_driver_root(l0p), 0);
             assert!(!is_driver_root(l0p), "shape refusal enrolls nothing");
-            assert_ne!(*l1p.add(1), 0, "refusal leaves no partial state");
+            assert_ne!(*l1w.add(1), 0, "refusal leaves no partial state");
             driver_unmark(l0p);
         }
     }
