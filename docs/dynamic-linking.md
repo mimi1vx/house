@@ -107,9 +107,9 @@ stock bindist closure: C7 measured that glibc's `libc.so.6` is not loadable by
 this loader regardless of loader work, because its own `R_AARCH64_ABS64`
 targets `_rtld_global`, which asserts a glibc dynamic loader's internal state.
 
-## Deferred backlog: copy relocations, lazy binding, `dlopen`, TLS, IFUNC, version selection (`house-q0g.10`, `house-q0g.6`, `house-q0g.7`, `house-q0g.8`; 2026-11-04)
+## Deferred backlog: copy relocations, lazy binding, `dlopen`, TLS, IFUNC, version selection, GNU hash (`house-q0g.10`, `house-q0g.6`, `house-q0g.7`, `house-q0g.8`, `house-q0g.5`; 2026-11-04)
 
-All six are deliberate non-goals, not scoped slices. Line numbers below are
+All seven are deliberate non-goals, not scoped slices. Line numbers below are
 as verified 2026-11-04 (the table's 2026-09-27 numbers have drifted).
 
 **Copy relocations: non-goal.** `R_AARCH64_COPY` (1024) has no relocation
@@ -212,16 +212,42 @@ single-provider invariant as `house-q0g.9`. Revisit only if a versioned DSO
 were ever staged, which contradicts the `--hash-style=sysv` unversioned
 rebuild recipe.
 
+**GNU hash: non-goal — provenance (ii) removed it from every staged object.**
+The v1 recipe pins `--hash-style=sysv` at every link step
+(`scripts/mk-house-image.sh:55,202,259,326`), and the B2 manifest records
+`hash=sysv,verneed=0,versym=0` for the rebuilt prim and `libc-house.so.0`
+(`scripts/house-image.manifest`). Measured 2026-11-04 across every
+house-built object on disk (13 objects with dynamic sections: the
+`build-b`, `staging`, `root`, `house-image/house-libs` and `proto`
+`libc-house.so.0` flavours, the `build-b`/`proto` hello-dyn mains, and the
+`house-image`/`house-probe` mains — `PT_DYNAMIC` tags parsed directly, no
+readelf on this host): every one carries SysV `DT_HASH` (tag 4) and zero
+`DT_GNU_HASH` (`0x6FFFFEF5`). The only `hash=gnu` entries left in the
+manifest are stock objects (base, internal, rts, ffi, gmp, libm, libc,
+ld-linux) — unloadable twice over (row 0 plus C7's `_rtld_global` finding),
+so no staged load can reach a GNU-hash table. The two refusal sites still
+fail closed: the parser (`Loader.hs:927`, tag constant `Loader.hs:222`,
+SysV admitted `Loader.hs:909`) and the plan gate
+(`Linker.validateSymbolMetadata`, `Linker.hs:235-242`, `requires SysV
+symbols`). The fail-closed record is fourfold: vector `elfM2GnuHash`
+(`Main.hs:1361,3060-3061,3628`) swaps the SysV entry for a GNU-hash tag and
+asserts `Left (BadDyn "GNU hash unsupported")`; `0x6FFFFEF5` is pinned in
+`rejectedDynTags` (`Main.hs:2936-2938`, enforced `Main.hs:1413,1425`);
+mirrored by `repack.py:86,353-354`; and gated host-side both ways by
+`scripts/dynamic-elf-check.sh:175,178` (built artifacts must carry SysV
+`HASH` and lack `GNU_HASH`) and `:367` (the stock closure must still stop
+at `BadDyn: GNU hash unsupported`). Revisit only if a GNU-hash DSO were
+ever staged, which contradicts the `--hash-style=sysv` rebuild recipe.
+
 ## What is unstarted
 
 Whole-`PT_LOAD` mapping was the recorded accepted M3 cost (since retired by
 the `house-q0g.11` demand pager). Of the M4 success box's "remain open"
 list, copy relocations, lazy binding and `dlopen` are disposed above
-(`house-q0g.10` deferral paragraphs), as are TLS, IFUNC and version
-*selection* (the `house-q0g.6`, `house-q0g.7`, `house-q0g.8` paragraphs in
-the same section); weak symbols as *reference* semantics landed
-(`house-q0g.9`), and GNU hash awaits `house-q0g.5` — worth taking only if
-provenance (ii) is not the chosen route, per that bead. `house-q0g.10`
+(`house-q0g.10` deferral paragraphs), as are TLS, IFUNC, version
+*selection* and GNU hash (the `house-q0g.6`, `house-q0g.7`, `house-q0g.8`
+and `house-q0g.5` paragraphs in the same section); weak symbols as
+*reference* semantics landed (`house-q0g.9`). `house-q0g.10`
 exists to give each a scope or an explicit deferral.
 
 ## Notes worth keeping
