@@ -107,13 +107,66 @@ stock bindist closure: C7 measured that glibc's `libc.so.6` is not loadable by
 this loader regardless of loader work, because its own `R_AARCH64_ABS64`
 targets `_rtld_global`, which asserts a glibc dynamic loader's internal state.
 
+## Deferred backlog: copy relocations, lazy binding, `dlopen` (`house-q0g.10`, 2026-11-04)
+
+All three are deliberate non-goals, not scoped slices. Line numbers below are
+as verified 2026-11-04 (the table's 2026-09-27 numbers have drifted).
+
+**Copy relocations: non-goal.** `R_AARCH64_COPY` (1024) has no relocation
+constructor: it falls into the `otherwise` arm (`Loader.hs:1243`,
+`UnsupportedReloc`; only 257/1025/1026/1027 are admitted, `Loader.hs:1221-1240`),
+and the `COMMON` definition it would copy from is refused by
+`buildExportScope`'s reserved-section arm (`Linker.hs:407-408`;
+`SHN_COMMON` is `0xFFF2`, covered by `Main.hs:2089`). A static linker emits
+`COPY` only for a non-PIC `ET_EXEC` main referencing DSO data, and
+`validateMain` admits `ET_DYN` mains only (`Linker.hs:196`), so no staged
+object can carry one: the built branch-B DSOs were measured with zero
+`SHN_COMMON` symbols and only `JUMP_SLOT` relocs
+(`libc-house.so.0` ×2, `libmid-house.so.0` ×1). Under provenance (ii) the
+feature is empty — every object is rebuilt PIC against `house-libc`.
+Revisit only if a non-PIC main were ever staged, which contradicts M4's
+"our ABI, shared".
+
+**Lazy binding: non-goal — the refusal is the design.** Bind-now is enforced
+twice: per relocation at parse (`Loader.hs:1229`; `ABS64` exempt because it
+is eager by construction) and per object at plan (`Linker.hs:218`, which the
+comment at `Linker.hs:211-217` notes subsumes the parser rule);
+`dynamicBindNow` accepts `DT_BIND_NOW` / `DF_BIND_NOW` / `DF_1_NOW`
+(`Loader.hs:1048-1051`), and RELRO presence, non-emptiness and containment
+are gated separately (`Linker.hs:227-232`, `Linker.hs:298-308`). A lazy PLT
+would need a runtime resolver plus a writable GOT after load, contradicting
+RELRO sealing; there is no fault-time patch path — `planPatches`
+(`Linker.hs:422`) resolves every `JUMP_SLOT` at exec. This is M1's "no lazy
+PLT in v1 — full RELRO, bind-now", unchanged, and the staged objects are
+already linked `-z now` (`scripts/mk-house-image.sh:202`), so laziness buys
+nothing even before the sealing argument. No revisit short of dropping
+RELRO.
+
+**`dlopen`: non-goal for v1 — there is no host primitive.** `linkDynamic`
+runs only on the exec path (`Process.hs`: `prepareImage` →
+`prepareDynamicImage` → `linkDynamic`); no `svc` number re-enters it, and
+there is no post-exec scope merge or out-of-exec init-array path, so a
+runtime load has nothing to attach to. `house-libc` stubs `dlopen`/`dlsym`
+to `NULL` and `dlclose`/`dlerror` to failure (`"no dl"`,
+`rust/crates/house-libc/src/compat.rs:50-64`), so a ported caller fails
+closed at load, never halfway at runtime. Sequencing against provenance
+(ii): `dlopen` *of glibc objects* is moot twice over — row 0 plus C7's
+`_rtld_global` finding — while a runtime load primitive for `house-libc`
+objects (plugin-style) is the only form that could ever matter, and it
+needs its own slice (new `svc`, live-pdir link re-entry, scope merge, init
+execution, dependency pinning), none of it started and none of it M4.
+Revisit condition: a named consumer plus that slice; until then the stubs
+stay failing-closed.
+
 ## What is unstarted
 
 Whole-`PT_LOAD` mapping is the recorded accepted M3 cost. The demand pager,
 version *selection*, weak symbols as *reference* semantics, TLS, copy
 relocations, IFUNC, lazy binding and `dlopen` are each unstarted — the M4
 success box lists them as "remain open", each with "unstarted" in the Later
-section. `house-q0g.10` exists to give each a scope or an explicit
+section. Copy relocations, lazy binding and `dlopen` are disposed above
+(`house-q0g.10` deferral section); the rest await their beads.
+`house-q0g.10` exists to give each a scope or an explicit
 deferral.
 
 ## Notes worth keeping
@@ -301,3 +354,7 @@ Re-scoped plan:
    data) against the syscall layer (row 0, `house-q0g.13`) before the link
    can go `--no-undefined`.
 5. Revisit the `house-q0g.1` caps for internal scale.
+
+## house-q0g.9 weak-reference decision (2026-11-04)
+
+A weak *definition* (`STB_WEAK` + `STV_PROTECTED`) names one provider for one name; a weak *reference* (undefined `STB_WEAK`) asks the scope to choose between providers. Those are different features: the first is admitted since C8 because the duplicate-export refusal keeps exactly one provider per name, while the second stays unimplemented — an ambiguous weak reference resolves `Left`, never a priority pick, because there is no measured basis for a choice (C7 decoded 0 weak symbols in the 9,595-relocation population) and fail-closed keeps the single-provider invariant checkable in a test. `SHN_COMMON` (copy relocations, unstarted per `house-q0g.10`) and duplicate exports stay refused for the same reason: no shadowing, no fallback, one name means one provider.
