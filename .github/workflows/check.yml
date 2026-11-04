@@ -108,15 +108,44 @@ jobs:
           restore-keys: |
             house-vol-v1-
 
+      # S1+S2 outputs are 43M (285/241 PIC archives + 14 C objects); the
+      # 4.9G Hadrian tree stays on the ephemeral volume, never in cache.
+      # Keyed on the seed recipe + consumer + toolchain so a Hadrian/GHC
+      # bump invalidates. Cold miss pays the S1 Hadrian quick build
+      # (~11m20s wall, 4.9G disk on 4-CPU/16GB/14GB runners, well inside
+      # the 150min gate); warm hits restore 43M and skip the build.
+      - name: Restore GHC build cache
+        uses: actions/cache@v6
+        with:
+          path: /tmp/house-volcache/ghc-build
+          key: house-ghc-build-v1-ghc9.14.1-${{ hashFiles('scripts/seed-ghc-build.sh', 'scripts/mk-house-image.sh', 'Containerfile') }}
+          restore-keys: |
+            house-ghc-build-v1-
+
       - name: Seed container volumes
         run: |
-          mkdir -p /tmp/house-volcache/cargo-registry /tmp/house-volcache/cargo-target /tmp/house-volcache/cabal
+          mkdir -p /tmp/house-volcache/cargo-registry /tmp/house-volcache/cargo-target /tmp/house-volcache/cabal /tmp/house-volcache/ghc-build/pic-archives /tmp/house-volcache/ghc-build/s2/objs
           docker volume create house-target >/dev/null 2>&1 || true
           docker volume create house-cargo >/dev/null 2>&1 || true
           docker volume create house-cabal >/dev/null 2>&1 || true
+          docker volume create house-ghc-build >/dev/null 2>&1 || true
           docker run --rm -v house-cargo:/dest -v /tmp/house-volcache/cargo-registry:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-target:/dest -v /tmp/house-volcache/cargo-target:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-cabal:/dest -v /tmp/house-volcache/cabal:/src alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-ghc-build:/dest -v /tmp/house-volcache/ghc-build:/src alpine:3.21 sh -c 'mkdir -p /dest/pic-archives /dest/s2/objs && cp -a /src/pic-archives/. /dest/pic-archives/ 2>/dev/null || true; cp -a /src/s2/objs/. /dest/s2/objs/ 2>/dev/null || true'
+
+      # Cold cache miss: run the S1 Hadrian + S2 recompile inside the
+      # toolchain image. Warm hits exit 0 in seconds (seed present).
+      - name: Provision GHC build volume
+        run: |
+          docker run --platform linux/arm64 --rm \
+            -v "${PWD}":/work \
+            -v house-ghc-build:/ghc-build \
+            -v house-cabal:/root/.cabal \
+            -v house-cargo:/cargo-home \
+            -e CARGO_HOME=/cargo-home \
+            -w /work house-port:latest \
+            sh scripts/seed-ghc-build.sh
 
       - name: Run TCG gate
         run: make check-tcg
@@ -127,3 +156,4 @@ jobs:
           docker run --rm -v house-cargo:/src -v /tmp/house-volcache/cargo-registry:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-target:/src -v /tmp/house-volcache/cargo-target:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
           docker run --rm -v house-cabal:/src -v /tmp/house-volcache/cabal:/dest alpine:3.21 sh -c 'cp -a /src/. /dest/ 2>/dev/null || true'
+          docker run --rm -v house-ghc-build:/src -v /tmp/house-volcache/ghc-build:/dest alpine:3.21 sh -c 'mkdir -p /dest/pic-archives /dest/s2/objs && cp -a /src/pic-archives/. /dest/pic-archives/ 2>/dev/null || true; cp -a /src/s2/objs/. /dest/s2/objs/ 2>/dev/null || true'
