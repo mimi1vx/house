@@ -58,6 +58,8 @@ import H.PhysicalMemory (fromPhysPage, toPhysPage)
 import H.Unsafe (unsafePerformH)
 import H.Utils (ptrFromWord64, ptrToWord64)
 import H.VirtualMemory qualified as VM
+import Kernel.Driver.Virtio.Net.Server qualified as NetSock
+import Kernel.Driver.Virtio.Net.Types (NetError (..), word32ToIpv4)
 import Kernel.FileSystem.Vfs qualified as Vfs
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Types (EndpointId (..), IpcError (..), Message (..), mkMessage)
@@ -136,18 +138,18 @@ foreign import ccall unsafe "house_svc_mask_set" c_svc_mask_set :: Ptr Word64 ->
 
 foreign import ccall unsafe "house_svc_mask_get" c_svc_mask_get :: Ptr Word64 -> IO Word32
 
--- | Full syscall mask: 0x00..0x14 allowed.
+-- | Full syscall mask: 0x00..0x18 allowed.
 svcFullMask :: Word32
-svcFullMask = 0x1FFFFF
+svcFullMask = 0x1FFFFFF
 
--- | Pure mask check: allowed iff imm <= 0x14 and the bit is set.
+-- | Pure mask check: allowed iff imm <= 0x18 and the bit is set.
 svcAllowed :: Word32 -> Word32 -> Bool
-svcAllowed mask imm = imm <= 0x14 && (mask .&. (1 `shiftL` fromIntegral imm)) /= 0
+svcAllowed mask imm = imm <= 0x18 && (mask .&. (1 `shiftL` fromIntegral imm)) /= 0
 
 -- | Pure narrow: clear one imm bit (revoke).
 svcNarrow :: Word32 -> Word32 -> Word32
 svcNarrow mask imm
-  | imm > 0x14 = mask
+  | imm > 0x18 = mask
   | otherwise = mask .&. complement (1 `shiftL` fromIntegral imm)
 
 -- | Write a mask and read it back: False when the Rust table dropped it.
@@ -167,7 +169,7 @@ inheritSvcMask src dst = do
 -- | Revoke one syscall for a live pid (shell verb). Returns the new mask.
 svcMaskRevoke :: Pid -> Word32 -> H (Either String Word32)
 svcMaskRevoke pid imm
-  | imm > 0x14 = return (Left "imm out of range 0x00..0x14")
+  | imm > 0x18 = return (Left "imm out of range 0x00..0x18")
   | otherwise = withQSem userSem $ do
       mp <- readRef procMap
       case Map.lookup pid mp of
@@ -207,12 +209,14 @@ unmapStackPage pdir stk = do
 
 {- | Request parked by an EL0 trap (svc #imm). Yield plus brk/fd
 0x03..0x07/0x0A plus fork 0x08/wait 0x09/exec 0x0B plus dir 0x0C..0x0F
-plus IPC 0x10..0x13 ride
+plus sock 0x15..0x18 plus IPC 0x10..0x13 ride
 the ring; GRANT_MAP 0x14 stays inline ENOSYS. Each IPC request carries the
 trapped x0..x3 (ep, va, nwords, tag); fd requests carry their trapped
 x0..x2 (see 'classify' below); WAIT carries the child pid in x0, EXEC the
 path VA in x0, FORK takes no args; MKDIR/UNLINK carry the path VA in x0,
-STAT/GETDENTS carry (path VA, buf VA, len). ReqFault carries the trapped x0 plus the
+STAT/GETDENTS carry (path VA, buf VA, len). SOCK_OPEN carries (packed
+IPv4, port), SOCK_SEND/SOCK_RECV carry (buf VA, len), SOCK_CLOSE takes
+no args. ReqFault carries the trapped x0 plus the
 fault VA (an RO write to a COW page parks 0x1F via the RO perm guard).
 ReqFaultKill carries the trapped x0 plus the fault VA (any other EL0 abort
 parks 0x1D so the process is reaped instead of halting the core).
@@ -238,6 +242,10 @@ data ParkRequest
   | ReqIpcRecv Word64 Word64 Word64
   | ReqIpcCall Word64 Word64 Word64 Word64
   | ReqIpcReply Word64 Word64 Word64 Word64
+  | ReqSockOpen Word64 Word64
+  | ReqSockSend Word64 Word64
+  | ReqSockRecv Word64 Word64
+  | ReqSockClose
   | ReqFault Word64 Word64
   | ReqFaultKill Word64 Word64
   | ReqPreempt Word64
@@ -1436,9 +1444,11 @@ REPLY resumes x0 = 0; BRK resumes the new break; OPEN resumes the fd
 number; READ/WRITE resume the byte count; CLOSE resumes 0; SEEK resumes
 the new offset; FORK resumes the child pid (0 in the child); WAIT resumes
 the reaped exit code; EXEC resumes 0; MKDIR/UNLINK resume 0; STAT/GETDENTS
-resume the rendered byte count. Errors resume negative errnos:
+resume the rendered byte count; SOCK_OPEN/SOCK_CLOSE resume 0;
+SOCK_SEND/SOCK_RECV resume the byte count (RECV resumes EAGAIN when no
+peer segment arrives). Errors resume negative errnos:
 -1 EPERM (ungranted endpoint), -2 ENOENT, -9 EBADF, -10 ECHILD (wait on a
-non-child), -11 EAGAIN (QueueFull or 5s pair timeout), -12 ENOMEM,
+non-child), -11 EAGAIN (QueueFull, 5s pair timeout, or sock RECV timeout), -12 ENOMEM,
 -14 EFAULT, -17 EEXIST, -20 ENOTDIR, -21 EISDIR, -22 EINVAL, -28 ENOSPC.
 -}
 parkLoop :: VM.PageMap -> LoadBounds -> Pid -> Ptr Word64 -> Word64 -> MVar Int -> StopAck -> Word64 -> [Linker.LinkStep] -> H ()
@@ -1512,6 +1522,10 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                 Just (ReqIpcCall ep va nw tag) -> do handleSend ep va nw tag; loop
                 Just (ReqIpcRecv ep va nw) -> do handleRecv ep va nw; loop
                 Just (ReqIpcReply ep va nw tag) -> do handleReply ep va nw tag; loop
+                Just (ReqSockOpen ip port) -> do handleSockOpen ip port; loop
+                Just (ReqSockSend va ln) -> do handleSockSend va ln; loop
+                Just (ReqSockRecv va ln) -> do handleSockRecv va ln; loop
+                Just ReqSockClose -> do handleSockClose; loop
                 Just (ReqFault x0 va) -> do cont <- handleDemandFault x0 va; when cont loop
                 Just (ReqFaultKill _x0 va) -> do handleFaultKill va
                 Just (ReqPreempt x0) -> do handlePreempt x0; loop
@@ -1875,6 +1889,57 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
       case Map.lookup p m of
         Nothing -> return Nothing
         Just h -> do writeRef pendingReply (Map.delete p m); return (Just h)
+    -- S2 socket verbs (EL0 0x15..0x18) over the single in-flight S1 TCP
+    -- transport: OPEN/SEND resume 0/byte-count, RECV resumes the byte count
+    -- (EAGAIN when no peer segment arrives, so EL0 retries like the ipc_pp
+    -- probe), CLOSE resumes 0. NetArpTimeout/NetDhcpFailed resume EAGAIN
+    -- (transient, retryable); NetNoSpace resumes ENOMEM; every other
+    -- transport error resumes EINVAL.
+    sockErrno NetArpTimeout = negAGAIN
+    sockErrno NetDhcpFailed = negAGAIN
+    sockErrno NetNoSpace = negNOMEM
+    sockErrno _ = negINVAL
+    handleSockOpen ipW portW = do
+      let port = fromIntegral portW :: Int
+      if port <= 0 || port > 65535
+        then resumeWith negINVAL
+        else do
+          r <- NetSock.netSockOpen (word32ToIpv4 (fromIntegral ipW)) (fromIntegral port)
+          case r of
+            Left e -> resumeWith (sockErrno e)
+            Right () -> resumeWith 0
+    handleSockSend va ln =
+      if ln > 65536
+        then resumeWith negINVAL
+        else do
+          mIn <- readUserBytes pid pdir va ln
+          case mIn of
+            Nothing -> return ()
+            Just (Left rc) -> resumeWith (fromIntegral rc)
+            Just (Right bytes) -> do
+              r <- NetSock.netSockSend bytes
+              case r of
+                Left e -> resumeWith (sockErrno e)
+                Right k -> resumeWith (fromIntegral k)
+    handleSockRecv va ln
+      | ln > 65536 = resumeWith negINVAL
+      | ln == 0 = resumeWith 0
+      | otherwise = do
+          r <- NetSock.netSockRecv
+          case r of
+            Left e -> resumeWith (sockErrno e)
+            Right Nothing -> resumeWith negAGAIN
+            Right (Just got) -> do
+              mRc <- writeUserBytes pid pdir va (take (fromIntegral ln) got)
+              case mRc of
+                Nothing -> return ()
+                Just 0 -> resumeWith (fromIntegral (min (fromIntegral ln) (length got)))
+                Just rc -> resumeWith (fromIntegral rc)
+    handleSockClose = do
+      r <- NetSock.netSockClose
+      case r of
+        Left e -> resumeWith (sockErrno e)
+        Right () -> resumeWith 0
 
 {- | Read nwords from a live pid's user VA under 'userSem' (so 'freePDir'
 cannot run concurrently). Nothing when reaped underfoot; 0-length reads
@@ -2026,7 +2091,9 @@ CLOSE fd, SEEK fd/off/whence), 0x08 to fork (no args), 0x09 to wait
 (x0 = child pid), 0x0B to exec (x0 = path VA), 0x0C to mkdir (x0 = path
 VA), 0x0D to unlink (x0 = path VA), 0x0E to stat / 0x0F to getdents
 (x0 = path VA, x1 = buf, x2 = len), 0x10..0x13 to IPC (with the
-trapped x0..x3 as ep/va/nwords/tag), 0x1F to a COW fault (trapped x0 plus
+trapped x0..x3 as ep/va/nwords/tag), 0x15 to SOCK_OPEN (packed IPv4,
+port), 0x16/0x17 to SOCK_SEND/SOCK_RECV (buf VA, len), 0x18 to
+SOCK_CLOSE, 0x1F to a COW fault (trapped x0 plus
 the fault VA from the slot), 0x1D to an unhandled EL0 fault kill (trapped
 x0 plus the fault VA), 0x1E to a timer preemption (trapped x0),
 anything else is unknown (resumed with
@@ -2077,6 +2144,10 @@ tryTakeParkedOnce pdir = do
     classify 0x11 ep va nw _ = ReqIpcRecv ep va nw
     classify 0x12 ep va nw tag = ReqIpcCall ep va nw tag
     classify 0x13 ep va nw tag = ReqIpcReply ep va nw tag
+    classify 0x15 ip port _ _ = ReqSockOpen ip port
+    classify 0x16 va ln _ _ = ReqSockSend va ln
+    classify 0x17 va ln _ _ = ReqSockRecv va ln
+    classify 0x18 _ _ _ _ = ReqSockClose
     classify w _ _ _ _ = ReqUnknown w
 
 takeParkedDrained :: Ptr Word64 -> H (Maybe ParkRequest)

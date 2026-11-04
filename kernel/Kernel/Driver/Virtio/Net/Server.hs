@@ -13,6 +13,10 @@ module Kernel.Driver.Virtio.Net.Server (
   netDhcp,
   netDns,
   netTcp,
+  netSockOpen,
+  netSockSend,
+  netSockRecv,
+  netSockClose,
   netArpLs,
   netIfConfig,
   netGetMac,
@@ -24,6 +28,7 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_)
 import Data.Bits (shiftL, (.&.), (.|.))
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word16, Word32, Word64, Word8)
@@ -44,7 +49,7 @@ import Kernel.Driver.Types (DriverKind (..))
 import Kernel.Driver.Virtio.Net.Device (netInvalidate, netPollUsed, netProbeMac, netSaveQueues, netSubmitRx, netSubmitTx)
 import Kernel.Driver.Virtio.Net.Stack (ArpPacket (..), Ipv4Packet (..), UdpPacket (..), decodeArp, decodeDhcp, decodeDnsResponse, decodeEthernet, decodeIcmpEcho, decodeIpv4, decodeUdp, encodeArp, encodeDhcpDiscover, encodeDhcpRequest, encodeEthernet, encodeIcmpEcho, encodeIpv4, encodeUdp)
 import Kernel.Driver.Virtio.Net.Stack qualified as Stack
-import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), macBroadcast, showIpv4, showMac, virtioNetHdrSize)
+import Kernel.Driver.Virtio.Net.Types (Ipv4 (..), Mac (..), NetDevice (..), NetError (..), macBroadcast, showIpv4, showMac, validateIpv4, virtioNetHdrSize)
 import Kernel.Driver.Virtio.Queue (allocQueue, freeQueue, queueAvailPa, queueDescPa, queueUsedPa)
 import Kernel.IPC.Endpoint qualified as IPC
 import Kernel.IPC.Grant qualified as G
@@ -634,6 +639,15 @@ isPeerData sport dport seg =
     && Stack.tcpDstPort seg == sport
     && not (null (Stack.tcpPayload seg))
 
+{- | One peer segment carrying bytes or a FIN: ports swapped, non-empty
+payload or FIN set (a bare FIN reads as EOF, an empty [Word8]).
+-}
+isPeerSeg :: Word16 -> Word16 -> Stack.TcpSegment -> Bool
+isPeerSeg sport dport seg =
+  Stack.tcpSrcPort seg == dport
+    && Stack.tcpDstPort seg == sport
+    && (not (null (Stack.tcpPayload seg)) || (Stack.tcpFlags seg .&. Stack.tcpFlagFin) /= 0)
+
 -- | TX one TCP segment over IPv4 proto 6.
 sendTcp :: Int -> NetDevice -> Mac -> Ipv4 -> Ipv4 -> Stack.TcpSegment -> H (Either NetError ())
 sendTcp slot dev dmac dstIp srcIp seg = do
@@ -657,6 +671,168 @@ waitTcpMsg slot want waitedMs
       case m of
         Just s | want s -> return (Just s)
         _ -> do busyDelayUs 20000; waitTcpMsg slot want (waitedMs - 20)
+
+{- | S2 socket verbs (EL0 0x15..0x18): the S1 active-open handshake split
+across OPEN (SYN + wait SYN-ACK, stash seq/ack) and CLOSE (FIN), with
+SEND/RECV moving one segment each. Single in-flight connection, shared
+with the shell 'tcp' verb's 'netTcpSeen' record: the last opener wins and
+concurrent users steal each other's segments, so the gate runs them
+sequentially. No socket table, no listen/accept, no retransmit (all slice
+3+). Payloads keep the S1 512B single-segment cap; RECV truncates to the
+caller's len.
+-}
+data SockConn = SockConn {
+  scSlot :: Int
+  , scDstIp :: Ipv4
+  , scDstMac :: Mac
+  , scOwnIp :: Ipv4
+  , scSport :: Word16
+  , scDport :: Word16
+  , scSndNext :: Word32
+  , scRcvNext :: Word32
+  }
+  deriving (Eq, Show)
+
+{-# NOINLINE netSockConn #-}
+netSockConn :: Ref (Maybe SockConn)
+netSockConn = unsafePerformH $ newRef Nothing
+
+{- | First registered virtio-net slot (shell 'findNetSlot' shape, EL0-safe:
+the trap carries no slot, so the server discovers it via nsList).
+-}
+findSockSlot :: H (Maybe Int)
+findSockSlot = do
+  xs <- NS.nsList
+  case filter ("virtio-net" `isPrefixOf`) xs of
+    (x : _) -> case reads (drop (length "virtio-net") x) of
+      [(n, "")] -> return (Just n)
+      _ -> return Nothing
+    [] -> return Nothing
+
+{- | Live connection plus its re-looked-up device (a teardown between verbs
+fails closed instead of driving stale queues).
+-}
+takeSockConn :: H (Either NetError (SockConn, NetDevice))
+takeSockConn = do
+  mConn <- withQSem netSem $ readRef netSockConn
+  case mConn of
+    Nothing -> return (Left (NetInvalidArg "no socket"))
+    Just c -> do
+      mDev <- withQSem netSem $ do m <- readRef netMap; return (Map.lookup (scSlot c) m)
+      case mDev of
+        Nothing -> return (Left (NetInvalidArg "not initialized"))
+        Just dev -> return (Right (c, dev))
+
+{- | OPEN: ARP-resolve, SYN with x3 retry like 'tcpTries', complete the
+handshake with the ACK, and stash the connection. Resets the shared
+'netTcpSeen' record like every S1 verb call.
+-}
+netSockOpen :: Ipv4 -> Word16 -> H (Either NetError ())
+netSockOpen dstIp dport
+  | dport == 0 = return (Left (NetInvalidArg "tcp port"))
+  | otherwise = case validateIpv4 dstIp of
+      Left e -> return (Left e)
+      Right () -> do
+        mSlot <- findSockSlot
+        case mSlot of
+          Nothing -> return (Left (NetInvalidArg "not initialized"))
+          Just slot
+            | not (slotValid slot) -> return (Left NetBadSlot)
+            | otherwise -> do
+                mDev <- withQSem netSem $ do m <- readRef netMap; return (Map.lookup slot m)
+                case mDev of
+                  Nothing -> return (Left (NetInvalidArg "not initialized"))
+                  Just dev -> do
+                    t0 <- liftIO c_uptime_ns
+                    let iss = fromIntegral (t0 .&. 0xFFFFFFFF) :: Word32
+                        sport = fromIntegral ((t0 `div` 1000) `mod` 64512 + 1024) :: Word16
+                        ownIp = case netIp dev of Just ip -> ip; Nothing -> Ipv4 10 0 2 15
+                    sockOpenTries slot dev dstIp ownIp dport iss sport 0
+
+sockOpenTries :: Int -> NetDevice -> Ipv4 -> Ipv4 -> Word16 -> Word32 -> Word16 -> Int -> H (Either NetError ())
+sockOpenTries slot dev dstIp ownIp dport iss sport attempt
+  | attempt >= 3 = return (Left NetArpTimeout)
+  | otherwise = do
+      _ <- withQSem netSem $ do writeRef netTcpSeen Nothing
+      drainRx slot
+      mMac <- lookupArp dstIp
+      dmac <- case mMac of
+        Just m -> return (Just m)
+        Nothing -> arpResolve slot dev dstIp
+      case dmac of
+        Nothing -> return (Left NetArpTimeout)
+        Just mac -> do
+          let syn = Stack.TcpSegment sport dport iss 0 Stack.tcpFlagSyn 65535 []
+          rTx <- sendTcp slot dev mac dstIp ownIp syn
+          case rTx of
+            Left _ -> do busyDelayUs (100000 * (attempt + 1)); sockOpenTries slot dev dstIp ownIp dport iss sport (attempt + 1)
+            Right () -> do
+              mSynAck <- waitTcpMsg slot (isSynAck sport dport iss) 1500
+              case mSynAck of
+                Nothing -> do busyDelayUs (100000 * (attempt + 1)); sockOpenTries slot dev dstIp ownIp dport iss sport (attempt + 1)
+                Just sa -> do
+                  let siss = Stack.tcpSeq sa
+                      ackSa = Stack.TcpSegment sport dport (iss + 1) (siss + 1) Stack.tcpFlagAck 65535 []
+                  _ <- sendTcp slot dev mac dstIp ownIp ackSa
+                  withQSem netSem $ do writeRef netSockConn (Just (SockConn slot dstIp mac ownIp sport dport (iss + 1) (siss + 1)))
+                  return (Right ())
+
+{- | SEND: one ACK+PSH segment, advancing sndNext. Empty payloads send a
+bare ACK and resume 0; over-512B payloads fail like the S1 verb.
+-}
+netSockSend :: [Word8] -> H (Either NetError Int)
+netSockSend payload
+  | length payload > 512 = return (Left (NetInvalidArg "tcp too long"))
+  | otherwise = do
+      mc <- takeSockConn
+      case mc of
+        Left e -> return (Left e)
+        Right (c, dev) -> do
+          let dat = Stack.TcpSegment (scSport c) (scDport c) (scSndNext c) (scRcvNext c) (Stack.tcpFlagAck .|. Stack.tcpFlagPsh) 65535 payload
+          r <- sendTcp (scSlot c) dev (scDstMac c) (scDstIp c) (scOwnIp c) dat
+          case r of
+            Left e -> return (Left e)
+            Right () -> do
+              let c' = c {scSndNext = scSndNext c + fromIntegral (length payload)}
+              withQSem netSem $ do writeRef netSockConn (Just c')
+              return (Right (length payload))
+
+{- | RECV: wait for one peer segment (data or FIN), ACK it, advance rcvNext.
+Timeout reads as Nothing (the parkLoop resumes EAGAIN so EL0 retries, the
+house-gq3 precedent); a bare FIN reads as Just [] (EOF). Consumed segments
+are cleared from the shared record so the next RECV waits for new data.
+-}
+netSockRecv :: H (Either NetError (Maybe [Word8]))
+netSockRecv = do
+  mc <- takeSockConn
+  case mc of
+    Left e -> return (Left e)
+    Right (c, dev) -> do
+      mSeg <- waitTcpMsg (scSlot c) (isPeerSeg (scSport c) (scDport c)) 1500
+      case mSeg of
+        Nothing -> return (Right Nothing)
+        Just seg -> do
+          _ <- withQSem netSem $ do writeRef netTcpSeen Nothing
+          let got = Stack.tcpPayload seg
+              c' = c {scRcvNext = scRcvNext c + fromIntegral (length got)}
+              ack = Stack.TcpSegment (scSport c) (scDport c) (scSndNext c') (scRcvNext c') Stack.tcpFlagAck 65535 []
+          _ <- sendTcp (scSlot c) dev (scDstMac c) (scDstIp c) (scOwnIp c) ack
+          withQSem netSem $ do writeRef netSockConn (Just c')
+          return (Right (Just got))
+
+{- | CLOSE: FIN with the live seq/ack, then drop the connection. Best-effort
+TX (a lost FIN still frees the slot); missing connection fails EINVAL.
+-}
+netSockClose :: H (Either NetError ())
+netSockClose = do
+  mc <- takeSockConn
+  case mc of
+    Left e -> return (Left e)
+    Right (c, dev) -> do
+      let fin = Stack.TcpSegment (scSport c) (scDport c) (scSndNext c) (scRcvNext c) (Stack.tcpFlagAck .|. Stack.tcpFlagFin) 65535 []
+      _ <- sendTcp (scSlot c) dev (scDstMac c) (scDstIp c) (scOwnIp c) fin
+      withQSem netSem $ do writeRef netSockConn Nothing
+      return (Right ())
 
 -- | ARP ls with 60 s expiry.
 netArpLs :: H [(Ipv4, Mac)]

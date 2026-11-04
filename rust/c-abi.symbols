@@ -232,6 +232,7 @@ house_smp_online
 house_smp_online_mask
 house_smp_should_off
 house_smp_up
+house_sock_should_park
 house_spin_init
 house_spin_lock
 house_spin_trylock

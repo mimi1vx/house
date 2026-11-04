@@ -9,7 +9,7 @@ Status: proposed; the decision it informs belongs to `house-q0g`
 Stock `libc.so.6` issues 411 `svc #0x0` with the syscall number in `x8`
 (e.g. `mov x8, #0x5d` = 93 = `exit`). EL1 reads `svc_imm = esr & 0xFFFF`
 (`rust/crates/house-boot/src/c_start.rs:365`, inside the `ec == 0x15` arm at
-`:357`) and dispatches house numbers `0x00`–`0x14`
+`:357`) and dispatches house numbers `0x00`–`0x18`
 (`rust/crates/house-hal-aarch64/src/svc.rs:3-29`,
 `kernel/Kernel/Userspace/Syscall.hs:58-63`). A Linux `svc #0` therefore
 arrives as `svc_imm = 0`, which the house table defines as `syscallYield` —

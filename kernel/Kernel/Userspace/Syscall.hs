@@ -6,7 +6,7 @@ Description : SVC -> IPC/fd/brk shims docs.
 Stability   : experimental
 
   Syscalls 0x03..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B + dir
-  0x0C..0x0F + 0x10..0x13
+  0x0C..0x0F + 0x10..0x13 + sock 0x15..0x18
   delegate through the park/resume ring: Rust ('svc.rs'
   'house_brk_should_park' / 'house_fd_should_park' / 'house_dir_should_park'
   / 'house_fork_should_park' / 'house_wait_should_park'
@@ -52,6 +52,10 @@ module Kernel.Userspace.Syscall (
   syscallIpcCall,
   syscallIpcReply,
   syscallIpcGrantMap,
+  syscallSockOpen,
+  syscallSockSend,
+  syscallSockRecv,
+  syscallSockClose,
 )
 where
 
@@ -107,6 +111,20 @@ syscallIpcRecv = 0x11
 syscallIpcCall = 0x12
 syscallIpcReply = 0x13
 syscallIpcGrantMap = 0x14
+
+{- | S2 socket verbs (svc #imm) over the single in-flight S1 TCP transport
+(no socket table, no listen/accept). OPEN takes (packed IPv4 u32 network
+order, port); SEND/RECV take (buf VA, len); CLOSE takes nothing.
+Validated trap-side by `svc.rs` `house_sock_should_park` (buffer bounds
+only) and completed in Haskell `parkLoop` against `Net.Server`
+`netSockOpen/Send/Recv/Close`, which split the S1 active-open handshake
+across OPEN (SYN + wait SYN-ACK, stash seq/ack) and CLOSE (FIN).
+-}
+syscallSockOpen, syscallSockSend, syscallSockRecv, syscallSockClose :: Int
+syscallSockOpen = 0x15
+syscallSockSend = 0x16
+syscallSockRecv = 0x17
+syscallSockClose = 0x18
 
 {- | brk contract: EL0 svc 0x03 parks and Haskell 'procBrkGrow' extends the
 caller's page map with zero pages inside 0x01000000-0x1000000000;

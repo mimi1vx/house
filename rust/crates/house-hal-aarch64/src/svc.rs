@@ -29,6 +29,13 @@ const HOUSE_SVC_IPC_RECV: u32 = 0x11;
 const HOUSE_SVC_IPC_CALL: u32 = 0x12;
 const HOUSE_SVC_IPC_REPLY: u32 = 0x13;
 const HOUSE_SVC_IPC_GRANT_MAP: u32 = 0x14;
+// S2 socket verbs over the single in-flight S1 TCP transport (no socket
+// table, no listen/accept): OPEN takes (packed IPv4, port), SEND/RECV take
+// (buf, len), CLOSE takes nothing. Ride the delegation ring.
+const HOUSE_SVC_SOCK_OPEN: u32 = 0x15;
+const HOUSE_SVC_SOCK_SEND: u32 = 0x16;
+const HOUSE_SVC_SOCK_RECV: u32 = 0x17;
+const HOUSE_SVC_SOCK_CLOSE: u32 = 0x18;
 
 static mut HOUSE_USER_EXITED: i32 = 0;
 static mut HOUSE_USER_EXIT_CODE: i32 = 0;
@@ -51,7 +58,7 @@ const EL0_N: usize = 64;
 
 // Park request codes (svc #imm that parks instead of completing inline).
 // YIELD + BRK + fd 0x04..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B +
-// dir 0x0C..0x0F +
+// dir 0x0C..0x0F + sock 0x15..0x18 +
 // IPC 0x10..0x13 ride the delegation ring (validate-then-park in
 // `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS
 // until the grant-transfer slice.
@@ -73,6 +80,11 @@ const EL0_REQ_IPC_SEND: u32 = 0x10;
 const EL0_REQ_IPC_RECV: u32 = 0x11;
 const EL0_REQ_IPC_CALL: u32 = 0x12;
 const EL0_REQ_IPC_REPLY: u32 = 0x13;
+// S2 socket parks (single in-flight S1 transport, validated below).
+const EL0_REQ_SOCK_OPEN: u32 = 0x15;
+const EL0_REQ_SOCK_SEND: u32 = 0x16;
+const EL0_REQ_SOCK_RECV: u32 = 0x17;
+const EL0_REQ_SOCK_CLOSE: u32 = 0x18;
 // COW fault park (not an svc number: the RO perm guard parks a write to a
 // shared page so Haskell can copy/remap RW; resumed x0 is the trapped x0
 // so the faulting store retries).
@@ -503,6 +515,47 @@ pub unsafe extern "C" fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn house_brk_should_park(op: u32, _x0: u64) -> i32 {
     if op == HOUSE_SVC_BRK { 1 } else { -22 }
+}
+
+// Shared sock validator: VALID_PARK when the call is well-formed and should
+// park for Haskell pairing, otherwise a precise errno (EFAULT/EINVAL).
+// Arg convention (svc x0..x2): OPEN(packed_ipv4, port, _), SEND/RECV(buf,
+// len, _), CLOSE(_, _, _). The S1 512B single-segment payload cap and the
+// packed-IP/port ranges stay Haskell-checked; only user-memory shape is
+// rejected trap-side.
+unsafe fn validate_sock(op: u32, x0: u64, x1: u64, _x2: u64) -> i64 {
+    unsafe {
+        match op {
+            HOUSE_SVC_SOCK_OPEN | HOUSE_SVC_SOCK_CLOSE => VALID_PARK,
+            HOUSE_SVC_SOCK_SEND | HOUSE_SVC_SOCK_RECV => {
+                if x1 > 65536 {
+                    return EINVAL;
+                }
+                if validate_user_buffer(x0, x1) != 0 {
+                    return EFAULT;
+                }
+                VALID_PARK
+            }
+            _ => EINVAL,
+        }
+    }
+}
+
+// SAFETY: trap context (`c_handle_sync` park gate); integer + page-table
+// validation only, no locks or allocation. Returns 1 when validated and the
+// caller should park, 0 when validation failed (caller falls through to
+// dispatch for the precise errno), -22 unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_sock_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32 {
+    // SAFETY: delegates to the lock-free validator.
+    let r = unsafe { validate_sock(op, x0, x1, x2) };
+    if r == VALID_PARK {
+        1
+    } else if r == ENOSYS || r == EFAULT || r == EINVAL {
+        0
+    } else {
+        -22
+    }
 }
 
 // SAFETY: trap context (`c_handle_sync` park gate); fork carries no user
@@ -1345,6 +1398,25 @@ pub unsafe extern "C" fn house_svc_dispatch(
                 }
                 -38
             }
+            HOUSE_SVC_SOCK_OPEN | HOUSE_SVC_SOCK_SEND | HOUSE_SVC_SOCK_RECV
+            | HOUSE_SVC_SOCK_CLOSE => {
+                // Validate-then-park like the fd slice: well-formed calls
+                // park in `c_handle_sync` before reaching dispatch; reaching
+                // here means unregistered slot (fail closed ENOSYS) or a
+                // trap-side errno (bad buffer, never parked).
+                let r = validate_sock(imm, x0, x1, x2);
+                if r == VALID_PARK {
+                    if !gpr.is_null() {
+                        *gpr = -38i64 as u64;
+                    }
+                    -38
+                } else {
+                    if !gpr.is_null() {
+                        *gpr = r as u64;
+                    }
+                    r
+                }
+            }
             HOUSE_SVC_EXEC => {
                 // Validate-then-park like OPEN: well-formed paths park in
                 // `c_handle_sync`; reaching here means unregistered slot
@@ -1463,6 +1535,21 @@ mod tests {
                 -14
             );
             assert_eq!(validate_dir(HOUSE_SVC_MKDIR, 0x01000000, 0, 0), -14);
+        }
+    }
+
+    #[test]
+    fn sock_gates_shape() {
+        unsafe {
+            assert_eq!(validate_sock(0xFF, 0, 0, 0), -22);
+            assert_eq!(validate_sock(HOUSE_SVC_SOCK_OPEN, 0, 0, 0), 1);
+            assert_eq!(validate_sock(HOUSE_SVC_SOCK_CLOSE, 0, 0, 0), 1);
+            assert_eq!(
+                validate_sock(HOUSE_SVC_SOCK_SEND, 0x01000000, 65537, 0),
+                -22
+            );
+            assert_eq!(validate_sock(HOUSE_SVC_SOCK_SEND, 0x01000000, 8, 0), -14);
+            assert_eq!(validate_sock(HOUSE_SVC_SOCK_RECV, 0x1000, 8, 0), -14);
         }
     }
 }

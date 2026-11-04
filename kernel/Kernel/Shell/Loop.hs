@@ -206,7 +206,7 @@ loop = do
       Just (CmdWaitOne s) -> handleWaitOne s
       Just CmdQuantumUsage -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
       Just (CmdQuantum s) -> handleQuantum s
-      Just CmdSvcMaskUsage -> withCString "usage: svcmask <pid> <imm> (0x00..0x14 revoked)\n" c_uart_puts
+      Just CmdSvcMaskUsage -> withCString "usage: svcmask <pid> <imm> (0x00..0x18 revoked)\n" c_uart_puts
       Just (CmdSvcMask spid simm) -> handleSvcMask spid simm
       Nothing -> withCString ("unknown command: " ++ line ++ "\n") c_uart_puts
     -- Echo stays a shell builtin (not a /bin/echo wrapper): output
@@ -921,12 +921,12 @@ loop = do
         withCString ("quantum ok " ++ show n ++ "\n") c_uart_puts
       _ -> withCString "usage: quantum <ticks> (0..1000000, 0 means 1)\n" c_uart_puts
     handleSvcMask spid simm = case (reads spid :: [(Int, String)], reads simm :: [(Int, String)]) of
-      ([(pid, "")], [(imm, "")]) | imm >= 0 && imm <= 0x14 -> do
+      ([(pid, "")], [(imm, "")]) | imm >= 0 && imm <= 0x18 -> do
         r <- runH (U.svcMaskRevoke (U.Pid pid) (fromIntegral imm))
         case r of
           Left e -> withCString ("svcmask failed: " ++ e ++ "\n") c_uart_puts
           Right m -> withCString ("svcmask ok pid=" ++ show pid ++ " mask=" ++ show m ++ "\n") c_uart_puts
-      _ -> withCString "usage: svcmask <pid> <imm> (0x00..0x14 revoked)\n" c_uart_puts
+      _ -> withCString "usage: svcmask <pid> <imm> (0x00..0x18 revoked)\n" c_uart_puts
     seqFib :: Int -> Int
     seqFib n
       | n <= 1 = n

@@ -1225,6 +1225,10 @@ main = do
       , -- Types display goldens (total nibble render)
         check "showMac golden" (NT.showMac (NT.Mac 0 1 2 3 4 5) == "00:01:02:03:04:05")
       , check "showMac broadcast" (NT.showMac NT.macBroadcast == "ff:ff:ff:ff:ff:ff")
+      , -- Sock S2 goldens (packed-IP trap convention, total, never ErrorCall)
+        check "ipv4 pack/unpack round-trip" (NT.word32ToIpv4 (NT.ipv4ToWord32 (NT.Ipv4 10 0 2 2)) == NT.Ipv4 10 0 2 2)
+      , check "ipv4 pack golden" (NT.ipv4ToWord32 (NT.Ipv4 10 0 2 2) == 0x0A000202)
+      , assertLeft "ipv4 zero rejected" (NT.validateIpv4 (NT.Ipv4 0 0 0 0))
       , -- Loader bad-ELF goldens (typed Left, never throw)
         assertLoadLeft "elf empty" [] Ldr.Truncated
       , assertLoadLeft "elf short" (replicate 63 0) Ldr.Truncated
@@ -2370,12 +2374,12 @@ wedgedGolden = do
     return (res == Left IT.WouldBlock)
   return (r == Just True)
 
--- | Full mask allows every defined imm and denies beyond 0x14.
+-- | Full mask allows every defined imm and denies beyond 0x18.
 svcMaskFullGolden :: Bool
 svcMaskFullGolden =
-  all (Proc.svcAllowed Proc.svcFullMask) [0 .. 0x14]
-    && not (Proc.svcAllowed Proc.svcFullMask 0x15)
-    && Proc.svcFullMask == 0x1FFFFF
+  all (Proc.svcAllowed Proc.svcFullMask) [0 .. 0x18]
+    && not (Proc.svcAllowed Proc.svcFullMask 0x19)
+    && Proc.svcFullMask == 0x1FFFFFF
 
 -- | Narrowing revokes exactly one imm.
 svcMaskNarrowGolden :: Bool

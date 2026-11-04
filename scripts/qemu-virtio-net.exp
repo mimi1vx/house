@@ -123,6 +123,26 @@ expect {
 }
 catch {exec kill -9 $tcp_bridge}
 sleep 1
+# S2 EL0 socket probe: same echo shape through the 0x15..0x18 delegation
+# ring (OPEN/SEND/RECV/CLOSE over the single in-flight S1 transport).
+set sockport 18081
+set sock_bridge [exec socat TCP-LISTEN:$sockport,bind=127.0.0.1,reuseaddr,fork EXEC:/bin/cat &]
+after 1000
+send "run /bin/sock 10.0.2.2 $sockport hello-tcp\r"
+expect {
+    -re "sock ok" { puts "\nPASS: sock echo hello-tcp" }
+    -re "sock fail|Net" {
+        catch {exec kill -9 $sock_bridge}
+        if {$has_netdev} { puts "\nFAIL: sock error with -netdev present"; catch {exec kill -9 [exp_pid]}; exit 1 } else { puts "\nINFO: sock returned error" }
+    }
+    timeout { puts "\nFAIL: sock timeout"; catch {exec kill -9 $sock_bridge}; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "ok exit 0" { puts "\nPASS: sock ok exit 0" }
+    timeout { puts "\nFAIL: sock exit timeout"; catch {exec kill -9 $sock_bridge}; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+catch {exec kill -9 $sock_bridge}
+sleep 1
 send "net dhcp\r"
 expect {
     -re "ok dhcp" { puts "\nPASS: net dhcp" }

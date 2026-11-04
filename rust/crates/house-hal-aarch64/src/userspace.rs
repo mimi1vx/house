@@ -554,15 +554,15 @@ pub unsafe extern "C" fn house_page_budget_try_acquire(pdir: *mut u8, n: u32) ->
     if allowed { 1 } else { 0 }
 }
 
-// Per-pdir syscall mask: 22 bits cover 0x00..0x14. Same shape and lock
+// Per-pdir syscall mask: 25 bits cover 0x00..0x18. Same shape and lock
 // discipline as BUDGET_TAB, so one place knows things owned by a pdir.
-// Full mask (all 21 used bits) is the boot default; narrowing is explicit
-// via the shell verb. Unknown imm (>0x14) denies.
+// Full mask (all 25 used bits) is the boot default; narrowing is explicit
+// via the shell verb. Unknown imm (>0x18) denies.
 static SVC_MASK_LOCK: RawSpinLock = RawSpinLock::new();
 static mut SVC_MASK_TAB: [(u64, u32); 64] = [(0, 0); 64];
 static mut SVC_MASK_N: usize = 0;
 
-const SVC_MASK_FULL: u32 = 0x1FFFFF;
+const SVC_MASK_FULL: u32 = 0x1FFFFFF;
 
 fn svc_mask_get_locked(pdir: u64) -> u32 {
     unsafe {
@@ -622,7 +622,7 @@ pub unsafe extern "C" fn house_svc_mask_reset(pdir: *mut u8) {
     SVC_MASK_LOCK.unlock();
 }
 
-/// Narrow a live root mask (shell verb). Bits beyond 0x14 are ignored.
+/// Narrow a live root mask (shell verb). Bits beyond 0x18 are ignored.
 ///
 /// # Safety
 ///
@@ -665,7 +665,7 @@ pub unsafe extern "C" fn house_svc_allowed(pdir: *mut u8, imm: u32) -> i32 {
     if pdir.is_null() {
         return 0;
     }
-    if imm > 0x14 {
+    if imm > 0x18 {
         return 0;
     }
     let key = pdir as u64;
