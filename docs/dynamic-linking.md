@@ -158,3 +158,25 @@ at 16 MiB.
   143 — `house-q0g.1`.
 - Linker `maxTotalPages` 256 → 1024 admits main + `libm` (146) and single
   `base` (660) but refuses the full stock 6,526-page closure — `house-q0g.1`.
+
+## house-q0g.3 B2 outcome (2026-11-04)
+
+`libHSghc-prim` is rebuilt against `house-libc` (`scripts/mk-house-image.sh`
+builds a `house-libs/` overlay: the el0tiny shared flavour plus the prim
+archive re-linked `ld.lld -shared --hash-style=sysv -z now`, NEEDED on
+`libc-house.so.0` and the B3-owned internal object; the main link takes
+`-Lhouse-libs` first with `--trace` proving the overlay won). The manifest
+gains the rebuilt prim line and the pulled-in `libc-house.so.0` line: both
+read `hash=sysv,bindnow=1,relro=1,tls=0,verneed=0,versym=0`, removing rows
+5, 6, 11, 12 per object. The probe graph (`house-probe` + rebuilt prim +
+`house-libc`) links past every parser and cap gate to `DependencyMissing:
+libHSghc-internal-...` — the first typed error past the stock closure's
+GNU-hash refusal, and B3's work item.
+
+`libHSbase` is not rebuilt: the bindist archive is vanilla non-PIC objects
+(`ld.lld` refuses them with `R_AARCH64_ADR_PREL_PG_HI21`, and TEXTREL output
+is loader-refused), so its rebuild needs dynamic objects from a source-built
+GHC. Its 19 house-missing C imports are named for that follow-up: 16 libm
+transcendentals plus `clock_gettime`/`clock_getres`/`getrusage`/`times`, none
+of which has a house svc number backing it. `libHSghc-internal` shows the
+same vanilla shape (`house-q0g.4` inherits the blocker).

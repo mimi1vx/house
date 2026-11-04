@@ -371,8 +371,42 @@ EOF
 	}
 }
 
+# B2 provenance (ii): the rebuilt prim parses on its own, and the house probe
+# graph (probe + rebuilt prim + house-libc) walks past every parser and cap
+# gate to the first not-yet-rebuilt object. That DependencyMissing is the
+# typed error the full stock closure cannot reach (it stops at the GNU-hash
+# refusal on libm), and the object it names is B3's work item.
+check_house_probe() {
+	house=build/dynamic-probe/house-image
+	prim_soname=$(awk -F'\t' '/^libHSghc-prim/{print $1}' scripts/house-image.manifest)
+	internal_soname=$(awk -F'\t' '/^libHSghc-internal/{print $1}' scripts/house-image.manifest)
+	[ -n "$prim_soname" ] && [ -n "$internal_soname" ] || {
+		echo "dynamic-elf-check: the House manifest has no prim/internal line" >&2
+		exit 1
+	}
+	"$LOADER_CHECK" "$house/house-libs/$prim_soname" >"$WORK/prim.inspect" || {
+		echo "dynamic-elf-check: the rebuilt prim was refused by the Loader" >&2
+		exit 1
+	}
+	grep -q '^hash=sysv' "$WORK/prim.inspect" || {
+		echo "dynamic-elf-check: the rebuilt prim is not SysV-hashed" >&2
+		exit 1
+	}
+	check_interp "$house/build/house-probe"
+	if "$LOADER_CHECK" link "$house/build/house-probe" "$house/house-libs/$prim_soname" "$house/house-libs/libc-house.so.0" >"$WORK/house-probe.link.out" 2>"$WORK/house-probe.link.err"; then
+		echo "dynamic-elf-check: the house probe graph linked, expected a named refusal" >&2
+		exit 1
+	fi
+	grep -q "DependencyMissing: $internal_soname" "$WORK/house-probe.link.err" || {
+		echo "dynamic-elf-check: the house probe graph stops somewhere other than the missing internal object" >&2
+		cat "$WORK/house-probe.link.err" >&2
+		exit 1
+	}
+}
+
 check_soname "$A/$SONAME" "$SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
 check_house_image
+check_house_probe
 
 check_soname "$A/$MID_SONAME" "$MID_SONAME" "$WORK/expected-exports-mid" "$WORK/expected-undefined-mid" "$SONAME " 0
 check_soname "$A/$MISSING_SONAME" "$MISSING_SONAME" "$WORK/expected-exports" "$WORK/expected-undefined-none" ""
