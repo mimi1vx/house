@@ -238,3 +238,66 @@ GHC. Its 19 house-missing C imports are named for that follow-up: 16 libm
 transcendentals plus `clock_gettime`/`clock_getres`/`getrusage`/`times`, none
 of which has a house svc number backing it. `libHSghc-internal` shows the
 same vanilla shape (`house-q0g.4` inherits the blocker).
+
+## house-q0g.4 triage outcome (2026-11-04)
+
+Verdict: re-scope. The bindist archive cannot yield a loader-acceptable
+shared object; the rebuild needs dynamic objects from a source-built GHC.
+The bead stays open on that plan; the manifest line 5 stays as the stock
+reference upper bound and the house-probe `DependencyMissing:
+libHSghc-internal` remains the typed frontier.
+
+Evidence, measured in `house-port:latest` against the bindist 9.14.1 closure
+(`aarch64-linux-ghc-9.14.1-fbc8`):
+
+- B2's success explained: the prim archive is 1 member whose 7 relocs are
+  all `R_AARCH64_ABS64` (link-time-resolvable data words), so the B2
+  `ld.lld -shared` recipe links clean.
+- The internal archive is 285 members (220 unique basenames). Reloc census
+  over the extracted objects: 91,722 `ABS64`, 83,972 `ADR_PREL_PG_HI21`,
+  83,968 `ADD_ABS_LO12_NC`, 52,251 `JUMP26`, 45,034 `ADR_GOT_PAGE` /
+  `LD64_GOT_LO12_NC` pairs, 25,295 `PREL32`, 10,434 `PREL64`, 2,050
+  `CALL26` — the `adrp`/`add` pairs are the vanilla non-PIC shape.
+- The B2 recipe reproduced and refused: `ld.lld -shared --hash-style=sysv
+  -z now -z relro --whole-archive libHSghc-internal-…​.a` fails with
+  `error: relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against
+  symbol '…TimerManager_con_info'; recompile with -fPIC` (first of
+  thousands; `ADD_ABS_LO12_NC` the same).
+- `-z notext` is not an escape: TEXTREL/`DF_TEXTREL` output is
+  loader-refused (`Loader.hs:916,1038`, `build-probe/repack.py:344-356`,
+  `scripts/dynamic-elf-check.sh:178`, `kernel/test/Main.hs:1344-1345`).
+- Rejected without trial: re-linking from the stock `.so` (an input `.so`
+  contributes no code, so the output would be an empty NEEDED wrapper and
+  the closure stays GNU-hash) and patchelf-class hash surgery (no tool
+  rebuilds a SysV `.hash` from `.gnu.hash`; version stripping breaks
+  binding).
+- Import gap for the follow-up: the stock internal `.so` carries 428
+  undefined dynamic symbols, 102 of them versioned `@GLIBC_2.17` C imports.
+  About 11 are already house-libc exports (assert, errno, abort, fprintf,
+  memcpy/memmove/memcmp/memset, puts, strlen, nl_langinfo); the ~91 missing
+  are ~30 libm transcendentals (`acos`…`tanh`, `exp`, `log`, `pow`,
+  `ldexp`), POSIX process/file/event (`fork`, `pipe`, `dup2`, `waitpid`,
+  `epoll_create`/`ctl`/`wait`, `eventfd`, `sigaddset`/`emptyset`/`procmask`,
+  `poll`, `flock`, `fcntl[64]`), terminal (`tcgetattr`/`setattr`, `isatty`),
+  `sysconf`/`utime`, `iconv_open`/`close`/`iconv`, allocation
+  (`malloc`/`calloc`/`realloc`/`free`), plus the data objects
+  `stderr`/`environ`. Base's gap was 19 symbols; internal is ~5x the libc
+  surface.
+- Cap coupling: a rebuilt internal stays at stock scale (165,975 relocs /
+  59,724 syms / 4,973 pages), so the `house-q0g.1` retune — which
+  deliberately sized away from the 20 MB object — must be revisited for
+  this object (rows 1, 7, 8, 9, 10, 17, 18).
+
+Re-scoped plan:
+
+1. Source-build GHC 9.14.1 (Hadrian, aarch64 Linux, stock toolchain) to
+   obtain `-fPIC` dynamic objects for `ghc-internal` (and `base`, already
+   queued) — one-time cost, typically 30–90 min container time.
+2. Recompile the packages' C bits (`iconv`, `SetEnv`, `gmp_wrappers`, …)
+   `-fPIC` against house-libc headers.
+3. Apply the B2 `ld.lld` recipe (`--hash-style=sysv -z now`, NEEDED on
+   `libc-house.so.0`) to the PIC objects.
+4. Close the ~91-symbol house-libc gap (libm + POSIX + `stderr`/`environ`
+   data) against the syscall layer (row 0, `house-q0g.13`) before the link
+   can go `--no-undefined`.
+5. Revisit the `house-q0g.1` caps for internal scale.
