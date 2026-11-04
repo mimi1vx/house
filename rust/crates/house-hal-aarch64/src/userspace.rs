@@ -951,8 +951,12 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             for i in 0..512 {
                 *nl1.add(i) = 0;
             }
+            // Miri cannot execute `asm!`: hosted tests are single-threaded, so
+            // the table-clear publish ordering is elided there (logic unaffected).
+            #[cfg(not(miri))]
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             *l0.add(i0) = ((nl1 as u64) & !0xFFF) | PTE_VALID | PTE_TABLE;
+            #[cfg(not(miri))]
             core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
             d0 = *l0.add(i0);
         }
@@ -970,8 +974,10 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             for i in 0..512 {
                 *nl2.add(i) = 0;
             }
+            #[cfg(not(miri))]
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             *s1 = ((nl2 as u64) & !0xFFF) | PTE_VALID | PTE_TABLE;
+            #[cfg(not(miri))]
             core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
             d1 = *s1;
             l2 = (d1 & !0xFFF) as *mut u64;
@@ -1000,8 +1006,10 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             for i in 0..512 {
                 *nl3.add(i) = 0;
             }
+            #[cfg(not(miri))]
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             *s2 = ((nl3 as u64) & !0xFFF) | PTE_VALID | PTE_TABLE;
+            #[cfg(not(miri))]
             core::arch::asm!("dsb sy; isb", options(nostack, preserves_flags));
             d2 = *s2;
             l3 = (d2 & !0xFFF) as *mut u64;
@@ -1044,7 +1052,7 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
         // the guest install path runs EL1 and keeps the invalidate.
         #[cfg(not(test))]
         core::arch::asm!("dsb ishst; tlbi vae1is, {0}; dsb ish; isb", in(reg) va >> 12, options(nostack, preserves_flags));
-        #[cfg(test)]
+        #[cfg(all(test, not(miri)))]
         core::arch::asm!("dsb ishst; dsb ish; isb", options(nostack, preserves_flags));
         BUDGET_LOCK.lock();
         budget_inc(pdir as u64);
@@ -1100,10 +1108,8 @@ mod tests {
     // S2 (house-oz9.11): the demand pager refuses enrolled driver roots, so
     // an EL0 fault under a driver TTBR0 context falls through to the generic
     // fault-kill park instead of zero-mapping RAM into the allowlist window.
-    // Runs on host: refusal touches no allocator and no barriers.
-    // Miri cannot execute the `dsb`/`isb` barriers on the unmarked-root map
-    // path (fault_locked), so this runs on host/QEMU only.
-    #[cfg_attr(miri, ignore)]
+    // The `dsb`/`isb` table-publish ordering on the unmarked-root map path
+    // is elided under Miri (single-threaded hosted test; logic unaffected).
     #[test]
     fn pager_refuses_driver_root() {
         use crate::mm::vm::{driver_unmark, house_vm_narrow_driver_root};

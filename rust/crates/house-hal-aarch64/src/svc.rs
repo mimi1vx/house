@@ -1124,8 +1124,12 @@ pub unsafe extern "C" fn house_driver_inject_fault(pdir: *mut u8, va: u64) -> i3
                 EL0_TABLE[i].req = EL0_REQ_FAULT_KILL;
                 EL0_TABLE[i].fault_va = page;
                 EL0_TABLE[i].parked = 1;
+                // Miri cannot execute `asm!`: hosted tests are single-threaded, so
+                // the publish/wakeup ordering is elided there (logic under test is unaffected).
+                #[cfg(not(miri))]
                 core::arch::asm!("dsb sy", options(nostack, preserves_flags));
                 poke_park();
+                #[cfg(not(miri))]
                 core::arch::asm!("sev", options(nostack, preserves_flags));
                 return 1;
             }
@@ -1826,9 +1830,8 @@ mod tests {
     // with the hostile VA against an enrolled, supervised driver root, and
     // refuses everything else fail-closed. Mirrors the userspace pager-test
     // chain setup (Box L0/L1/L2/L3, window Device leaf at L2[80]/L3[0]).
-    // Miri cannot execute the `dsb`/`sev` barriers on the EL0 park path
-    // (house_driver_inject_fault/poke_park), so this runs on host/QEMU only.
-    #[cfg_attr(miri, ignore)]
+    // The `dsb`/`sev` publish/wakeup on the park path is elided under Miri
+    // (single-threaded hosted test; barriers order hardware effects only).
     #[test]
     fn driver_inject_parks_kill_for_enrolled_domain() {
         use crate::mm::vm::{driver_unmark, house_vm_narrow_driver_root, mmio_leaf_desc};
