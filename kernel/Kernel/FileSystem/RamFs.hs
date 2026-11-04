@@ -312,6 +312,7 @@ ramfsWrite path content = case splitPath path of
 
 -- | Page count of the file an overwrite would replace (0 for new paths).
 replacedPages :: [String] -> Node -> Int
+replacedPages [] _ = 0
 replacedPages cs root = case resolve (init cs) root of
   Nothing -> 0
   Just (File {}) -> 0
