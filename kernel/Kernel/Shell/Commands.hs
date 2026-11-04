@@ -88,6 +88,7 @@ data Cmd
   | CmdNetDhcp
   | CmdDns String
   | CmdDnsUsage
+  | CmdTcp String String String
   | CmdNetUsage
   | CmdConInit String
   | CmdConStatus String
@@ -187,6 +188,7 @@ allCmds =
   , CmdNetDhcp
   , CmdDns "example.com"
   , CmdDnsUsage
+  , CmdTcp "10.0.2.2" "80" "hi"
   , CmdNetUsage
   , CmdConInit "0"
   , CmdConStatus "0"
@@ -255,8 +257,8 @@ helpTable =
   , ("       ", "lsdev", "list drivers | dmesg -- kernel log | virtio scan -- probe MMIO slots (0x0a000000+i*0x200)")
   , ("       ", "virtio scan|init <slot>|notify <slot>|status|ack <slot>|irqtest <slot>|teardown <slot>", "Virtio-MMIO transport (0x0a000000+i*0x200, split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint)")
   , ("       ", "blk init <slot>|status <slot>|read <slot> <lba>|write <slot> <lba> <text>|sync [slot]|mount <slot>|root <slot>|teardown <slot>", "Virtio-blk server (Endpoint, Grant, 4K blocks, capacity, queue_notify, IRQ->Endpoint, 64M house.img, Q2=B; mount restores RamFS, root appends a lower / layer for /lib reads and blocks teardown)")
-  , ("       ", "net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>", "Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP, ping, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)")
-  , ("       ", "dns <name>", "A-record lookup via 10.0.2.3 (UDP/53, no TCP; e.g. dns example.com)")
+  , ("       ", "net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|tcp <ip> <port> [text]|arp ls|dhcp|teardown <slot>", "Virtio-net server (Endpoint, Grant, rx0+tx1, 12B hdr, ARP/IPv4/UDP/DHCP/TCP, ping, tcp active-open echo, dc ivac/dsb, IRQ->Endpoint, user net 10.0.2.0/24)")
+  , ("       ", "dns <name>", "A-record lookup via 10.0.2.3 (UDP/53 only; e.g. dns example.com)")
   , ("       ", "con init <slot>|status <slot>|write <slot> <text>|read [slot]|teardown <slot>|mirror on|off", "Virtio-console server (ID 3 console / multiport serial port0 + control q2/q3 DEVICE_READY/OPEN, Endpoint, Grant, rx0+tx1, dc ivac/dsb, IRQ->Endpoint; mirror duplicates UART to serial, default off)")
   , ("       ", "run </path> [args...]", "load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/fd/ipc, EL0 eret (TTBR0/ASID/pager)")
   , ("       ", "spawn </path> [args...]", "run without waiting (prints pid) | jobs -- list live pids | wait [pid] -- reap (all when bare)")
@@ -342,6 +344,7 @@ cmdUsage cmd = case cmd of
   CmdNetUsage -> tableRow 29
   CmdDns _ -> tableRow 30
   CmdDnsUsage -> tableRow 30
+  CmdTcp {} -> tableRow 29
   CmdConInit _ -> tableRow 31
   CmdConStatus _ -> tableRow 31
   CmdConWrite _ _ -> tableRow 31
@@ -477,6 +480,10 @@ parseCmd ws = case ws of
     | verb == "udpecho" -> case args of
         [ip, port, txt] -> Just (CmdUdpEcho ip port txt)
         [ip, port] -> Just (CmdUdpEcho ip port "")
+        _ -> Nothing
+    | verb == "tcp" -> case args of
+        [ip, port, txt] -> Just (CmdTcp ip port txt)
+        [ip, port] -> Just (CmdTcp ip port "")
         _ -> Nothing
     | verb == "arp" -> case args of
         [a] | a == "ls" -> Just CmdArpLs

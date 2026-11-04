@@ -7,6 +7,7 @@ module Kernel.Driver.Virtio.Net.Stack (
   UdpPacket (..),
   DhcpMsg (..),
   DnsResponse (..),
+  TcpSegment (..),
   encodeEthernet,
   decodeEthernet,
   encodeArp,
@@ -22,6 +23,14 @@ module Kernel.Driver.Virtio.Net.Stack (
   decodeDhcp,
   encodeDnsQuery,
   decodeDnsResponse,
+  encodeTcp,
+  decodeTcp,
+  tcpChecksum,
+  tcpFlagFin,
+  tcpFlagSyn,
+  tcpFlagRst,
+  tcpFlagPsh,
+  tcpFlagAck,
   validateDnsName,
   ipv4Checksum,
   udpChecksum,
@@ -417,7 +426,7 @@ decodeDhcp bytes
               _ -> parseOpts (off + need) (drop n rest) mt sv
     parseOpts _ [_] _ _ = Left (NetInvalidArg "dhcp opts trunc")
 
--- DNS (Track O slice, no TCP) -------------------------------------------------
+-- DNS (Track O slice; UDP-only, no DNS-over-TCP) ---------------------------------
 -- Minimal A-record query/response over UDP/53 via 10.0.2.3. Total parsers:
 -- every index goes through 'safeIndex'; compression pointers are followed
 -- with a depth bound (≤8) so a hostile loop can only yield Left.
@@ -572,3 +581,105 @@ decodeDnsResponse bytes
                           if n > 63 || o + 1 + n > length bytes
                             then Left (NetInvalidArg "dns label len")
                             else walk (o + 1 + n) depth
+
+-- TCP S1 slice (active open + one-segment send/recv + close) -------------------
+-- Total SYN/data header codec; seq/ack/window stay opaque Word16/32.
+-- Options bytes are skipped, never parsed (no option-parse bombs); there is
+-- no listen/accept, no retransmit/congestion, no socket table (slice 2+).
+
+-- | TCP segment (header fields + payload; options never represented).
+data TcpSegment = TcpSegment {
+  tcpSrcPort :: Word16
+  , tcpDstPort :: Word16
+  , tcpSeq :: Word32
+  , tcpAck :: Word32
+  , tcpFlags :: Word8
+  , tcpWindow :: Word16
+  , tcpPayload :: [Word8]
+  }
+  deriving (Eq, Show)
+
+-- | Flag bits (low byte of the flags field; NS/CWR/ECE stay zero in S1).
+tcpFlagFin, tcpFlagSyn, tcpFlagRst, tcpFlagPsh, tcpFlagAck :: Word8
+tcpFlagFin = 0x01
+tcpFlagSyn = 0x02
+tcpFlagRst = 0x04
+tcpFlagPsh = 0x08
+tcpFlagAck = 0x10
+
+-- | TCP checksum over the IPv4 pseudo-header + segment (even-padded).
+tcpChecksum :: Ipv4 -> Ipv4 -> [Word8] -> Word16
+tcpChecksum src dst segBytes = ipv4Checksum (pseudo ++ padEven segBytes)
+  where
+    pseudo = ipv4ToList src ++ ipv4ToList dst ++ [0x00, 6] ++ word16be (fromIntegral (length segBytes) :: Word16)
+    padEven xs = if odd (length xs) then xs ++ [0] else xs
+    word16be w = [fromIntegral (w `shiftR` 8), fromIntegral w]
+    ipv4ToList (Ipv4 a b c d) = [a, b, c, d]
+
+-- | Encode a TCP segment: 20B header (dataOffset=5, no options) + payload.
+encodeTcp :: Ipv4 -> Ipv4 -> TcpSegment -> [Word8]
+encodeTcp src dst seg =
+  let hdrNoCsum =
+        word16be (tcpSrcPort seg)
+          ++ word16be (tcpDstPort seg)
+          ++ word32be (tcpSeq seg)
+          ++ word32be (tcpAck seg)
+          ++ [0x50, tcpFlags seg]
+          ++ word16be (tcpWindow seg)
+          ++ [0x00, 0x00, 0x00, 0x00]
+      csum = tcpChecksum src dst (hdrNoCsum ++ tcpPayload seg)
+      hdr = take 16 hdrNoCsum ++ word16be csum ++ drop 18 hdrNoCsum
+   in hdr ++ tcpPayload seg
+  where
+    word16be w = [fromIntegral (w `shiftR` 8), fromIntegral w]
+    word32be w = [fromIntegral (w `shiftR` 24), fromIntegral (w `shiftR` 16), fromIntegral (w `shiftR` 8), fromIntegral w]
+
+{- | Decode a TCP segment. Total: segment <20B -> Left; dataOffset outside
+5..15 -> Left; hdrLen = dataOffset*4 past the frame -> Left. Options
+(hdrLen>20) are skipped, never parsed; trailing bytes are the payload.
+-}
+decodeTcp :: [Word8] -> Either NetError TcpSegment
+decodeTcp bytes
+  | length bytes < 20 = Left (NetInvalidArg "tcp short")
+  | otherwise = do
+      s0 <- at 0
+      s1 <- at 1
+      d0 <- at 2
+      d1 <- at 3
+      q0 <- at 4
+      q1 <- at 5
+      q2 <- at 6
+      q3 <- at 7
+      a0 <- at 8
+      a1 <- at 9
+      a2 <- at 10
+      a3 <- at 11
+      off <- at 12
+      fl <- at 13
+      w0 <- at 14
+      w1 <- at 15
+      let src = (fromIntegral s0 `shiftL` 8) .|. fromIntegral s1 :: Word16
+          dst = (fromIntegral d0 `shiftL` 8) .|. fromIntegral d1 :: Word16
+          seqN =
+            (fromIntegral q0 `shiftL` 24)
+              .|. (fromIntegral q1 `shiftL` 16)
+              .|. (fromIntegral q2 `shiftL` 8)
+              .|. fromIntegral q3 ::
+              Word32
+          ackN =
+            (fromIntegral a0 `shiftL` 24)
+              .|. (fromIntegral a1 `shiftL` 16)
+              .|. (fromIntegral a2 `shiftL` 8)
+              .|. fromIntegral a3 ::
+              Word32
+          win = (fromIntegral w0 `shiftL` 8) .|. fromIntegral w1 :: Word16
+          dataOff = fromIntegral (off `shiftR` 4) :: Int
+      if dataOff < 5 || dataOff > 15
+        then Left (NetInvalidArg "tcp dataoff")
+        else
+          let hdrLen = dataOff * 4
+           in if hdrLen > length bytes
+                then Left (NetInvalidArg "tcp hlen")
+                else Right (TcpSegment src dst seqN ackN fl win (drop hdrLen bytes))
+  where
+    at i = maybe (Left (NetInvalidArg "tcp trunc")) Right (safeIndex bytes i)

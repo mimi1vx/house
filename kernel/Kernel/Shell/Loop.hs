@@ -176,6 +176,7 @@ loop = do
       Just CmdNetDhcp -> handleNetDhcp
       Just (CmdDns name) -> handleDns name
       Just CmdDnsUsage -> withCString "usage: dns <name>\n" c_uart_puts
+      Just (CmdTcp ip port txt) -> handleTcp ip port txt
       Just CmdNetUsage -> withCString "usage: net init <slot>|status <slot>|ifconfig|ping <ip>|udpecho <ip> <port> <text>|arp ls|dhcp|teardown <slot>\n" c_uart_puts
       Just (CmdConInit s) -> handleConInit s
       Just (CmdConStatus s) -> handleConStatus s
@@ -646,6 +647,15 @@ loop = do
       case r of
         Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
         Right s -> withCString (s ++ "\n") c_uart_puts
+    handleTcp ipStr portStr txt = case (parseIpv4 ipStr, reads portStr) of
+      (Right ip, [(p, "")]) -> do
+        xs <- runH NS.nsList
+        let slot = findNetSlot xs
+        r <- runH (Net.netTcp slot ip p txt)
+        case r of
+          Left e -> withCString (NetTypes.netErrorToString e ++ "\n") c_uart_puts
+          Right s -> withCString (s ++ "\n") c_uart_puts
+      _ -> withCString "usage: tcp <ip> <port> [text]\n" c_uart_puts
     defaultEnv = ["HOUSE=1", "PATH=/bin"]
     handleLoaderRefs imagePath = do
       r <- runH $ do

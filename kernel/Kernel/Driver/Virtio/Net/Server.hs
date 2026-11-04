@@ -12,6 +12,7 @@ module Kernel.Driver.Virtio.Net.Server (
   netUdpSend,
   netDhcp,
   netDns,
+  netTcp,
   netArpLs,
   netIfConfig,
   netGetMac,
@@ -107,6 +108,13 @@ netDhcpSeen = unsafePerformH $ newRef Nothing
 {-# NOINLINE netDnsSeen #-}
 netDnsSeen :: Ref (Maybe Stack.DnsResponse)
 netDnsSeen = unsafePerformH $ newRef Nothing
+
+{- | Last TCP segment seen on proto 6 (S1 active-open slice): single
+in-flight record, reset per verb call like 'netDnsSeen'.
+-}
+{-# NOINLINE netTcpSeen #-}
+netTcpSeen :: Ref (Maybe Stack.TcpSegment)
+netTcpSeen = unsafePerformH $ newRef Nothing
 
 {-# NOINLINE netRxGrants #-}
 netRxGrants :: Ref (Map Int (Map Word32 Grant))
@@ -476,8 +484,9 @@ waitDhcpMsg slot xid wantType waitedMs
           busyDelayUs 20000 >> waitDhcpMsg slot xid wantType (waitedMs - 20)
         _ -> do busyDelayUs 20000; waitDhcpMsg slot xid wantType (waitedMs - 20)
 
-{- | DNS A resolver slice (Track O, no TCP): UDP query to 10.0.2.3:53.
-Reuses the Track H safeIndex decoder; no retransmit/congestion state.
+{- | DNS A resolver slice (Track O, UDP-only, no DNS-over-TCP): query to
+10.0.2.3:53. Reuses the Track H safeIndex decoder; no retransmit/congestion
+state. Companion to the S1 active-open 'netTcp' below.
 -}
 netDns :: Int -> String -> H (Either NetError String)
 netDns slot name
@@ -537,6 +546,117 @@ waitDnsMsg slot xid waitedMs
       case m of
         Just d | Stack.dnsXid d == xid -> return (Just d)
         _ -> do busyDelayUs 20000; waitDnsMsg slot xid (waitedMs - 20)
+
+{- | TCP S1 slice: active open + one-segment send/recv + close against a host
+peer (SLIRP maps guest 10.0.2.2 to host loopback). SYN retry bounded x3 with
+backoff like 'dnsTries' (no timer wheel); single in-flight record
+'netTcpSeen' reset per call; received bytes truncated to the 256 print
+budget. No listen/accept, no options, no retransmit/congestion, no socket
+table (all slice 2+).
+-}
+netTcp :: Int -> Ipv4 -> Word16 -> String -> H (Either NetError String)
+netTcp slot dstIp dstPort txt
+  | not (slotValid slot) = return (Left NetBadSlot)
+  | otherwise = do
+      mDev <- withQSem netSem $ do m <- readRef netMap; return (Map.lookup slot m)
+      case mDev of
+        Nothing -> return (Left (NetInvalidArg "not initialized"))
+        Just dev -> do
+          let payload = map (fromIntegral . fromEnum) txt :: [Word8]
+          if length payload > 512
+            then return (Left (NetInvalidArg "tcp too long"))
+            else do
+              t0 <- liftIO c_uptime_ns
+              let iss = fromIntegral (t0 .&. 0xFFFFFFFF) :: Word32
+                  sport = fromIntegral ((t0 `div` 1000) `mod` 64512 + 1024) :: Word16
+              tcpTries slot dev dstIp dstPort payload iss sport 0
+
+tcpTries :: Int -> NetDevice -> Ipv4 -> Word16 -> [Word8] -> Word32 -> Word16 -> Int -> H (Either NetError String)
+tcpTries slot dev dstIp dstPort payload iss sport attempt
+  | attempt >= 3 = return (Left NetArpTimeout)
+  | otherwise = do
+      _ <- withQSem netSem $ do writeRef netTcpSeen Nothing
+      let ownIp = case netIp dev of Just ip -> ip; Nothing -> Ipv4 10 0 2 15
+      drainRx slot
+      mMac <- lookupArp dstIp
+      dmac <- case mMac of
+        Just m -> return (Just m)
+        Nothing -> arpResolve slot dev dstIp
+      case dmac of
+        Nothing -> return (Left NetArpTimeout)
+        Just mac -> do
+          let syn = Stack.TcpSegment sport dstPort iss 0 Stack.tcpFlagSyn 65535 []
+          rTx <- sendTcp slot dev mac dstIp ownIp syn
+          case rTx of
+            Left _ -> do busyDelayUs (100000 * (attempt + 1)); tcpTries slot dev dstIp dstPort payload iss sport (attempt + 1)
+            Right () -> do
+              mSynAck <- waitTcpMsg slot (isSynAck sport dstPort iss) 1500
+              case mSynAck of
+                Nothing -> do busyDelayUs (100000 * (attempt + 1)); tcpTries slot dev dstIp dstPort payload iss sport (attempt + 1)
+                Just sa -> do
+                  let siss = Stack.tcpSeq sa
+                      ackSa = Stack.TcpSegment sport dstPort (iss + 1) (siss + 1) Stack.tcpFlagAck 65535 []
+                  _ <- sendTcp slot dev mac dstIp ownIp ackSa
+                  let dat = Stack.TcpSegment sport dstPort (iss + 1) (siss + 1) (Stack.tcpFlagAck .|. Stack.tcpFlagPsh) 65535 payload
+                  rDat <- sendTcp slot dev mac dstIp ownIp dat
+                  case rDat of
+                    Left e -> return (Left e)
+                    Right () -> do
+                      mData <- waitTcpMsg slot (isPeerData sport dstPort) 2000
+                      case mData of
+                        Nothing -> return (Left NetArpTimeout)
+                        Just d -> do
+                          let got = Stack.tcpPayload d
+                              fin =
+                                Stack.TcpSegment
+                                  sport
+                                  dstPort
+                                  (iss + 1 + fromIntegral (length payload))
+                                  (siss + 1 + fromIntegral (length got))
+                                  (Stack.tcpFlagAck .|. Stack.tcpFlagFin)
+                                  65535
+                                  []
+                          _ <- sendTcp slot dev mac dstIp ownIp fin
+                          return (Right ("tcp ok " ++ take 256 (map (toEnum . fromIntegral) got :: String)))
+
+-- | SYN+ACK for our handshake: ports swapped, SYN+ACK set, ack == iss+1.
+isSynAck :: Word16 -> Word16 -> Word32 -> Stack.TcpSegment -> Bool
+isSynAck sport dport iss seg =
+  Stack.tcpSrcPort seg == dport
+    && Stack.tcpDstPort seg == sport
+    && (Stack.tcpFlags seg .&. 0x12) == 0x12
+    && Stack.tcpAck seg == iss + 1
+
+-- | One peer data segment: ports swapped, non-empty payload.
+isPeerData :: Word16 -> Word16 -> Stack.TcpSegment -> Bool
+isPeerData sport dport seg =
+  Stack.tcpSrcPort seg == dport
+    && Stack.tcpDstPort seg == sport
+    && not (null (Stack.tcpPayload seg))
+
+-- | TX one TCP segment over IPv4 proto 6.
+sendTcp :: Int -> NetDevice -> Mac -> Ipv4 -> Ipv4 -> Stack.TcpSegment -> H (Either NetError ())
+sendTcp slot dev dmac dstIp srcIp seg = do
+  let tcp = Stack.encodeTcp srcIp dstIp seg
+      ipPkt = encodeIpv4 srcIp dstIp 6 tcp
+      eth = encodeEthernet dmac (netMac dev) 0x0800 ipPkt
+  txPacket slot eth
+
+waitTcpMsg :: Int -> (Stack.TcpSegment -> Bool) -> Int -> H (Maybe Stack.TcpSegment)
+waitTcpMsg slot want waitedMs
+  | waitedMs <= 0 = do
+      drainRx slot
+      withQSem netSem $ do
+        m <- readRef netTcpSeen
+        case m of
+          Just s | want s -> return (Just s)
+          _ -> return Nothing
+  | otherwise = do
+      drainRx slot
+      m <- withQSem netSem $ readRef netTcpSeen
+      case m of
+        Just s | want s -> return (Just s)
+        _ -> do busyDelayUs 20000; waitTcpMsg slot want (waitedMs - 20)
 
 -- | ARP ls with 60 s expiry.
 netArpLs :: H [(Ipv4, Mac)]
@@ -702,6 +822,9 @@ drainRx slot = go netRxBatchCap
                           Right resp -> withQSem netSem $ do writeRef netDnsSeen (Just resp)
                           Left _ -> return ()
                     | otherwise -> return ()
+                  Left _ -> return ()
+                6 -> case Stack.decodeTcp (ipv4Payload ipkt) of
+                  Right seg -> withQSem netSem $ do writeRef netTcpSeen (Just seg)
                   Left _ -> return ()
                 _ -> return ()
         | otherwise -> return ()

@@ -180,6 +180,9 @@ instance Arbitrary Stack.Ipv4Packet where
 instance Arbitrary Stack.UdpPacket where
   arbitrary = Stack.UdpPacket <$> arbitrary <*> arbitrary <*> smallBytes
 
+instance Arbitrary Stack.TcpSegment where
+  arbitrary = Stack.TcpSegment <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> smallBytes
+
 newtype TestFiles = TestFiles [(FilePath, [Word8])]
   deriving (Show)
 
@@ -225,6 +228,10 @@ propDnsRoundTrip xid =
       Nothing -> property False
       Just resp -> Stack.decodeDnsResponse resp === Right (Stack.DnsResponse xid (NT.Ipv4 93 184 216 34))
 
+propTcpRoundTrip :: NT.Ipv4 -> NT.Ipv4 -> Stack.TcpSegment -> Property
+propTcpRoundTrip src dst seg =
+  Stack.decodeTcp (Stack.encodeTcp src dst seg) === Right seg
+
 propBlkRoundTrip :: TestFiles -> Property
 propBlkRoundTrip (TestFiles files) =
   counterexample "encode failed" $ case BP.encodeImage files of
@@ -258,6 +265,13 @@ dnsFakeResponse xid q
           question = drop 12 q
           answer = [0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 93, 184, 216, 34]
        in Just (hdr ++ question ++ answer)
+
+{- | 20B TCP header golden with the given dataOffset/flags byte: zero
+ports/seq/ack, SYN set, window max. (dataOffset 16 is unrepresentable: the
+field is 4 bits, so the 0xF0 hdrLen>len golden covers the oversized case.)
+-}
+tcpHdr :: Word8 -> [Word8]
+tcpHdr off = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, off, 0x02, 0xFF, 0xFF, 0, 0, 0, 0]
 
 -- VFS routing goldens (fake backends, no pages/QEMU) ---------------------------
 
@@ -911,6 +925,7 @@ shellCoverCmd Shell.CmdArpLs = Shell.cmdUsage Shell.CmdArpLs
 shellCoverCmd Shell.CmdNetDhcp = Shell.cmdUsage Shell.CmdNetDhcp
 shellCoverCmd (Shell.CmdDns name) = Shell.cmdUsage (Shell.CmdDns name)
 shellCoverCmd Shell.CmdDnsUsage = Shell.cmdUsage Shell.CmdDnsUsage
+shellCoverCmd (Shell.CmdTcp ip port txt) = Shell.cmdUsage (Shell.CmdTcp ip port txt)
 shellCoverCmd Shell.CmdNetUsage = Shell.cmdUsage Shell.CmdNetUsage
 shellCoverCmd (Shell.CmdConInit s) = Shell.cmdUsage (Shell.CmdConInit s)
 shellCoverCmd (Shell.CmdConStatus s) = Shell.cmdUsage (Shell.CmdConStatus s)
@@ -1098,6 +1113,9 @@ shellParseNet =
   , (["udpecho", "10.0.2.2", "7", "hi"], Just (Shell.CmdUdpEcho "10.0.2.2" "7" "hi"))
   , (["udpecho", "10.0.2.2", "7"], Just (Shell.CmdUdpEcho "10.0.2.2" "7" ""))
   , (["udpecho", "10.0.2.2"], Nothing)
+  , (["tcp", "10.0.2.2", "80", "hi"], Just (Shell.CmdTcp "10.0.2.2" "80" "hi"))
+  , (["tcp", "10.0.2.2", "80"], Just (Shell.CmdTcp "10.0.2.2" "80" ""))
+  , (["tcp", "10.0.2.2"], Nothing)
   , (["arp", "ls"], Just Shell.CmdArpLs)
   , (["arp"], Nothing)
   , (["dns", "example.com"], Just (Shell.CmdDns "example.com"))
@@ -1169,6 +1187,7 @@ main = do
       , checkQC "udp round-trip" (propUdpRoundTrip :: Word16 -> Word16 -> Property)
       , checkQC "icmp round-trip" (propIcmpRoundTrip :: Word16 -> Word16 -> Property)
       , checkQC "dns query/response round-trip" (propDnsRoundTrip :: Word16 -> Property)
+      , checkQC "tcp segment round-trip" (propTcpRoundTrip :: NT.Ipv4 -> NT.Ipv4 -> Stack.TcpSegment -> Property)
       , checkQC "blkpersist round-trip" (propBlkRoundTrip :: TestFiles -> Property)
       , -- Stack truncated goldens: Left, never ErrorCall
         assertLeft "eth empty" (Stack.decodeEthernet [])
@@ -1192,6 +1211,17 @@ main = do
       , assertLeft "dns bad char" (Stack.encodeDnsQuery 1 "bad_name")
       , check "dns query golden" (Stack.encodeDnsQuery 0x1234 "example.com" == Right [0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 7, 101, 120, 97, 109, 112, 108, 101, 3, 99, 111, 109, 0, 0x00, 0x01, 0x00, 0x01])
       , check "dns response golden" (case Stack.encodeDnsQuery 0x1234 "example.com" of Left _ -> False; Right q -> case dnsFakeResponse 0x1234 q of Nothing -> False; Just r -> Stack.decodeDnsResponse r == Right (Stack.DnsResponse 0x1234 (NT.Ipv4 93 184 216 34)))
+      , -- TCP S1 goldens (total decoder, never ErrorCall)
+        assertLeft "tcp empty" (Stack.decodeTcp [])
+      , assertLeft "tcp 19B short" (Stack.decodeTcp (replicate 19 0))
+      , assertLeft "tcp 20B bad dataoff" (Stack.decodeTcp (replicate 20 0))
+      , assertLeft "tcp dataoff 0" (Stack.decodeTcp (tcpHdr 0x00))
+      , assertLeft "tcp dataoff 4" (Stack.decodeTcp (tcpHdr 0x40))
+      , assertLeft "tcp hlen>len" (Stack.decodeTcp (tcpHdr 0xF0))
+      , check "tcp syn golden" (Stack.decodeTcp (tcpHdr 0x50) == Right (Stack.TcpSegment 0 0 0 0 0x02 0xFFFF []))
+      , check "tcp options skipped" (Stack.decodeTcp (tcpHdr 0x60 ++ [0x02, 0x04, 0x05, 0xB4] ++ [0x41]) == Right (Stack.TcpSegment 0 0 0 0 0x02 0xFFFF [0x41]))
+      , check "tcp trailing tolerated" (Stack.decodeTcp (Stack.encodeTcp (NT.Ipv4 10 0 2 15) (NT.Ipv4 10 0 2 2) (Stack.TcpSegment 1234 80 7 0 0x18 65535 [9, 8]) ++ [7]) == Right (Stack.TcpSegment 1234 80 7 0 0x18 65535 [9, 8, 7]))
+      , check "tcp odd payload round-trip" (Stack.decodeTcp (Stack.encodeTcp (NT.Ipv4 10 0 2 15) (NT.Ipv4 10 0 2 2) (Stack.TcpSegment 1 2 3 4 0x10 512 [1, 2, 3])) == Right (Stack.TcpSegment 1 2 3 4 0x10 512 [1, 2, 3]))
       , -- Types display goldens (total nibble render)
         check "showMac golden" (NT.showMac (NT.Mac 0 1 2 3 4 5) == "00:01:02:03:04:05")
       , check "showMac broadcast" (NT.showMac NT.macBroadcast == "ff:ff:ff:ff:ff:ff")
