@@ -10,6 +10,7 @@ thread ('init exit CODE' to UART+dmesg). Fail-closed 'init fail E' when
 missing/unparseable, so a boot without -initrd still reaches a shell.
 -}
 module Kernel.Init (
+  Pid1Outcome (..),
   launchPid1,
 )
 where
@@ -25,8 +26,14 @@ import Kernel.Shell.Format (toExecError)
 import Kernel.Userspace qualified as U
 import Kernel.Userspace.Loader qualified as ULdr
 
--- | Load + run /sbin/init, reap in the background.
-launchPid1 :: IO ()
+-- | Outcome of the pid1 launch: the live pid, or the fail-closed reason.
+data Pid1Outcome = Pid1Up U.Pid | Pid1Fail String
+  deriving (Eq, Show)
+
+{- | Load + run /sbin/init, reap in the background. Returns the outcome so
+'house_main' can gate the shell entry on it instead of ignoring it.
+-}
+launchPid1 :: IO Pid1Outcome
 launchPid1 = do
   rInit <- runH $ do
     mBytes <- FS.vfsRead FS.defaultNamespace "/sbin/init"
@@ -43,10 +50,11 @@ launchPid1 = do
     Left e -> do
       withCString ("initramfs: init fail " ++ e ++ "\n") c_uart_puts
       runH (Dmesg.dmesgLog ("initramfs: init fail " ++ e))
+      return (Pid1Fail e)
     Right n -> do
       withCString ("init pid " ++ show n ++ "\n") c_uart_puts
       _ <- forkSupervisedIO $ do
         code <- runH (U.waitPid (U.Pid n))
         withCString ("init exit " ++ show code ++ "\n") c_uart_puts
         runH (Dmesg.dmesgLog ("init exit " ++ show code))
-      return ()
+      return (Pid1Up (U.Pid n))

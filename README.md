@@ -120,14 +120,25 @@ Expect harnesses live under `scripts/qemu-*.exp`; the Make targets are their sta
 
 The aggregate `make check` gets clean firmware builds through its spike, IRQ, and House legs. Standalone focused checks generally reuse incremental artifacts. Clean `platform/aarch64` before manual platform builds, and also clean `kernel` before a manual House build.
 
-## Boot: kernel → pid1 → shell, initramfs (`-initrd`)
+## Boot: kernel → pid1 (+ EL0 sh) → shell, initramfs (`-initrd`)
 
-`house_main` is three stages: `Kernel.Boot.boot` mounts VFS/RamFS, inits
-dmesg, and unpacks the initrd; `Kernel.Init.launchPid1` runs EL0
-`/sbin/init` (`init pid N`, reaped as `init exit CODE`, fail-closed
-`init fail E` without `-initrd` so the shell still comes up);
-`Kernel.Shell.Loop.loop` runs the slim shell whose FS verbs
-(`ls/cat/echo/mkdir/rm/stat/write`) are thin `runElf /bin/*` wrappers.
+`house_main` stages `Kernel.Boot.boot` (mounts VFS/RamFS, inits dmesg,
+unpacks the initrd), then `Kernel.Init.launchPid1`, which loads EL0
+`/sbin/init` (`init pid N`, reaped in a forked thread as `init exit CODE`,
+fail-closed `initramfs: init fail E` when missing/unparseable, e.g. without
+`-initrd`). `launchPid1` returns its outcome and `house_main` branches on
+it: pid1 up runs the full `Kernel.Shell.Loop.loop` whose FS verbs
+(`ls/cat/echo/mkdir/rm/stat/write`) are thin `runElf /bin/*` wrappers;
+pid1 failure runs the `Kernel.Shell.Emergency.loop` fallback
+(`help`/`uname`/`dmesg` only) so the console stays responsive.
+
+Pid1 parenting lives at EL0, not in the kernel: `/sbin/init` forks and
+execs `/bin/sh`, waits for it, announces `init done`, and exits with the
+child's status (one-shot, no respawn). The kernel console shell is therefore
+pid1's sibling — a monitor/debugger next to the EL0 tree — not its child.
+With a console device attached (`virtio-con` + `con init`), the `sh$ `
+prompt comes from EL0 `sh`; without one its open fails closed (`sh: ENOENT`,
+exit 1) and init reaps that instead.
 
 QEMU `-initrd build/initramfs.cpio` supplies a cpio newc archive via
 `chosen/linux,initrd-start|end`, unpacked at boot into the default VFS
@@ -152,7 +163,8 @@ make house-initrd-check           # unpack + /sbin/init + manifest, hvf+tcg
 make house-pid1-check             # boot -> pid1 -> shell + EL0 coreutils, hvf+tcg
 ```
 
-After unpack, `/sbin/init` spawns (exit logged, shell never blocks) and
+After unpack, `/sbin/init` forks and execs `/bin/sh`, waits for it
+(`init done`, exit logged as `init exit CODE`), and
 `/etc/house-servers` registers `name path endpoint` lines (≤64,
 `#` comments) in `ns ls` and spawns each ELF as a `runElf` child.
 

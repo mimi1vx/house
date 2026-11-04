@@ -15,6 +15,7 @@ import Kernel.Driver.GIC qualified as DGIC
 import Kernel.Driver.IRQ qualified as DIRQ
 import Kernel.Init qualified as Init
 import Kernel.SMP qualified as SMP
+import Kernel.Shell.Emergency qualified as Emergency
 import Kernel.Shell.Foreign (c_uart_puts)
 import Kernel.Shell.Loop qualified as Loop
 
@@ -34,9 +35,14 @@ house_main = do
   withCString ("[house] irq: pre-dispatch ring drops=" ++ show ringDrops0 ++ "\n") c_uart_puts
   -- initramfs via QEMU -initrd: sole /bin/* source (see scripts/mk-userspace.sh)
   Boot.boot
-  Init.launchPid1
+  pid1 <- Init.launchPid1
   -- server manifest from initramfs: register + spawn EL0 servers
   Boot.spawnServers
   -- Link driver GIC/IRQ helpers into closure (probe-only track keeps them unused at runtime)
   _ <- runH (void (return (DGIC.enableSpi, DGIC.disableSpi, DIRQ.registerIrqForwarding)))
-  Loop.loop
+  -- Gate the console on the pid1 outcome: a live pid1 means the EL0
+  -- init owns its sh child, so the full shell runs as its sibling;
+  -- a failed pid1 falls back to the emergency shell.
+  case pid1 of
+    Init.Pid1Up _ -> Loop.loop
+    Init.Pid1Fail _ -> Emergency.loop

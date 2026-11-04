@@ -25,16 +25,20 @@ expect {
     eof { puts "\nFAIL: eof before initramfs marker"; exit 1 }
 }
 # EL0 output races the boot thread on SMP ("init up" may precede
-# "init pid"; either may precede the prompt): collect all three markers
+# "init pid"; either may precede the prompt): collect all markers
 # order-free, then re-sync with an empty line so straggler init output
-# ("init done"/"init exit 0") drains before the first command.
+# ("init done"/"init exit 1") drains before the first command.
+# "sh: ENOENT" here is pid1's own child (no `run` was sent): with no
+# console device attached the EL0 sh open fails closed and init reaps it.
 set saw_pid 0
 set saw_up 0
+set saw_sh 0
 set saw_prompt 0
-while {!$saw_pid || !$saw_up || !$saw_prompt} {
+while {!$saw_pid || !$saw_up || !$saw_sh || !$saw_prompt} {
     expect {
         -re "init pid (\[0-9\]+)" { puts "\nPASS: pid1 launched"; set saw_pid 1 }
         -re "init up" { puts "\nPASS: /sbin/init running"; set saw_up 1 }
+        -re "sh: ENOENT" { puts "\nPASS: pid1 spawned sh (no-device ENOENT)"; set saw_sh 1 }
         -re "> " { puts "\nPASS: saw prompt"; set saw_prompt 1 }
         timeout { puts "\nFAIL: boot marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
         eof { puts "\nFAIL: eof before boot markers"; exit 1 }
