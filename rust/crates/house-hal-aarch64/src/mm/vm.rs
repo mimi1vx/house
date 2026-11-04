@@ -1248,20 +1248,27 @@ mod tests {
             let mut l1 = Box::new(A512([0; 512]));
             let mut l2 = Box::new(A512([0; 512]));
             let mut l3 = Box::new(A512([0; 512]));
-            let l0p = l0.0.as_mut_ptr() as *mut u8;
-            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
-            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
-            *l2.0.as_mut_ptr().add(80) = (l3.0.as_mut_ptr() as u64) | 0x3;
+            // One retag per table: every access below derives from these
+            // bindings, so no later retag pops the root tag Miri tracks
+            // for `l0p` (a fresh as_mut_ptr per write invalidated it).
+            let l0w = l0.0.as_mut_ptr();
+            let l1w = l1.0.as_mut_ptr();
+            let l2w = l2.0.as_mut_ptr();
+            let l3w = l3.0.as_mut_ptr();
+            let l0p = l0w as *mut u8;
+            *l0w.add(0) = (l1w as u64) | 0x3;
+            *l1w.add(0) = (l2w as u64) | 0x3;
+            *l2w.add(80) = (l3w as u64) | 0x3;
             assert_eq!(driver_window_page(core::ptr::null_mut()), None);
             assert_eq!(driver_window_page(l0p), None, "no leaf yet");
-            *l3.0.as_mut_ptr().add(0) = mmio_leaf_desc(0x0a001000);
+            *l3w.add(0) = mmio_leaf_desc(0x0a001000);
             assert_eq!(driver_window_page(l0p), Some(0x0a001000));
             // A second Device leaf anywhere is malformed: fail closed.
-            *l3.0.as_mut_ptr().add(1) = mmio_leaf_desc(0x0a002000);
+            *l3w.add(1) = mmio_leaf_desc(0x0a002000);
             assert_eq!(driver_window_page(l0p), None, "two leaves refuse");
-            *l3.0.as_mut_ptr().add(1) = 0;
+            *l3w.add(1) = 0;
             // A Normal leaf in place of the Device leaf is not a window.
-            *l3.0.as_mut_ptr().add(0) = 0x0a001000 | 0x401 | (1 << 10);
+            *l3w.add(0) = 0x0a001000 | 0x401 | (1 << 10);
             assert_eq!(driver_window_page(l0p), None, "Normal leaf refused");
         }
     }
