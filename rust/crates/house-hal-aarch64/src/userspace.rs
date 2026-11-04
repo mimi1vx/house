@@ -977,7 +977,12 @@ unsafe fn fault_locked(pdir: *mut u8, far: u64) -> i32 {
             | (0 << 2)
             | PTE_AP_RW;
         *l3.add(i3) = desc;
+        // Host tests run at EL0, where `tlbi` traps (SIGILL under Linux);
+        // the guest install path runs EL1 and keeps the invalidate.
+        #[cfg(not(test))]
         core::arch::asm!("dsb ishst; tlbi vae1is, {0}; dsb ish; isb", in(reg) va >> 12, options(nostack, preserves_flags));
+        #[cfg(test)]
+        core::arch::asm!("dsb ishst; dsb ish; isb", options(nostack, preserves_flags));
         BUDGET_LOCK.lock();
         budget_inc(pdir as u64);
         BUDGET_LOCK.unlock();
