@@ -2,7 +2,8 @@ module H.Utils where
 
 import Data.Bits
 import Data.Word (Word32, Word64)
-import H.AdHocMem (Ptr, absolutePtr64, alignPtr, minusPtr, nullPtr)
+import Foreign.Ptr (IntPtr, intPtrToPtr, ptrToIntPtr)
+import H.AdHocMem (Ptr, alignPtr, minusPtr)
 
 setBit' :: (Bits a) => Int -> a -> a
 setBit' = flip setBit
@@ -18,19 +19,18 @@ condBit True = setBit'
 condBit False = clearBit'
 
 ptrToWord32 :: Ptr a -> Word32
-ptrToWord32 p =
-  fromIntegral (p `minusPtr` nullPtr) -- hack assuming nullPtr = 0
+ptrToWord32 p = fromIntegral (ptrToIntPtr p)
 
 ptrFromWord32 :: Word32 -> Ptr a
-ptrFromWord32 w = absolutePtr64 (fromIntegral w) -- hack assuming nullPtr = 0
+ptrFromWord32 w = intPtrToPtr (fromIntegral w :: IntPtr)
 
 ptrToWord64 :: Ptr a -> Word64
-ptrToWord64 p = fromIntegral (p `minusPtr` nullPtr)
+ptrToWord64 p = fromIntegral (ptrToIntPtr p)
 
 ptrFromWord64 :: Word64 -> Ptr a
-ptrFromWord64 = absolutePtr64
+ptrFromWord64 w = intPtrToPtr (fromIntegral w :: IntPtr)
 
--- Word64 aliases for the aarch64 port (keep Word32 for i386 compat)
+-- Word64 aliases for the aarch64 port (Word32 variants cover 32-bit register windows)
 ptrToWord :: Ptr a -> Word64
 ptrToWord = ptrToWord64
 
