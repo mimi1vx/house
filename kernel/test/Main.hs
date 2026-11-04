@@ -2050,6 +2050,28 @@ main = do
               [("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1])]
           )
       , assertLinkLeft
+          "link weak reference with two providers rejected"
+          ( linkWith
+              elfLinkMain
+              ( Right
+                  . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0]
+                  . setMainSymbolTable [weakReference "strlen"]
+                  . setMainNeeded ["liba.so.0", "libb.so.0"]
+              )
+              [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [definedSymbol "strlen" 0x100 1])
+              , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" [] [definedSymbol "strlen" 0x100 1])
+              ]
+          )
+      , assertLinkLeft
+          "link weak duplicate export rejected"
+          ( linkWith
+              elfLinkMain
+              (Right . setMainRelocations [eagerBinding 0x338 1026 1 "strlen" 0] . setMainNeeded ["liba.so.0", "libb.so.0"])
+              [ ("liba.so.0", elfLinkDep, validDependency "liba.so.0" [] [weakSymbol "strlen"])
+              , ("libb.so.0", elfLinkDep, validDependency "libb.so.0" [] [weakSymbol "strlen"])
+              ]
+          )
+      , assertLinkLeft
           "link hidden visibility rejected"
           ( linkWith
               elfLinkMain

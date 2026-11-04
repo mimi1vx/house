@@ -410,10 +410,13 @@ buildExportScope = foldM addObject Map.empty
                   address <- exportedAddress planned symbol
                   when (Map.member name scope) (badLink ("duplicate export " ++ name))
                   pure (Map.insert name (ExportedSymbol (plannedName planned) address) scope)
-    -- A weak or protected definition still leaves its name with exactly one
-    -- provider, because the duplicate-export refusal above rejects any name
-    -- a second object defines. Choosing between providers is what stays
-    -- unimplemented, so a weak or non-default *reference* is refused.
+    -- house-q0g.9: a weak or protected definition still leaves its name
+    -- with exactly one provider, because the duplicate-export refusal above
+    -- rejects any name a second object defines. Choosing between providers
+    -- is weak-reference semantics and stays unimplemented: an ambiguous
+    -- weak reference resolves Left, never a pick, so a weak or non-default
+    -- \*reference* is refused. SHN_COMMON and duplicate exports stay refused
+    -- for the same fail-closed reason.
     admissibleBinding True symbol = symbolBinding symbol `elem` [stbGlobal, stbWeak]
     admissibleBinding False symbol = symbolBinding symbol == stbGlobal
     admissibleVisibility True symbol = symbolVisibility symbol `elem` [stvDefault, stvProtected]
