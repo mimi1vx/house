@@ -936,6 +936,64 @@ pub unsafe extern "C" fn house_el0_park_kill(
     }
 }
 
+// S3 (house-oz9.11): test-only fault trigger for the driver fault-injection
+// gate (`driver fault` shell verb). Parks a genuine 0x1D FAULT_KILL against
+// an enrolled driver root's EL0 slot using the same slot protocol the trap
+// side executes (`house_el0_park_kill` stores: req, page-aligned fault VA,
+// zeroed frame, parked, dsb + wakeup) — everything downstream (the fault
+// watch poll, pdir-keyed attribution, reap-only, re-arm, endpoint survival)
+// is the real supervised path. Only the trigger is synthetic: no EL0 code
+// runs under driver roots (AP stays EL1-only, no MMIO svc), so a genuine
+// EL0 abort under a driver TTBR0 is impossible without the S2-deferred
+// live-execution machinery.
+//
+// Fail-closed refusals (0): null/misaligned pdir, a pdir that is not an
+// enrolled fault domain (the trap-side attribution predicate itself), a
+// root whose window cannot be read back as exactly one Device page, a VA on
+// the domain's own window page (not hostile — the probe injects only
+// hostile VAs), or a domain with no EL0 slot (unsupervised — no watch
+// would reap the park). No new svc numbers; trap-side needs no new park
+// predicates.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_driver_inject_fault(pdir: *mut u8, va: u64) -> i32 {
+    use crate::mm::vm::{driver_window_page, is_driver_root};
+    if pdir.is_null() || (pdir as usize & 4095) != 0 {
+        return 0;
+    }
+    unsafe {
+        // SAFETY: EL1 test context; lock-free reads, same discipline as the
+        // trap-side enrollment check.
+        if !is_driver_root(pdir) {
+            return 0;
+        }
+        let page = va & !4095;
+        match driver_window_page(pdir) {
+            Some(win) if win == page => return 0,
+            Some(_) => {}
+            None => return 0,
+        }
+        let key = pdir as u64;
+        for i in 0..EL0_N {
+            if EL0_TABLE[i].pdir == key {
+                // SAFETY: slot stores are single-copy word writes, published
+                // before `parked` like the trap-side parks; the KILL path
+                // never resumes the frame, so a zeroed save is sufficient.
+                EL0_TABLE[i].save = [0; 112];
+                EL0_TABLE[i].elr = 0;
+                EL0_TABLE[i].sp_el0 = 0;
+                EL0_TABLE[i].req = EL0_REQ_FAULT_KILL;
+                EL0_TABLE[i].fault_va = page;
+                EL0_TABLE[i].parked = 1;
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+                poke_park();
+                core::arch::asm!("sev", options(nostack, preserves_flags));
+                return 1;
+            }
+        }
+        0
+    }
+}
+
 // SAFETY: EL1 thread context (Haskell park loop); returns the parked fault
 // VA (page-aligned) for the pid, 0 when the pid holds no FAULT/FAULT_KILL
 // request. VA 0 is never a parked fault (user window starts at 0x01000000).
@@ -1550,6 +1608,63 @@ mod tests {
             );
             assert_eq!(validate_sock(HOUSE_SVC_SOCK_SEND, 0x01000000, 8, 0), -14);
             assert_eq!(validate_sock(HOUSE_SVC_SOCK_RECV, 0x1000, 8, 0), -14);
+        }
+    }
+
+    // S3 (house-oz9.11): the fault probe parks a genuine 0x1D FAULT_KILL
+    // with the hostile VA against an enrolled, supervised driver root, and
+    // refuses everything else fail-closed. Mirrors the userspace pager-test
+    // chain setup (Box L0/L1/L2/L3, window Device leaf at L2[80]/L3[0]).
+    #[test]
+    fn driver_inject_parks_kill_for_enrolled_domain() {
+        use crate::mm::vm::{driver_unmark, house_vm_narrow_driver_root, mmio_leaf_desc};
+        #[repr(align(4096))]
+        struct A512([u64; 512]);
+        unsafe {
+            let mut l0 = Box::new(A512([0; 512]));
+            let mut l1 = Box::new(A512([0; 512]));
+            let mut l2 = Box::new(A512([0; 512]));
+            let mut l3 = Box::new(A512([0; 512]));
+            let l0p = l0.0.as_mut_ptr() as *mut u8;
+            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
+            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            *l2.0.as_mut_ptr().add(80) = (l3.0.as_mut_ptr() as u64) | 0x3;
+            *l3.0.as_mut_ptr().add(0) = mmio_leaf_desc(0x0a000000);
+            // Unenrolled root: refused (attribution predicate), bad pointers
+            // refused, and nothing parked.
+            assert_eq!(house_driver_inject_fault(l0p, 0x0a001000), 0);
+            assert_eq!(
+                house_driver_inject_fault(core::ptr::null_mut(), 0x0a001000),
+                0
+            );
+            assert_eq!(house_driver_inject_fault(0x1234 as *mut u8, 0x0a001000), 0);
+            assert_eq!(house_el0_register(l0p), 0);
+            assert_eq!(house_vm_narrow_driver_root(l0p), 1);
+            // Enrolled but unsupervised (slot retracted): refused.
+            house_el0_unregister(l0p);
+            assert_eq!(house_driver_inject_fault(l0p, 0x0a001000), 0);
+            assert_eq!(house_el0_register(l0p), 0);
+            // Own window page is not hostile: refused, nothing parked.
+            assert_eq!(house_driver_inject_fault(l0p, 0x0a000010), 0);
+            assert_eq!(house_el0_parked(l0p), 0);
+            // Hostile VAs (neighbour-window offset, below-window VA, RAM
+            // DMA stand-in) park a genuine 0x1D with the hostile page.
+            for va in [0x0a001000u64, 0x08000000, 0x40000000] {
+                assert_eq!(house_driver_inject_fault(l0p, va), 1);
+                assert_eq!(house_el0_parked(l0p), 1);
+                let mut req = 0u32;
+                let mut args = [0u64; 4];
+                assert_eq!(house_el0_take_request(l0p, &mut req, args.as_mut_ptr()), 1);
+                assert_eq!(req, EL0_REQ_FAULT_KILL);
+                assert_eq!(house_el0_fault_addr(l0p), va & !4095);
+                // Drain like the fault watch's reap would before the next
+                // case (unregister clears the slot; re-register re-arms).
+                house_el0_unregister(l0p);
+                assert_eq!(house_el0_parked(l0p), 0);
+                assert_eq!(house_el0_register(l0p), 0);
+            }
+            house_el0_unregister(l0p);
+            driver_unmark(l0p);
         }
     }
 }

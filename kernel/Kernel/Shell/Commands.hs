@@ -61,6 +61,8 @@ data Cmd
   | CmdLsdev
   | CmdDmesg
   | CmdDmesgClear
+  | CmdDriverFault String String
+  | CmdDriverUsage
   | CmdVirtioScan
   | CmdVirtioInit String
   | CmdVirtioNotify String
@@ -160,6 +162,8 @@ allCmds =
   , CmdLsdev
   , CmdDmesg
   , CmdDmesgClear
+  , CmdDriverFault "virtio-blk0" "offset"
+  , CmdDriverUsage
   , CmdVirtioScan
   , CmdVirtioInit "0"
   , CmdVirtioNotify "0"
@@ -268,6 +272,7 @@ helpTable =
   , ("       ", "forktest", "EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)")
   , ("       ", "loaderrefs [path]", "launch two dynamic images (default /bin/hello-dyn), verify finalized DSO page sharing, then drain refs")
   , ("       ", "throwtest", "throw from a handler; the dispatch catch must log it and answer the next command")
+  , ("       ", "driver fault <name> offset|unmapped|queuepa", "fault-injection probe: park 0x1D FAULT_KILL against the driver's fault domain (hostile MMIO offset | unmapped VA | tampered queue-PA stand-in); the watch reaps only that driver and re-arms its root")
   ]
 
 -- | Total row lookup into 'helpTable'; unknown rows render as blank.
@@ -316,6 +321,8 @@ cmdUsage cmd = case cmd of
   CmdLsdev -> tableRow 26
   CmdDmesg -> tableRow 26
   CmdDmesgClear -> tableRow 26
+  CmdDriverFault _ _ -> tableRow 40
+  CmdDriverUsage -> tableRow 40
   CmdVirtioScan -> tableRow 27
   CmdVirtioInit _ -> tableRow 27
   CmdVirtioNotify _ -> tableRow 27
@@ -439,6 +446,9 @@ parseCmd ws = case ws of
         [] -> Just CmdIpcUsage
         _ -> Nothing
     | verb == "lsdev", null args -> Just CmdLsdev
+    | verb == "driver" -> case args of
+        [a, n, c] | a == "fault" -> Just (CmdDriverFault n c)
+        _ -> Just CmdDriverUsage
     | verb == "dmesg" -> case args of
         [] -> Just CmdDmesg
         [a] | a == "clear" -> Just CmdDmesgClear

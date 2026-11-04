@@ -900,6 +900,8 @@ shellCoverCmd Shell.CmdIpcUsage = Shell.cmdUsage Shell.CmdIpcUsage
 shellCoverCmd Shell.CmdLsdev = Shell.cmdUsage Shell.CmdLsdev
 shellCoverCmd Shell.CmdDmesg = Shell.cmdUsage Shell.CmdDmesg
 shellCoverCmd Shell.CmdDmesgClear = Shell.cmdUsage Shell.CmdDmesgClear
+shellCoverCmd (Shell.CmdDriverFault n c) = Shell.cmdUsage (Shell.CmdDriverFault n c)
+shellCoverCmd Shell.CmdDriverUsage = Shell.cmdUsage Shell.CmdDriverUsage
 shellCoverCmd Shell.CmdVirtioScan = Shell.cmdUsage Shell.CmdVirtioScan
 shellCoverCmd (Shell.CmdVirtioInit s) = Shell.cmdUsage (Shell.CmdVirtioInit s)
 shellCoverCmd (Shell.CmdVirtioNotify s) = Shell.cmdUsage (Shell.CmdVirtioNotify s)
@@ -1069,6 +1071,13 @@ shellParseIpc =
   , (["dmesg"], Just Shell.CmdDmesg)
   , (["dmesg", "clear"], Just Shell.CmdDmesgClear)
   , (["dmesg", "bogus"], Nothing)
+  , (["driver", "fault", "virtio-blk0", "offset"], Just (Shell.CmdDriverFault "virtio-blk0" "offset"))
+  , (["driver", "fault", "virtio-blk0", "unmapped"], Just (Shell.CmdDriverFault "virtio-blk0" "unmapped"))
+  , (["driver", "fault", "virtio-blk0", "queuepa"], Just (Shell.CmdDriverFault "virtio-blk0" "queuepa"))
+  , (["driver"], Just Shell.CmdDriverUsage)
+  , (["driver", "fault"], Just Shell.CmdDriverUsage)
+  , (["driver", "fault", "virtio-blk0"], Just Shell.CmdDriverUsage)
+  , (["driver", "bogus"], Just Shell.CmdDriverUsage)
   ]
 
 shellParseVirtioBlk :: [([String], Maybe Shell.Cmd)]
@@ -1818,6 +1827,8 @@ main = do
       , checkIO "driver teardown frees its root" driverTeardownFreesRootGolden
       , checkIO "driver fault reaps only that driver" driverFaultReapsOnlyGolden
       , checkIO "supervised endpoint restarts after death" driverEndpointRestartGolden
+      , check "driver probe hostile VAs per class" driverProbeVAGolden
+      , checkIO "driver inject refused on host stub" driverInjectRefusedGolden
       , checkIO "wedged server yields WouldBlock" wedgedGolden
       , checkIO "aborted grant call returns its page" grantAbortGolden
       , check "svc mask full allows all" svcMaskFullGolden
@@ -2486,6 +2497,47 @@ driverEndpointRestartGolden = do
       n <- HM.liftIO (readIORef hits)
       HM.liftIO (writeIORef hits (n + 1))
       if n < 2 then Prelude.error ("boom " ++ show n) else return (Right (IT.Message 7 [] Nothing))
+
+{- | S3 (house-oz9.11): the probe classifier names exactly the hostile VA
+per class (neighbour-window offset past the window, below-window VA, RAM
+DMA stand-in) and refuses bad slots and unknown classes totally.
+-}
+driverProbeVAGolden :: Bool
+driverProbeVAGolden =
+  DrvReg.driverProbeVA 0 "offset" == Just 0x0a001000
+    && DrvReg.driverProbeVA 31 "offset" == Just (0x0a000000 + 31 * 0x200 + 0x1000)
+    && DrvReg.driverProbeVA 0 "unmapped" == Just 0x08000000
+    && DrvReg.driverProbeVA 17 "unmapped" == Just 0x08000000
+    && DrvReg.driverProbeVA 0 "queuepa" == Just 0x40000000
+    && DrvReg.driverProbeVA 31 "queuepa" == Just 0x40000000
+    && all
+      isNothing
+      [ DrvReg.driverProbeVA (-1) "offset"
+      , DrvReg.driverProbeVA 32 "offset"
+      , DrvReg.driverProbeVA 0 "bogus"
+      , DrvReg.driverProbeVA 0 ""
+      ]
+
+{- | S3 (house-oz9.11): the inject wrapper fails closed on the host stub
+(which refuses every park): no domain, and a registered domain alike,
+both answer 'False' — the verb never claims a queued kill it cannot park.
+-}
+driverInjectRefusedGolden :: IO Bool
+driverInjectRefusedGolden = do
+  r <- Timeout.timeout 10000000 $ do
+    noDomain <- HM.runH (DrvReg.injectDriverFault "s3-ghost" 0x0a001000)
+    ep <- HM.runH Endpoint.newEndpoint
+    _ <- HM.runH (DrvReg.registerDriver "s3-stubbed" ep Nothing VirtioMMIO [] [ep])
+    mpm <- HM.runH VM.allocPageMap
+    withRoot <- case mpm of
+      Nothing -> return False
+      Just pm -> do
+        _ <- HM.runH (DrvReg.registerDriverRoot "s3-stubbed" pm 7 3)
+        refused <- HM.runH (DrvReg.injectDriverFault "s3-stubbed" 0x0a001000)
+        _ <- HM.runH (DrvReg.unregisterDriver "s3-stubbed")
+        return refused
+    return (not noDomain && not withRoot)
+  return (r == Just True)
 
 driverTwoThreadGolden :: IO Bool
 driverTwoThreadGolden = do

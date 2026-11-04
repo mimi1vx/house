@@ -231,9 +231,14 @@ house-ipc-check: house-build initrd
 	expect scripts/qemu-ipc.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
 
 # Driver framework (Track 2): registry on IPC + dmesg ring + SPI + virtio-MMIO probe 0x0a000000+i*0x200
+# S3 (house-oz9.11): boots a virtio-blk device so `blk init` owns a real
+# narrowed+supervised fault domain, then the harness drives the
+# fault-injection stanza (bad MMIO offset / unmapped VA / queue-PA stand-in
+# each end in kill+restart, never in silent mapping of another window).
 house-driver-check: house-build initrd
-	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 hvf $(SPIKE_MEM) $(SMP_N)
-	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 30 tcg $(SPIKE_MEM) $(SMP_N)
+	qemu-img create -f raw /tmp/house-driver.img 64M
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house-driver.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
+	expect scripts/qemu-driver.exp $(SPIKE_DIR)/build/house.bin 45 tcg $(SPIKE_MEM) $(SMP_N) -- -drive if=none,file=/tmp/house-driver.img,format=raw,id=hd0 -device virtio-blk-device,drive=hd0
 
 # Virtio-MMIO transport (Track 3): device-agnostic split virtqueue, FEATURES_OK VIRTIO_F_VERSION_1|RING_F_EVENT_IDX, dc cvac/dsb, IRQ->Endpoint
 house-virtio-transport-check: house-build initrd

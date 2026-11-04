@@ -662,6 +662,58 @@ pub(crate) fn driver_unmark(pdir: *mut u8) {
     }
 }
 
+/// Read back the single Device window page mapped in a narrowed driver root.
+///
+/// Walks L0[0] -> L1[0] -> every L2 table link -> L3 Device leaves and
+/// returns the mapped page when there is exactly one. `None` on any other
+/// shape (no leaf, several leaves, malformed chain): the caller fails
+/// closed. Lock-free reads: a narrowed root's tables are immutable (narrow
+/// runs once before install; rebuild replaces the entry, never the tables).
+/// S3 (house-oz9.11): the fault probe uses this to tell an in-window VA
+/// (same page — not hostile, refused) from a hostile one, reading the actual
+/// root instead of recomputing the slot window.
+pub(crate) fn driver_window_page(pdir: *mut u8) -> Option<u64> {
+    if pdir.is_null() || (pdir as usize & 4095) != 0 {
+        return None;
+    }
+    unsafe {
+        // SAFETY: caller guarantees a page-aligned root; reads only, masked.
+        let l0 = pdir as *mut u64;
+        let d0 = *l0.add(0);
+        if d0 & PTE_VALID == 0 || d0 & PTE_TABLE == 0 {
+            return None;
+        }
+        let l1 = (d0 & !0xFFF) as *mut u64;
+        let d1 = *l1.add(0);
+        if d1 & PTE_VALID == 0 || d1 & PTE_TABLE == 0 {
+            return None;
+        }
+        let l2 = (d1 & !0xFFF) as *mut u64;
+        let mut found: Option<u64> = None;
+        for i in 0..512 {
+            let d2 = *l2.add(i);
+            if d2 & PTE_VALID == 0 || d2 & PTE_TABLE == 0 {
+                continue;
+            }
+            let l3 = (d2 & !0xFFF) as *mut u64;
+            for j in 0..512 {
+                let d3 = *l3.add(j);
+                if d3 & PTE_VALID == 0 || !is_mmio_desc(d3) {
+                    continue;
+                }
+                if found.is_some() {
+                    return None;
+                }
+                // Output address only: clear VALID/TABLE in the low
+                // bits and UXN/PXN/AttrIdx above (leaf descriptors
+                // carry them; the page identity is bits [47:12]).
+                found = Some(d3 & 0x0000FFFFFFFFF000);
+            }
+        }
+        found
+    }
+}
+
 /// Validate the narrow shape without writing: `Ok(l1, l2)` when L0[0] and
 /// L1[0] are tables and the UART/GIC slots hold nothing but clearable Device
 /// blocks. Pure table reads: the caller holds `VM_LOCK`.
@@ -1180,6 +1232,37 @@ mod tests {
             driver_unmark(p);
             assert!(!is_driver_root(p));
             driver_unmark(p);
+        }
+    }
+
+    // S3 (house-oz9.11): the window readback names exactly the mapped
+    // Device page from the actual root — the fault probe's in-window
+    // refusal rests on this, not on recomputed slot arithmetic.
+    #[test]
+    fn driver_window_page_reads_single_device_leaf() {
+        use super::{driver_window_page, mmio_leaf_desc};
+        #[repr(align(4096))]
+        struct A512([u64; 512]);
+        unsafe {
+            let mut l0 = Box::new(A512([0; 512]));
+            let mut l1 = Box::new(A512([0; 512]));
+            let mut l2 = Box::new(A512([0; 512]));
+            let mut l3 = Box::new(A512([0; 512]));
+            let l0p = l0.0.as_mut_ptr() as *mut u8;
+            *l0.0.as_mut_ptr().add(0) = (l1.0.as_mut_ptr() as u64) | 0x3;
+            *l1.0.as_mut_ptr().add(0) = (l2.0.as_mut_ptr() as u64) | 0x3;
+            *l2.0.as_mut_ptr().add(80) = (l3.0.as_mut_ptr() as u64) | 0x3;
+            assert_eq!(driver_window_page(core::ptr::null_mut()), None);
+            assert_eq!(driver_window_page(l0p), None, "no leaf yet");
+            *l3.0.as_mut_ptr().add(0) = mmio_leaf_desc(0x0a001000);
+            assert_eq!(driver_window_page(l0p), Some(0x0a001000));
+            // A second Device leaf anywhere is malformed: fail closed.
+            *l3.0.as_mut_ptr().add(1) = mmio_leaf_desc(0x0a002000);
+            assert_eq!(driver_window_page(l0p), None, "two leaves refuse");
+            *l3.0.as_mut_ptr().add(1) = 0;
+            // A Normal leaf in place of the Device leaf is not a window.
+            *l3.0.as_mut_ptr().add(0) = 0x0a001000 | 0x401 | (1 << 10);
+            assert_eq!(driver_window_page(l0p), None, "Normal leaf refused");
         }
     }
 }

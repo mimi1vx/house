@@ -134,6 +134,7 @@ house_current_thr
 house_detect_early
 house_detect_late
 house_dir_should_park
+house_driver_inject_fault
 house_el0_clone_slot
 house_el0_exit_status
 house_el0_fault_addr

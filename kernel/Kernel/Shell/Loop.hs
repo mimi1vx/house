@@ -15,14 +15,14 @@ module Kernel.Shell.Loop (
 )
 where
 
-import Control.Concurrent (killThread)
+import Control.Concurrent (killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, catch, throwIO)
 import Control.Monad (forM_, when)
 import Data.Bits (shiftL, shiftR, (.&.))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
-import Data.List (isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Maybe (isNothing)
 import Data.Word (Word8)
 import Foreign.C.String (withCString)
@@ -148,6 +148,8 @@ loop = do
       Just CmdLsdev -> handleLsdev
       Just CmdDmesg -> handleDmesg
       Just CmdDmesgClear -> handleDmesgClear
+      Just (CmdDriverFault name cls) -> handleDriverFault name cls
+      Just CmdDriverUsage -> withCString "usage: driver fault <name> offset|unmapped|queuepa\n" c_uart_puts
       Just CmdVirtioScan -> handleVirtioScan
       Just (CmdVirtioInit s) -> handleVirtioInit s
       Just (CmdVirtioNotify s) -> handleVirtioNotify s
@@ -382,6 +384,39 @@ loop = do
     handleDmesgClear = do
       _ <- runH Dmesg.dmesgClear
       withCString "cleared\n" c_uart_puts
+    -- S3 (house-oz9.11): fault-injection probe. Resolves the driver's
+    -- recorded fault domain, maps the case to its hostile VA (pure,
+    -- host-tested), and parks a genuine 0x1D FAULT_KILL through the real
+    -- slot protocol. The fault watch then attributes (pdir-keyed), reaps
+    -- only that driver, and re-arms a fresh narrowed root; the bounded
+    -- wait below requires both the kill and the reinstall lines so a kill
+    -- without re-arm (or a neighbour's lines) cannot pass.
+    handleDriverFault name cls = do
+      mRoot <- runH (DrvReg.lookupDriverRoot name)
+      case mRoot of
+        Nothing -> withCString ("driver fault: no fault domain for " ++ name ++ "\n") c_uart_puts
+        Just (_, _, slot) -> case DrvReg.driverProbeVA slot cls of
+          Nothing -> withCString "usage: driver fault <name> offset|unmapped|queuepa\n" c_uart_puts
+          Just va -> do
+            ok <- runH (DrvReg.injectDriverFault name va)
+            if not ok
+              then withCString ("driver fault: refused " ++ cls ++ " for " ++ name ++ "\n") c_uart_puts
+              else do
+                restarted <- waitDriverRestart name
+                if restarted
+                  then withCString ("driver fault " ++ cls ++ " ok kill+restart\n") c_uart_puts
+                  else withCString ("driver fault: no restart for " ++ name ++ "\n") c_uart_puts
+    waitDriverRestart name = poll (100 :: Int)
+      where
+        poll 0 = return False
+        poll n = do
+          logs <- runH Dmesg.dmesgRead
+          if ("driver fault kill " ++ name ++ " va=") `anyInfix` logs && ("driver root reinstalled: " ++ name ++ " ") `anyInfix` logs
+            then return True
+            else do
+              threadDelay 50000
+              poll (n - 1)
+        anyInfix sub = any (sub `isInfixOf`)
     handleVirtioScan = do
       infos <- runH VProbe.virtioScan
       let fmt i =

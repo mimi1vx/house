@@ -19,6 +19,8 @@ module Kernel.Driver.Registry (
   installDriverRoot,
   reapAndRestartDriver,
   superviseDriverEndpoint,
+  driverProbeVA,
+  injectDriverFault,
 )
 where
 
@@ -238,6 +240,7 @@ foreign import ccall unsafe "house_el0_parked" c_el0_parked :: Ptr Word64 -> IO 
 foreign import ccall unsafe "house_el0_take_request" c_el0_take :: Ptr Word64 -> Ptr Word32 -> Ptr Word64 -> IO CInt
 foreign import ccall unsafe "house_el0_fault_addr" c_el0_fault_addr :: Ptr Word64 -> IO Word64
 foreign import ccall unsafe "house_resume_el0" c_resume_el0 :: Ptr Word64 -> Word64 -> Word64 -> IO CInt
+foreign import ccall unsafe "house_driver_inject_fault" c_driver_inject_fault :: Ptr Word64 -> Word64 -> IO CInt
 
 {- | Drop a fresh root that was never recorded: retract the EL0 slot, release,
 free tables. Every 'buildDriverRoot' failure path funnels here, so the S1
@@ -465,3 +468,48 @@ superviseDriverEndpoint name ep handler = HC.forkSupervisedIO (loop 0)
             runH (threadDelay 50000)
             loop (n + 1)
         Right () -> return ()
+
+{- | S3 (house-oz9.11): hostile VA per injection class for the
+'driver fault' gate. Each value is hostile to the named domain (unmapped
+in its narrowed root, off its own window page) and stands in for one
+inside-the-sandbox threat class:
+
+* @offset@: a bad MMIO offset past the window (@winBase + 0x1000@ — always
+  off the domain's own 4K page, and for slots 0-23 inside another window's
+  page). The 4K granule cannot exclude same-page neighbours by translation
+  (S1\/S2 residual); the gate proves the cross-window case ends in
+  kill+restart, never in silent mapping of another window.
+* @unmapped@: a VA below the window region (@0x08000000@) — a pure
+  translation fault under the domain.
+* @queuepa@: an MMIO-region-external DMA stand-in (@0x40000000@, RAM — where
+  a tampered queue PA would point) — unmapped in the domain, so programming
+  it faults instead of aliasing RAM into the allowlist window.
+
+Total: 'Nothing' for a bad slot or an unknown class (the verb answers
+usage, never injects).
+-}
+driverProbeVA :: Int -> String -> Maybe Word64
+driverProbeVA slot cls
+  | slot < 0 || slot > 31 = Nothing
+  | cls == "offset" = Just (winBase + 0x1000)
+  | cls == "unmapped" = Just 0x08000000
+  | cls == "queuepa" = Just 0x40000000
+  | otherwise = Nothing
+  where
+    winBase = 0x0a000000 + fromIntegral slot * 0x200
+
+{- | S3 (house-oz9.11): park a 0x1D FAULT_KILL against the named driver's
+recorded fault domain. 'False' when there is no domain (rootless driver),
+or when the HAL refuses the VA fail-closed (unenrolled root, in-window
+VA, unsupervised domain — the host stub refuses everything). 'True' means
+the park is queued for the fault watch: attribution, reap-only, and
+re-arm run the real supervised path from here.
+-}
+injectDriverFault :: String -> Word64 -> H Bool
+injectDriverFault name va = do
+  mRoot <- lookupDriverRoot name
+  case mRoot of
+    Nothing -> return False
+    Just (pm, _, _) -> do
+      rc <- liftIO (c_driver_inject_fault (VM.fromPageMap pm) va)
+      return (rc == 1)

@@ -7,13 +7,23 @@ set timeout [expr {[lindex $argv 1] > 0 ? [lindex $argv 1] : 30}]
 set accel [lindex $argv 2]
 set mem [lindex $argv 3]
 set smp [lindex $argv 4]
+set qemu_extra [lrange $argv 5 end]
 if {$accel eq ""} { set accel hvf }
 if {$mem eq ""} { set mem 4G }
 if {$smp eq ""} { set smp 2 }
 log_user 1
 source [file join [file dirname [info script]] house.exp]
-spawn qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 \
-    -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio
+# Plain `-M virt` on purpose (same shape as qemu-virtio-blk.exp): the guest
+# probes all 32 virtio-mmio transports, so the blk device lands on the last
+# free transport and its slot is discovered from `virtio scan`, not hardcoded.
+# force-legacy=false: modern virtio, else queue setup fails with legacy mode.
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
+foreach a $qemu_extra {
+    if {$a eq "--"} { continue }
+    append cmd " $a"
+}
+puts "SPAWN: $cmd"
+eval spawn $cmd
 expect {
     -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
     timeout { puts "\nFAIL: welcome timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
@@ -82,6 +92,62 @@ expect {
     timeout { puts "\nFAIL: ipc ping timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
 }
 house_prompt "prompt after ipc ping"
+# S3 (house-oz9.11) fault-injection stanza: a real blk driver owns a
+# narrowed+supervised fault domain; each hostile class (bad MMIO offset,
+# unmapped VA, tampered queue-PA stand-in) is parked as a genuine 0x1D
+# FAULT_KILL through the real slot protocol, and the supervised path must
+# reap only that driver and re-arm its root (kill + reinstall in dmesg,
+# endpoint alive afterwards).
+send "virtio scan\r"
+set blkSlot ""
+expect {
+    -re {virtio slot (\d+): device_id=2} { set blkSlot $expect_out(1,string); puts "\nPASS: blk device at slot $blkSlot" }
+    timeout { puts "\nFAIL: no blk device in scan (driver fault needs -device)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+house_prompt "prompt after blk slot scan"
+send "blk init $blkSlot\r"
+expect {
+    -re {ok capacity=[1-9][0-9]* sectors} { puts "\nPASS: blk init $blkSlot" }
+    timeout { puts "\nFAIL: blk init $blkSlot timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+house_prompt "prompt after blk init"
+set drvName "virtio-blk$blkSlot"
+send "dmesg\r"
+expect {
+    -re "driver root: $drvName slot $blkSlot asid" { puts "\nPASS: dmesg narrowed+supervised root for $drvName" }
+    timeout { puts "\nFAIL: no narrowed root for $drvName"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+expect {
+    -re "narrowed\\+supervised" { puts "\nPASS: dmesg root narrowed+supervised" }
+    timeout { puts "\nFAIL: root not narrowed+supervised"; catch {exec kill -9 [exp_pid]}; exit 1 }
+}
+house_prompt "prompt after root dmesg"
+foreach cls {offset unmapped queuepa} {
+    send "driver fault $drvName $cls\r"
+    expect {
+        -re "driver fault $cls ok kill\\+restart" { puts "\nPASS: driver fault $cls kill+restart" }
+        -re "driver fault: " { puts "\nFAIL: driver fault $cls refused/no-restart"; catch {exec kill -9 [exp_pid]}; exit 1 }
+        timeout { puts "\nFAIL: driver fault $cls timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    house_prompt "prompt after driver fault $cls"
+    send "dmesg\r"
+    expect {
+        -re "driver fault kill $drvName va=" { puts "\nPASS: dmesg kill attributed to $drvName ($cls)" }
+        timeout { puts "\nFAIL: dmesg missing kill for $drvName ($cls)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    expect {
+        -re "driver root reinstalled: $drvName " { puts "\nPASS: dmesg root re-armed for $drvName ($cls)" }
+        timeout { puts "\nFAIL: dmesg missing reinstall for $drvName ($cls)"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    house_prompt "prompt after dmesg $cls"
+    send "blk status $blkSlot\r"
+    expect {
+        -re "capacity" { puts "\nPASS: blk status survives $cls kill" }
+        timeout { puts "\nFAIL: blk status timeout after $cls kill"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    }
+    house_prompt "prompt after blk status $cls"
+}
+puts "\nPASS: fault-injection offset+unmapped+queuepa kill+restart ok"
 # burst 5 virtio scans without deadlock
 for {set i 0} {$i < 5} {incr i} {
     send "virtio scan\r"
