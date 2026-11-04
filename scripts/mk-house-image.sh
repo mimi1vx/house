@@ -119,8 +119,10 @@ CLOSURE_DIRS=$(ls -d "$GHC_LIB_ROOT"/aarch64-linux-ghc-"$EXPECTED_GHC"-* 2>/dev/
 }
 
 # B2 provenance (ii): the house overlay. house-libs/ carries the objects the
-# loader can already parse: libc-house.so.0 (the el0tiny shared flavour, same
-# recipe and export set as mk-dynamic-probe.sh) and a rebuilt libHSghc-prim
+# loader can already parse: libc-house.so.0 (the el0tiny shared flavour;
+# since house-q0g.4 S4 its export set is the el0tiny allowlist plus the EL0
+# gap shims, a superset of mk-dynamic-probe.sh's set) and a rebuilt
+# libHSghc-prim
 # (the bindist archive re-linked sysv/bind-now/RELRO, NEEDED on house-libc
 # plus the B3-owned internal object). libHSbase and libHSghc-internal stay
 # stock: bindist archives are vanilla non-PIC objects (ld.lld refuses them
@@ -154,45 +156,139 @@ TINY_UNWIND=$(nm "$OUT/tiny-obj/$TINY_M" | awk '$2 == "T" && $3 ~ /rust_begin_un
 cat >"$OUT/house-exports.map" <<EOF
 {
   global:
+    _Exit;
     __assert_fail;
     __errno_location;
-    _Exit;
+    __xpg_strerror_r;
     _exit;
     abort;
+    access;
+    acos;
+    acosf;
+    acosh;
+    acoshf;
+    asin;
+    asinf;
+    asinh;
+    asinhf;
+    atan;
+    atanf;
+    atanh;
+    atanhf;
+    calloc;
+    chmod;
+    clock_getres;
+    clock_gettime;
+    close;
+    cos;
+    cosf;
+    cosh;
+    coshf;
+    creat;
+    dup;
+    dup2;
+    environ;
+    epoll_create;
+    epoll_ctl;
+    epoll_wait;
+    eventfd;
+    eventfd_write;
     exit;
+    exp;
+    expf;
+    expm1;
+    expm1f;
+    fcntl;
+    fcntl64;
     fflush;
+    flock;
+    fopen;
+    fork;
     fprintf;
     fputc;
     fputs;
+    free;
     freelocale;
+    fstat;
+    ftruncate;
     fwrite;
+    getenv;
+    getpid;
+    getrusage;
+    iconv;
+    iconv_close;
+    iconv_open;
+    isatty;
+    ldexp;
+    link;
+    log;
+    log1p;
+    log1pf;
+    logf;
+    lseek;
+    lstat;
+    malloc;
     memchr;
     memcmp;
     memcpy;
     memmove;
     memset;
+    mkfifo;
     newlocale;
     nl_langinfo;
+    open;
+    pipe;
+    poll;
+    pow;
+    powf;
     printf;
     putchar;
+    putenv;
     puts;
+    read;
+    readlink;
+    realloc;
+    setenv;
     setlocale;
+    sigaddset;
+    sigemptyset;
+    sigprocmask;
+    sin;
+    sinf;
+    sinh;
+    sinhf;
     snprintf;
     sprintf;
+    stat;
+    stderr;
     strcasecmp;
     strcat;
     strchr;
     strcmp;
     strcpy;
     strlen;
-    strnlen;
     strncmp;
     strncpy;
+    strnlen;
     strrchr;
+    sysconf;
+    tan;
+    tanf;
+    tanh;
+    tanhf;
+    tcgetattr;
+    tcsetattr;
+    times;
+    umask;
+    unlink;
+    unsetenv;
     uselocale;
+    utime;
     vfprintf;
     vprintf;
     vsnprintf;
+    waitpid;
+    write;
     $TINY_UNWIND;
   local:
     *;

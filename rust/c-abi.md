@@ -632,6 +632,123 @@ Freestanding `libm` subset.
 |-------|--------|-------------|--------|
 | `house-libc` | `c_print` | `void c_print(const char *s)` | `tinylibc/c_print.c` |
 
+## house-el0-tiny
+
+EL0 C library (`house-el0-tiny`, the `libc-house.so.0` shared flavour).
+Two homes: the crate-root helpers (string/memory, link-only stdio and
+locale stubs, errno, `svc #0x02` exit) plus the `house-q0g.4` EL0 gap
+shims below. Unlike the EL1 `house-libc` of the same names, nothing here
+may touch EL1 state: where a house svc number already exists the shim
+delegates through it, everything else fails closed (`-1`/null plus
+`ENOSYS`), and `stderr`/`environ` are definition homes (data, not stubs).
+
+### `gap.rs` — EL0 gap shims (`house-q0g.4` S4)
+
+Real: fd/fork/wait/lseek via svc `0x04`–`0x09`/`0x0A`, `malloc` family via
+a `brk` (`0x03`) bump allocator, pure computation (signal-set ops, `sysconf`
+constants, `isatty` on fds 0–2, freestanding `libm`), `getpid` 42 (mirrors
+the EL1 answer), `iconv` byte passthrough (mirrors the EL1 `compat` shape).
+Stubs: everything without a stage-1 delegate (`poll`/`epoll`/`eventfd`,
+`pipe`/`dup`, `stat` family, clocks, `fcntl`/`flock`, termios — see the
+module docs for the per-symbol disposition).
+
+| Crate | Symbol | C signature | Source |
+|-------|--------|-------------|--------|
+| `house-el0-tiny` | `__xpg_strerror_r` | `int __xpg_strerror_r(int e, char *buf, size_t n)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `access` | `int access(const char *path, int mode)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `acos` | `double acos(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `acosf` | `float acosf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `acosh` | `double acosh(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `acoshf` | `float acoshf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `asin` | `double asin(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `asinf` | `float asinf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `asinh` | `double asinh(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `asinhf` | `float asinhf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `atan` | `double atan(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `atanf` | `float atanf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `atanh` | `double atanh(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `atanhf` | `float atanhf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `calloc` | `void *calloc(size_t nmemb, size_t size)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `chmod` | `int chmod(const char *path, mode_t mode)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `clock_getres` | `int clock_getres(clockid_t clk, struct timespec *res)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `clock_gettime` | `int clock_gettime(clockid_t clk, struct timespec *tp)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `close` | `int close(int fd)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `cos` | `double cos(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `cosf` | `float cosf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `cosh` | `double cosh(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `coshf` | `float coshf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `creat` | `int creat(const char *path, mode_t mode)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `dup` | `int dup(int fd)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `dup2` | `int dup2(int oldfd, int newfd)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `environ` | `char **environ` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `epoll_create` | `int epoll_create(int size)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `epoll_ctl` | `int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `epoll_wait` | `int epoll_wait(int epfd, struct epoll_event *ev, int maxevents, int timeout)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `eventfd` | `int eventfd(unsigned initval, int flags)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `eventfd_write` | `int eventfd_write(int fd, eventfd_t value)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `exp` | `double exp(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `expf` | `float expf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `expm1` | `double expm1(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `expm1f` | `float expm1f(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `fcntl` | `int fcntl(int fd, int cmd, ...)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `fcntl64` | `int fcntl64(int fd, int cmd, ...)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `flock` | `int flock(int fd, int op)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `fopen` | `FILE *fopen(const char *path, const char *mode)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `fork` | `pid_t fork(void)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `free` | `void free(void *p)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `fstat` | `int fstat(int fd, struct stat *st)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `ftruncate` | `int ftruncate(int fd, off_t len)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `getenv` | `char *getenv(const char *n)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `getpid` | `pid_t getpid(void)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `getrusage` | `int getrusage(int who, struct rusage *r)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `iconv` | `size_t iconv(iconv_t cd, char **in, size_t *il, char **out, size_t *ol)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `iconv_close` | `int iconv_close(iconv_t cd)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `iconv_open` | `iconv_t iconv_open(const char *to, const char *from)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `isatty` | `int isatty(int fd)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `ldexp` | `double ldexp(double x, int exp)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `link` | `int link(const char *a, const char *b)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `log` | `double log(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `log1p` | `double log1p(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `log1pf` | `float log1pf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `logf` | `float logf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `lseek` | `off_t lseek(int fd, off_t off, int whence)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `lstat` | `int lstat(const char *path, struct stat *st)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `malloc` | `void *malloc(size_t n)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `mkfifo` | `int mkfifo(const char *path, mode_t mode)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `open` | `int open(const char *path, int flags, ...)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `pipe` | `int pipe(int fds[2])` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `poll` | `int poll(struct pollfd *fds, nfds_t n, int timeout)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `pow` | `double pow(double a, double b)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `powf` | `float powf(float a, float b)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `putenv` | `int putenv(char *s)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `read` | `ssize_t read(int fd, void *buf, size_t n)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `readlink` | `ssize_t readlink(const char *path, char *buf, size_t n)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `realloc` | `void *realloc(void *p, size_t n)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `setenv` | `int setenv(const char *n, const char *v, int w)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sigaddset` | `int sigaddset(sigset_t *set, int signo)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sigemptyset` | `int sigemptyset(sigset_t *set)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sigprocmask` | `int sigprocmask(int how, const sigset_t *set, sigset_t *old)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sin` | `double sin(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sinf` | `float sinf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sinh` | `double sinh(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sinhf` | `float sinhf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `stat` | `int stat(const char *path, struct stat *st)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `stderr` | `FILE *stderr` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `sysconf` | `long sysconf(int name)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `tan` | `double tan(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `tanf` | `float tanf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `tanh` | `double tanh(double x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `tanhf` | `float tanhf(float x)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `tcgetattr` | `int tcgetattr(int fd, struct termios *t)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `tcsetattr` | `int tcsetattr(int fd, int acts, const struct termios *t)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `times` | `clock_t times(struct tms *t)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `umask` | `mode_t umask(mode_t m)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `unlink` | `int unlink(const char *path)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `unsetenv` | `int unsetenv(const char *n)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `utime` | `int utime(const char *path, const struct utimbuf *t)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `waitpid` | `pid_t waitpid(pid_t pid, int *status, int options)` | `house-el0-tiny/src/gap.rs` |
+| `house-el0-tiny` | `write` | `ssize_t write(int fd, const void *buf, size_t n)` | `house-el0-tiny/src/gap.rs` |
+
 ## Globals resolved by `aarch64.ld`
 
 These are linker-defined symbols the HAL references as `extern`; Rust must not

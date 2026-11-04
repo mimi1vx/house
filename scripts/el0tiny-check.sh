@@ -1,12 +1,18 @@
 #!/bin/sh
 # nm audit for rust/crates/house-el0-tiny.
 # Runs INSIDE the linux/arm64 container (needs the cross archive + GNU nm).
-# Asserts the crate's own object exports exactly the helper set plus the
-# EXIT(1) panic handler, with no undefined symbols: EL0 binaries then stay
-# at asm scale under --gc-sections (hello is 227B either way).
+# Asserts the crate's own object exports exactly the helper set (the 39
+# original helpers plus the house-q0g.4 EL0 gap shims) plus the EXIT(1)
+# panic handler, with no undefined symbols: EL0 binaries then stay at asm
+# scale under --gc-sections. Data homes (`environ`, `stderr`) are global
+# BSS/DATA, not text, and are audited separately.
 # B1 shared flavour: `ld.lld -shared` from this object (cdylib is dropped as
 # unsupported on `aarch64-unknown-none`) carries the same set for GHC
-# rebuilds; `nm -D` must match the recorded allowlist with no U.
+# rebuilds; `nm -D` must match the recorded allowlists with no U.
+# Dead core-generic instantiations (`_RINv*4core*`, e.g. an unreferenced
+# `fabs`): tolerated in the object T count and echoed, never pinned by
+# name (the mangling embeds a toolchain disambiguator); `--gc-sections`
+# drops them from every link, and the DSO dynamic set below stays exact.
 set -eu
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -31,30 +37,108 @@ if [ -n "$U" ]; then
 fi
 cat >"$tmpdir/allowlist" <<'EOF'
 __assert_fail
+access
+acoshf
+asinf
+atanf
+putenv
 __errno_location
+__xpg_strerror_r
 _Exit
 _exit
 abort
+acos
+acosh
+acosf
+asin
+asinh
+asinhf
+atan
+atanh
+atanhf
+calloc
+chmod
+clock_getres
+clock_gettime
+close
+cos
+cosf
+cosh
+coshf
+creat
+dup
+dup2
+epoll_create
+epoll_ctl
+epoll_wait
+eventfd
+eventfd_write
 exit
+exp
+expf
+expm1
+expm1f
+fcntl
+fcntl64
 fflush
+flock
+fopen
+fork
 fprintf
 fputc
 fputs
+free
 freelocale
+fstat
+ftruncate
 fwrite
+getenv
+getpid
+getrusage
+iconv
+iconv_close
+iconv_open
+isatty
+ldexp
+link
+log
+log1p
+log1pf
+logf
+lseek
+lstat
+malloc
 memchr
 memcmp
 memcpy
 memmove
 memset
+mkfifo
 newlocale
 nl_langinfo
+open
+pipe
+poll
+pow
+powf
 printf
 putchar
 puts
+read
+readlink
+realloc
+setenv
 setlocale
+sigaddset
+sigemptyset
+sigprocmask
+sin
+sinf
+sinh
+sinhf
 snprintf
 sprintf
+stat
 strcasecmp
 strcat
 strchr
@@ -65,27 +149,62 @@ strnlen
 strncmp
 strncpy
 strrchr
+sysconf
+tan
+tanf
+tanh
+tanhf
+tcgetattr
+tcsetattr
+times
+umask
+unlink
+unsetenv
 uselocale
+utime
 vfprintf
 vprintf
 vsnprintf
+waitpid
+write
 EOF
 LC_ALL=C sort -o "$tmpdir/allowlist" "$tmpdir/allowlist"
+# Data homes live in BSS/DATA, not text: separate allowlist, same pinning.
+cat >"$tmpdir/allowlist-data" <<'EOF'
+environ
+stderr
+EOF
 while IFS= read -r sym; do
 	if ! echo "$T" | grep -qx "$sym"; then
 		echo "el0tiny: missing T $sym" >&2
 		exit 1
 	fi
 done <"$tmpdir/allowlist"
+while IFS= read -r sym; do
+	if ! nm "$tmpdir/$M" | grep -qE " [BDR] $sym\$"; then
+		echo "el0tiny: missing global data $sym" >&2
+		exit 1
+	fi
+done <"$tmpdir/allowlist-data"
 if ! echo "$T" | grep -q "rust_begin_unwind"; then
 	echo "el0tiny: missing T rust_begin_unwind" >&2
 	exit 1
 fi
-if [ "$(echo "$T" | wc -l)" -ne 40 ]; then
-	echo "el0tiny: T set drift (want 39 + unwind = 40)" >&2
+# No real-symbol drift: every text symbol is either allowlisted, the unwind
+# handler, or a dead core-generic instantiation (dropped at link).
+echo "$T" >"$tmpdir/t-all"
+CORE_IGNORED=$(comm -23 "$tmpdir/t-all" "$tmpdir/allowlist" | grep -E '^_RINv.*4core' || true)
+UNEXPECTED=$(comm -23 "$tmpdir/t-all" "$tmpdir/allowlist" | grep -vE '^_RINv.*4core' | grep -v 'rust_begin_unwind$' || true)
+if [ -n "$UNEXPECTED" ]; then
+	echo "el0tiny: unexpected T symbols:" >&2
+	echo "$UNEXPECTED" >&2
 	exit 1
 fi
-echo "el0tiny-check: static ok (39 helpers + unwind, no U)"
+if [ -n "$CORE_IGNORED" ]; then
+	echo "el0tiny: ignoring dead core-generic text (dropped at link):"
+	echo "$CORE_IGNORED"
+fi
+echo "el0tiny-check: static ok (131 helpers + 2 data + unwind, no U)"
 UNWIND=$(nm "$tmpdir/$M" | awk '$2 == "T" && $3 ~ /rust_begin_unwind$/ {print $3}')
 [ -n "$UNWIND" ] || {
 	echo "el0tiny: missing rust_begin_unwind export" >&2
@@ -97,6 +216,9 @@ UNWIND=$(nm "$tmpdir/$M" | awk '$2 == "T" && $3 ~ /rust_begin_unwind$/ {print $3
 	while IFS= read -r sym; do
 		printf '    %s;\n' "$sym"
 	done <"$tmpdir/allowlist"
+	while IFS= read -r sym; do
+		printf '    %s;\n' "$sym"
+	done <"$tmpdir/allowlist-data"
 	printf '    %s;\n' "$UNWIND"
 	echo "  local:"
 	echo "    *;"
@@ -124,9 +246,10 @@ if [ "$n_unwind" != 1 ]; then
 	exit 1
 fi
 grep -v 'rust_begin_unwind$' "$tmpdir/so-defined" >"$tmpdir/so-stable" || true
-if ! cmp -s "$tmpdir/allowlist" "$tmpdir/so-stable"; then
+cat "$tmpdir/allowlist" "$tmpdir/allowlist-data" | LC_ALL=C sort >"$tmpdir/expected-stable"
+if ! cmp -s "$tmpdir/expected-stable" "$tmpdir/so-stable"; then
 	echo "el0tiny: dynamic export-set drift in $SO" >&2
-	diff -u "$tmpdir/allowlist" "$tmpdir/so-stable" >&2 || true
+	diff -u "$tmpdir/expected-stable" "$tmpdir/so-stable" >&2 || true
 	exit 1
 fi
 nm -D --undefined-only --format=posix "$SO" 2>/dev/null | awk 'NF {print $1}' | LC_ALL=C sort >"$tmpdir/so-undefined"
@@ -135,7 +258,7 @@ if [ -s "$tmpdir/so-undefined" ]; then
 	cat "$tmpdir/so-undefined" >&2
 	exit 1
 fi
-echo "el0tiny-check: shared ok (ET_DYN aarch64, 39 + unwind, no U)"
-echo "el0tiny-check: ok (39 helpers + unwind, no U)"
+echo "el0tiny-check: shared ok (ET_DYN aarch64, 131 + 2 data + unwind, no U)"
+echo "el0tiny-check: ok (131 helpers + 2 data + unwind, no U)"
 rm -rf "$tmpdir"
 trap - EXIT

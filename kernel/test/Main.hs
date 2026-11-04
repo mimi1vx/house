@@ -3071,25 +3071,35 @@ elfManySegments = mkHeaderCountElf (Ldr.maxSegments + 1) (Ldr.maxSegments + 1)
 elfManyPhdrs :: [Word8]
 elfManyPhdrs = mkHeaderCountElf (Ldr.maxPhnum + 1) 2
 
--- | One byte past the per-segment mapping bound.
+{- | One byte past the per-segment mapping bound. The file stays tiny
+(BSS-style @filesz < memsz@) so the segment bound, not the file bound,
+is what fires.
+-}
 elfSegMemCap :: [Word8]
 elfSegMemCap =
   let mem = Ldr.maxSegMemSz + 1
+      file = 0x1000
       base = 64 + 56
-   in mkEhdr 2 0x01000000 1 ++ mkPhdr 1 5 (fromIntegral base) 0x01000000 (fromIntegral mem) (fromIntegral mem) 0 ++ replicate (base + mem) 0
+   in mkEhdr 2 0x01000000 1 ++ mkPhdr 1 5 (fromIntegral base) 0x01000000 (fromIntegral file) (fromIntegral mem) 0 ++ replicate (base + file) 0
 
-{- | One page past the per-object mapping bound, spread over two LOADs so no
-single segment trips the per-segment bound and the count stays under the
-size-bearing-segment bound.
+{- | Past the per-object mapping bound, spread over two LOADs so no single
+segment trips the per-segment bound and the count stays under the
+size-bearing-segment bound. Both segments are BSS-heavy so the file
+stays tiny and the page sum (not the file size) is what fires. The object
+is DYN: an EXEC object cannot carry BSS past this bound (the static-BSS
+refusal runs before the page sum), and file-backed pages alone cannot
+exceed the page bound without tripping the file bound first.
 -}
 elfLoaderTotalPages :: [Word8]
 elfLoaderTotalPages =
   let base = 64 + 56 * 2
-      mem1 = Ldr.maxSegMemSz
-      mem2 = 0x1000
-      p1 = mkPhdr 1 5 (fromIntegral base) 0x01000000 (fromIntegral mem1) (fromIntegral mem1) 0
-      p2 = mkPhdr 1 6 (fromIntegral (base + mem1)) 0x02000000 (fromIntegral mem2) (fromIntegral mem2) 0
-   in mkEhdr 2 0x01000000 2 ++ p1 ++ p2 ++ replicate (base + mem1 + mem2) 0
+      file = 0x1000
+      mem1 = 5000 * 0x1000
+      mem2 = 4000 * 0x1000
+      p1 = mkPhdr 1 5 (fromIntegral base) 0x01000000 (fromIntegral file) (fromIntegral mem1) 0
+      -- Abut p1 (no overlap: the overlap check runs before the page sum).
+      p2 = mkPhdr 1 6 (fromIntegral (base + file)) 0x02388000 (fromIntegral file) (fromIntegral mem2) 0
+   in mkEhdr 3 0x01000000 2 ++ p1 ++ p2 ++ replicate (base + 2 * file) 0
 
 -- | The shape a gcc/glibc link emits: ten headers, two of which carry bytes.
 elfGccShaped :: [Word8]
@@ -3216,7 +3226,7 @@ elfDynTrunc = mkDynElf 3 0x01000000 goodBlob [(0x10, 19)] [(0x100, 0x01000100, 1
 
 elfStrszOverrun :: [Word8]
 elfStrszOverrun =
-  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [(5, 0x01000000), (10, 70000)] (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 48)] [] []
+  mkDynElf 3 0x01000000 (mkDynBlob interpGoodBs [(5, 0x01000000), (10, fromIntegral (Ldr.maxDynStrSz + 1))] (1027, 0x01000008, 0x2000)) [(0x10, 19)] [(0x100, 0x01000100, 48)] [] []
 
 elfRelaOutside :: [Word8]
 elfRelaOutside =
@@ -3404,7 +3414,9 @@ elfLinkDepLarge =
   mkM2ElfFromBlob
     0
     6
-    0x40000
+    -- 513 pages: 16 such deps exceed the total page cap while each stays
+    -- under the per-object and per-segment caps, isolating the total bound.
+    0x201000
     False
     True
     (length (mkDynArr m2DsoEnts))

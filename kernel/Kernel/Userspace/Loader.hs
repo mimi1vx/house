@@ -14,16 +14,17 @@ The pure parser accepts dynamic metadata; effectful execution requires a link pl
 
 Input posture: this parser is TCB and takes third-party ELF, so every cap
 is untrusted-input hardening first: a hostile image must fail with a Left,
-never with unbounded spend. maxSegMemSz (1 MiB per PT_LOAD) and maxTotalPages
-(256 pages) are the only thing between a hostile image and unbounded mapping
-spend; maxElfBytes (16 MiB), maxPhnum (16), maxSegments (8),
-maxRelaCount (32768), maxDynSymbols (16384), maxDynHashBuckets (4096),
-maxDynStrSz (64 KiB), maxDynEnt (64), maxNeeded (16), maxInterpLen (256),
+never with unbounded spend. maxSegMemSz (32 MiB per PT_LOAD) and maxTotalPages
+(8192 pages) are the only thing between a hostile image and unbounded mapping
+spend; maxElfBytes (32 MiB), maxPhnum (16), maxSegments (8),
+maxRelaCount (262144), maxDynSymbols (131072), maxDynHashBuckets (131072),
+maxDynStrSz (4 MiB), maxDynEnt (64), maxNeeded (16), maxInterpLen (256),
 the name-length caps (256 / 128), and maxInitArrayEntries (64) bound parse,
 relocation, and constructor work the same way. The same numbers are
 secondarily a resource budget: the house-q0g.1 retune (recorded in
 docs/dynamic-linking.md) sized them to our own build output plus headroom,
-so a stock-bindist-scale image still fails at the cap. Budget-only, not
+and the house-q0g.4 revisit in the same place extends that budget to the
+rebuilt GHC internal object scale. Budget-only, not
 hardening, is the closed policy set: the ET_EXEC window, the PT_INTERP pin
 to /lib/ld-house.so.0, the eager-relocation / bind-now rule, and the
 skipDynTag tolerance set each name what House-built images look like, and
@@ -91,7 +92,7 @@ import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Word (Word16, Word32, Word64, Word8)
 
 maxElfBytes :: Int
-maxElfBytes = 1 `shiftL` 24
+maxElfBytes = 1 `shiftL` 25
 
 {- | Total program headers, a parse-work bound over every header a linker
 emits. 16 covers ld.lld's 8 and glibc's 13 with margin; the mapping-work
@@ -108,10 +109,10 @@ maxSegments :: Int
 maxSegments = 8
 
 maxSegMemSz :: Int
-maxSegMemSz = 1024 * 1024
+maxSegMemSz = 32 * 1024 * 1024
 
 maxTotalPages :: Int
-maxTotalPages = 256
+maxTotalPages = 8192
 
 minExecVAddr :: Word64
 minExecVAddr = 0x01000000
@@ -123,13 +124,13 @@ maxInterpLen :: Int
 maxInterpLen = 256
 
 maxDynStrSz :: Int
-maxDynStrSz = 64 * 1024
+maxDynStrSz = 4 * 1024 * 1024
 
 maxNeeded :: Int
 maxNeeded = 16
 
 maxRelaCount :: Int
-maxRelaCount = 32768
+maxRelaCount = 262144
 
 maxDynEnt :: Int
 maxDynEnt = 64
@@ -138,10 +139,10 @@ maxNeededNameLen :: Int
 maxNeededNameLen = 128
 
 maxDynHashBuckets :: Int
-maxDynHashBuckets = 4096
+maxDynHashBuckets = 131072
 
 maxDynSymbols :: Int
-maxDynSymbols = 16384
+maxDynSymbols = 131072
 
 maxSymbolNameLen :: Int
 maxSymbolNameLen = 256

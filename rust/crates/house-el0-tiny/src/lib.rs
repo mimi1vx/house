@@ -35,6 +35,8 @@ use core::ffi::c_void;
 use core::panic::PanicInfo;
 use core::ptr;
 
+pub mod gap;
+
 /// EL0 panic handler: `EXIT(1)` through the house svc table, then trap.
 /// `panic = "abort"` keeps this out of the normal path; `--gc-sections`
 /// drops it from binaries that never reference it.
@@ -640,6 +642,17 @@ static mut STATIC_ERRNO: i32 = 0;
 #[allow(suspicious_runtime_symbol_definitions)]
 pub unsafe extern "C" fn __errno_location() -> *mut i32 {
     &raw mut STATIC_ERRNO
+}
+
+/// Crate-visible errno write for the `gap` module (same static cell).
+///
+/// Spelled `ptr::write`, not a `static mut` place store: the latter emits a
+/// dev-profile null-deref guard whose `Location` table the `-shared` link
+/// refuses (`ABS64` against a local symbol).
+pub(crate) fn set_errno(e: i32) {
+    unsafe {
+        core::ptr::write(&raw mut STATIC_ERRNO, e);
+    }
 }
 
 // EL0 process enders via `svc #0x02`. The `target_arch` gate keeps hosted

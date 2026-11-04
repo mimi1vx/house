@@ -298,6 +298,56 @@ at 16 MiB.
 - Linker `maxTotalPages` 256 → 1024 admits main + `libm` (146) and single
   `base` (660) but refuses the full stock 6,526-page closure — `house-q0g.1`.
 
+## house-q0g.4 cap revisit (2026-11-04)
+
+One reviewed bound decision for the rebuilt GHC objects (`house-q0g.4` S4).
+Sizing target is the rebuilt `libHSghc-internal` scale, measured live from
+the S3 fallback link (file 29,983,288 B; max `PT_LOAD` 9.64 MiB; load pages
+4,900; relocations 164,541; dynamic symbols 59,892; 8 phdrs) with the stock
+manifest line 5 as the reference upper bound (20.4 MB file; 18.5 MB PT_LOAD;
+4,973 pages; 165,975 relocs; 59,724 syms). The stock shape stays the larger
+number everywhere except file size (the quick `-O0` rebuild is fatter than
+bindist), so sizing to the larger of the two admits both.
+
+- `maxElfBytes` 16 MiB → 32 MiB (`1 shiftL 24` → `1 shiftL 25`) admits the
+  rebuilt ~30 MB file at 1.1x and the stock 20.4 MB at 1.6x. File-size
+  headroom stays thin by the q0g.1 precedent (the 16 MB mains sat at the old
+  cap): the file is a deterministic build output, and the transient cost is
+  one retained `ByteString` per loaded object, freed after serve.
+- `maxSegMemSz` 1 MiB → 32 MiB admits the stock 18.5 MB `PT_LOAD` at 1.8x
+  (the q0g.1 headroom shape) and the rebuilt 9.6 MB at 3.4x.
+- Loader `maxTotalPages` 256 → 8192 admits stock 4,973 pages at 1.65x.
+- `maxRelaCount` 32768 → 262144 admits 165,975 at 1.6x.
+- `maxDynSymbols` 16384 → 131072 admits 59,892 at 2.2x.
+- Linker `maxObjectPages` 256 → 8192, same as Loader pages, admits internal.
+- Linker `maxTotalPages` 1024 → 8192 admits the branch-B demo closure
+  (~5,560 pages: internal 4,900 + base 649 + prim + libc-house + probe) at
+  1.5x, including headroom for future house RTS/GMP objects; the
+  stock-scale full closure stays refused by the dependency gate, not the
+  page budget.
+
+Hostile vectors, unchanged in kind: parse-time transient allocation is
+bounded per object (the retained file bytes are also the demand-pager serve
+source since `house-q0g.11`, so the file bound caps retained memory, not
+just parse work); mapping work is PTE markers rather than RAM, so the page
+bounds cap marker state; relocation, symbol, hash-bucket and string-table
+processing stay linear with per-entry validation (`maxNeeded`, name-length
+caps untouched). The string table is always inside the retained file bytes,
+so its bound can never exceed the file bound; buckets match symbol count
+1:1 by linker construction (`lld` emits `nbucket == nsyms`, verified live),
+so the bucket bound rides the symbol bound. Dependency fan-out is untouched
+(`maxNeeded` 16, `maxDependencies` 16): the DoS-scale-graph refusal from
+q0g.1 stands.
+
+Two bounds the triage could not see (the manifest has no string-table or
+bucket columns, and S3 stopped at the file cap before reaching them) bind
+live and join this one decision rather than a ninth and tenth edit:
+`maxDynStrSz` 64 KiB → 4 MiB admits the rebuilt 3.93 MB table at 1.1x
+(deterministic build output, same thin-file rationale as `maxElfBytes`),
+and `maxDynHashBuckets` 4096 → 131072 admits 59,892 buckets at 2.2x,
+matching `maxDynSymbols`. `maxSymbolNameLen` 256 still admits the longest
+rebuilt name (239 chars) and stays put.
+
 ## house-q0g.11 demand pager (2026-11-04)
 
 `PT_LOAD` pages are committed at load as PTE markers (valid-clear L3 desc,
