@@ -346,16 +346,14 @@ loop = do
               Right bytes -> case ULdr.loadElf (BS.pack bytes) of
                 Left le -> return (Left (toExecError le))
                 Right elf -> do
-                  sRes <- U.runElf elf ("/bin/ipc_pp" : ["server", show w]) defaultEnv
+                  sRes <- U.runElfWithGrants elf ("/bin/ipc_pp" : ["server", show w]) defaultEnv [IPC.endpointId ep]
                   case sRes of
                     Left le2 -> return (Left (toExecError le2))
                     Right sPid -> do
-                      U.grantEndpoint sPid (IPC.endpointId ep)
-                      cRes <- U.runElf elf ("/bin/ipc_pp" : ["client", show w]) defaultEnv
+                      cRes <- U.runElfWithGrants elf ("/bin/ipc_pp" : ["client", show w]) defaultEnv [IPC.endpointId ep]
                       case cRes of
                         Left le2 -> return (Left (toExecError le2))
                         Right cPid -> do
-                          U.grantEndpoint cPid (IPC.endpointId ep)
                           sWait <- U.waitPid U.supervisorPid sPid
                           cWait <- U.waitPid U.supervisorPid cPid
                           case (sWait, cWait) of

@@ -7,6 +7,8 @@ Description : ELF loader -> PageMap -> EL0 entry with cleanup.
 module Kernel.Userspace.Process (
   runElf,
   runElfIn,
+  runElfWithGrants,
+  runElfInWithGrants,
   forkProc,
   procInfo,
   listProcs,
@@ -598,13 +600,20 @@ type LoadBounds = [(Word64, [Segment])]
 runElf :: Elf -> [String] -> [String] -> H (Either LoadError Pid)
 runElf = runElfIn Vfs.defaultNamespace
 
+-- | Launch with endpoint grants installed atomically at publish time.
+runElfWithGrants :: Elf -> [String] -> [String] -> [EndpointId] -> H (Either LoadError Pid)
+runElfWithGrants = runElfInWithGrants Vfs.defaultNamespace
+
 -- | Launch a static or dynamic image using the supplied VFS namespace.
 runElfIn :: Vfs.NamespaceId -> Elf -> [String] -> [String] -> H (Either LoadError Pid)
-runElfIn ns elf argv envp = do
+runElfIn ns elf argv envp = runElfInWithGrants ns elf argv envp []
+
+runElfInWithGrants :: Vfs.NamespaceId -> Elf -> [String] -> [String] -> [EndpointId] -> H (Either LoadError Pid)
+runElfInWithGrants ns elf argv envp grants = do
   prepared <- prepareImage ns elf
   case prepared of
     Left err -> return (Left err)
-    Right image -> runPreparedImage ns image argv envp
+    Right image -> runPreparedImage ns image argv envp grants
 
 prepareImage :: Vfs.NamespaceId -> Elf -> H (Either LoadError PreparedImage)
 prepareImage ns elf
@@ -742,8 +751,8 @@ validateStackSegments = mapM_ check
                 then Left (BadSegment "stack page collision")
                 else Right ()
 
-runPreparedImage :: Vfs.NamespaceId -> PreparedImage -> [String] -> [String] -> H (Either LoadError Pid)
-runPreparedImage ns image argv envp = withQSem userSem $ do
+runPreparedImage :: Vfs.NamespaceId -> PreparedImage -> [String] -> [String] -> [EndpointId] -> H (Either LoadError Pid)
+runPreparedImage ns image argv envp grants = withQSem userSem $ do
   pidInt <- readRef pidNext
   writeRef pidNext (pidInt + 1)
   bound <- Vfs.vfsBindPid pidInt ns
@@ -751,10 +760,10 @@ runPreparedImage ns image argv envp = withQSem userSem $ do
     then do
       writeRef pidNext pidInt
       return (Left (BadSegment "namespace unavailable"))
-    else runPreparedBound pidInt image argv envp
+    else runPreparedBound pidInt image argv envp grants
 
-runPreparedBound :: Int -> PreparedImage -> [String] -> [String] -> H (Either LoadError Pid)
-runPreparedBound pidInt image argv envp = do
+runPreparedBound :: Int -> PreparedImage -> [String] -> [String] -> [EndpointId] -> H (Either LoadError Pid)
+runPreparedBound pidInt image argv envp grants = do
   let pid = Pid pidInt
       abort err = do
         Vfs.vfsReleasePid pidInt
@@ -825,7 +834,11 @@ runPreparedBound pidInt image argv envp = do
                               modifyRef procExitMap (Map.insert pid exitVar)
                               modifyRef procStopMap (Map.insert pid stopVar)
                               modifyRef procMap (Map.insert pid (Process pid supervisorPid pdir entry initBrk (mappedSharedObjects mappedImage) (mappedDemand mappedImage)))
-                              modifyRef procGrants (Map.insert pid [])
+                              -- Grants land here, under the same lock that
+                              -- publishes the pid and before the EL0 entry
+                              -- thread is forked below, so the new process's
+                              -- first trap can never observe an empty set.
+                              modifyRef procGrants (Map.insert pid grants)
                               Sched.schedRegister pid
                               let finiSteps = mappedFiniSteps mappedImage
                               _ <- forkH $ do
