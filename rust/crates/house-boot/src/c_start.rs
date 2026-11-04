@@ -1,18 +1,10 @@
 #![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "transliteration has explicit unsafe blocks throughout; inner-block audit as follow-up"
-)]
-#![allow(
     static_mut_refs,
     reason = "transliterated C globals use raw statics; guarded by HAL spinlocks"
 )]
 #![allow(
     clippy::manual_c_str_literals,
     reason = "C-string literals mirror C initializers"
-)]
-#![allow(
-    clippy::missing_safety_doc,
-    reason = "raw entry points mirror C headers"
 )]
 #![allow(clippy::collapsible_if, reason = "nested guards mirror C control flow")]
 #![allow(clippy::unnecessary_cast, reason = "ABI casts mirror C widths")]
@@ -179,7 +171,12 @@ unsafe fn puthex(v: u64) {
     }
 }
 
-// SAFETY: EL1 fault handler, gpr points to 896B frame saved in exception.rs vec_sync (x0-x30 @0, SP @248).
+/// Synchronous-exception entry called from the `vec_sync` assembly stub.
+///
+/// # Safety
+///
+/// Call at EL1 with `gpr` pointing to the 896B frame `vec_sync` saved in
+/// `exception.rs` (x0-x30 at offset 0, SP at 248).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_handle_sync(
     esr: u64,
@@ -639,11 +636,17 @@ pub unsafe extern "C" fn c_handle_sync(
     }
 }
 
-// SAFETY: IRQ handler, reads ICC_IAR1_EL1, may push to irq ring or rearm
-// timer. Returns the ELR to resume (`vec_irq` writes it back): the
-// interrupted ELR on every path except timer preemption of EL0, which parks
-// the frame and returns the exit trampoline (kernel TTBR0/spsr switched).
-// Non-EL0 behavior is unchanged.
+/// IRQ entry called from the `vec_irq` assembly stub.
+///
+/// Returns the ELR to resume (`vec_irq` writes it back): the interrupted
+/// ELR on every path except timer preemption of EL0, which parks the frame
+/// and returns the exit trampoline (kernel TTBR0/spsr switched).
+///
+/// # Safety
+///
+/// Call at EL1 with the GIC SRE enabled (so `ICC_IAR1_EL1` reads are
+/// valid) and `gpr` pointing to the 896B frame `vec_irq` saved. May push
+/// to the IRQ ring or rearm the timer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_handle_irq(gpr: *mut u64, _fpi: *mut u8) -> u64 {
     let elr: u64;
@@ -778,6 +781,14 @@ pub unsafe extern "C" fn c_handle_irq(gpr: *mut u64, _fpi: *mut u8) -> u64 {
     elr
 }
 
+/// Fatal-exception entry called from the EL1 exception vectors.
+///
+/// Logs ESR/FAR/ELR over UART and halts the core in `wfi`.
+///
+/// # Safety
+///
+/// Call at EL1 only, after `uart_init` (diagnostics write to the PL011).
+/// Never returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fatal_exception() {
     let esr: u64;
@@ -800,6 +811,16 @@ pub unsafe extern "C" fn fatal_exception() {
     }
 }
 
+/// Secondary-core entry called once per core from `secondary_entry`.
+///
+/// Brings the core online (GIC/timer/thread init, online-mask publish),
+/// then parks in `wfe` yielding to the scheduler.
+///
+/// # Safety
+///
+/// Call once per secondary core at EL1 with DAIF masked, VBAR/MMU set up
+/// by `entry.rs`, and the per-core stack region reserved below
+/// `house_boot_stack_top`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_start_secondary(core_id: u64) {
     let core = core_id as u32;
@@ -842,6 +863,16 @@ pub unsafe extern "C" fn c_start_secondary(core_id: u64) {
     }
 }
 
+/// Primary-core entry called once from `entry.rs` `_start`.
+///
+/// Detects RAM, rebases the stack, builds the buddy pool, brings up SMP,
+/// injects RTS `-N` args, and transfers control to the Haskell `house_main`
+/// (or spike/irqcheck) weak entry. Halts in `wfi` if it ever returns.
+///
+/// # Safety
+///
+/// Call once on the primary core at EL1 after `_start` has cleared BSS,
+/// set VBAR, and built the early MMU window.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_start() {
     // SAFETY: primary entry after entry.rs _start, single core, BSS clear, VBAR set, MMU early done.
