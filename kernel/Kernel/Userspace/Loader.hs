@@ -12,10 +12,22 @@ SysV hash, eager AArch64 symbol relocations, relative relocations, and
 RELRO. PT_INTERP is pinned to /lib/ld-house.so.0 and recorded only.
 The pure parser accepts dynamic metadata; effectful execution requires a link plan and mapping.
 
-Input posture: the target is House's own dynamically linked executables,
-built by a toolchain House pins. The caps are therefore a resource budget
-for our own build output rather than untrusted-input hardening, and a DT_*
-tag we have reason to ignore may be ignored. Bounded input stays bounded:
+Input posture: this parser is TCB and takes third-party ELF, so every cap
+is untrusted-input hardening first: a hostile image must fail with a Left,
+never with unbounded spend. maxSegMemSz (1 MiB per PT_LOAD) and maxTotalPages
+(256 pages) are the only thing between a hostile image and unbounded mapping
+spend; maxElfBytes (16 MiB), maxPhnum (16), maxSegments (8),
+maxRelaCount (32768), maxDynSymbols (16384), maxDynHashBuckets (4096),
+maxDynStrSz (64 KiB), maxDynEnt (64), maxNeeded (16), maxInterpLen (256),
+the name-length caps (256 / 128), and maxInitArrayEntries (64) bound parse,
+relocation, and constructor work the same way. The same numbers are
+secondarily a resource budget: the house-q0g.1 retune (recorded in
+docs/dynamic-linking.md) sized them to our own build output plus headroom,
+so a stock-bindist-scale image still fails at the cap. Budget-only, not
+hardening, is the closed policy set: the ET_EXEC window, the PT_INTERP pin
+to /lib/ld-house.so.0, the eager-relocation / bind-now rule, and the
+skipDynTag tolerance set each name what House-built images look like, and
+anything outside them is a Left. Bounded input stays bounded:
 every cap and every checked bound still holds, and an unrecognised tag is
 still a Left. Only the closed, reasoned set in skipDynTag is tolerated.
 -}
