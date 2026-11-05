@@ -144,8 +144,15 @@ unsafe extern "C" {
 #[cfg(test)]
 unsafe fn house_fd_pipe_readable(fd: i32) -> i32 {
     unsafe extern "C" {
-        // `nfds_t` is 32-bit on the macOS host and in Miri's `poll` model;
-        // the previous `u64` mismatched both (Miri: parameter #2 is `u32`).
+        // `nfds_t` is `unsigned int` (32-bit) on the macOS host but
+        // `unsigned long` (64-bit) on Linux and in Miri's Linux `poll`
+        // model, which type-checks call arguments against the model
+        // (nightly-2026-11-04: parameter #2 is `u64`). The declaration
+        // follows the execution environment: this shim is `cfg(test)`-only
+        // and never reaches the firmware link.
+        #[cfg(any(miri, target_os = "linux"))]
+        fn poll(fds: *mut u8, nfds: u64, timeout: i32) -> i32;
+        #[cfg(not(any(miri, target_os = "linux")))]
         fn poll(fds: *mut u8, nfds: u32, timeout: i32) -> i32;
     }
     #[repr(C)]
