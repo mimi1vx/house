@@ -5,7 +5,7 @@ members = ["crates/house-boot", "crates/house-el0-tiny", "crates/house-hal", "cr
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99.0"
+rust-version = "1.99.1"
 license = "MIT"
 
 # Internal path deps with pinned versions so `cargo deny` bans::wildcards

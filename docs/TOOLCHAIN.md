@@ -17,7 +17,7 @@ macOS host, never inside (see `docs/HOST-QEMU.md`).
 ## Toolchains
 
 The table records the resolved image contents. GHC is pinned in the
-Containerfile and Rust to stable 1.99.0 plus a Miri-only nightly-2026-09-30
+Containerfile and Rust to stable 1.99.1 plus a Miri-only nightly-2026-11-04
 side-channel; refresh the table whenever
 a pin moves.
 
@@ -25,9 +25,9 @@ a pin moves.
 |------|---------------|------------------|
 | GHC | `ghcup install ghc 9.14.1 --set` | 9.14.1 |
 | Cabal | `ghcup install cabal --set` | 3.16.1.0 |
-| rustc/cargo | `rustup` default stable 1.99.0, minimal profile | 1.99.0 (b940084d7 2026-09-28); cargo 1.99.0 (5f94df478 2026-08-27) |
+| rustc/cargo | `rustup` default stable 1.99.1, minimal profile | 1.99.1 (58cf8f9c3 2026-10-13); cargo 1.99.1 (5f94df478 2026-08-27) |
 | clippy/rustfmt | `rustup component add` on stable | 0.1.99 / 1.10.0-stable (ships with the toolchain) |
-| miri | `rustup toolchain install nightly-2026-09-30 --component miri` (nightly-only side-channel) | 0.1.0 (5c543b0b8c 2026-09-29); `make miri` green: buddy lifecycle + 15 mem tests |
+| miri | `rustup toolchain install nightly-2026-11-04 --component miri` (nightly-only side-channel) | 0.1.0 (708c94ef09 2026-11-03); `make miri` green: buddy lifecycle + 15 mem tests |
 | fourmolu | `ghcup install fourmolu 0.20.1.0 --set` | 0.20.1.0 (matches host) |
 | hlint | Debian `apt install hlint` | 3.6.1 — predates GHC2024, cannot parse `{-# LANGUAGE GHC2024 #-}`; Haskell lint stays on host hlint 3.10 until Hackage hlint builds under GHC 9.14 (see `Makefile: lint`) |
 | cargo-deny | pinned musl binary, sha256-verified at build time | 0.20.2 |
@@ -35,8 +35,8 @@ a pin moves.
 | ld.lld | `lld` apt set | Debian LLD 19.1.7 |
 
 Stable is deliberate: build, Clippy, and formatting use pinned stable
-1.99.0 baked into the image. Miri only ships for nightly, so it runs on a
-pinned nightly-2026-09-30 side-channel (`cargo +$MIRI_CHANNEL miri test`;
+1.99.1 baked into the image. Miri only ships for nightly, so it runs on a
+pinned nightly-2026-11-04 side-channel (`cargo +$MIRI_CHANNEL miri test`;
 single source `rust/toolchain.lock` `miri_channel`).
 
 ## Gates

@@ -1,6 +1,6 @@
 [toolchain]
-channel = "1.99.0"
-rustc_commit = "b940084d7eb6a299eb4bfeb8e34901bc051e7ac4"
-cargo_version = "cargo 1.99.0 (5f94df478 2026-08-27)"
-miri_channel = "nightly-2026-09-30"
-miri_rustc_commit = "5c543b0b8c73c7b72bc8284ced4fb22ead15734d"
+channel = "1.99.1"
+rustc_commit = "58cf8f9c35b355199727627d07ae34a4e2846d67"
+cargo_version = "cargo 1.99.1 (5f94df478 2026-08-27)"
+miri_channel = "nightly-2026-11-04"
+miri_rustc_commit = "708c94ef093ecc42fb8851e17d8383d999727abc"

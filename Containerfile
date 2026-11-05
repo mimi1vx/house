@@ -26,16 +26,16 @@ RUN curl -sSf https://get-ghcup.haskell.org | sh \
 # Rust toolchain: stable default + bare-metal target; Miri lives on a pinned
 # nightly side-channel (Miri only ships for nightly). The Miri nightly pin is
 # duplicated here; single source is rust/toolchain.lock (miri_channel).
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.0 \
-    && /root/.cargo/bin/rustup default 1.99.0 \
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.1 \
+    && /root/.cargo/bin/rustup default 1.99.1 \
     && /root/.cargo/bin/rustup target add aarch64-unknown-none \
     && /root/.cargo/bin/rustup component add clippy rustfmt \
-    && /root/.cargo/bin/rustup toolchain install nightly-2026-09-30 --profile minimal --component miri \
+    && /root/.cargo/bin/rustup toolchain install nightly-2026-11-04 --profile minimal --component miri \
     && rustc --version \
     && cargo --version \
     && cargo clippy --version \
     && cargo fmt --version \
-    && cargo +nightly-2026-09-30 miri --version
+    && cargo +nightly-2026-11-04 miri --version
 ENV PATH=/root/.ghcup/bin:/root/.cabal/bin:/root/.cargo/bin:/usr/local/bin:$PATH
 COPY rust-toolchain.toml /work/rust-toolchain.toml
 
