@@ -42,14 +42,14 @@ proc fail {msg} {
 proc sock_expect {s needle tries} {
     for {set i 0} {$i < $tries} {incr i} {
         after 300
-        catch {append ::sockbuf [read -nonewline $s]}
+        catch {append ::sockbuf [read $s]}
         if {[string first $needle $::sockbuf] >= 0} { return 1 }
     }
     return 0
 }
 proc sock_drain {s} {
     after 500
-    catch {append ::sockbuf [read -nonewline $s]}
+    catch {append ::sockbuf [read $s]}
     set ::sockbuf ""
 }
 log_user 1

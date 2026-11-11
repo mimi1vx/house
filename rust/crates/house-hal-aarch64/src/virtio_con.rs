@@ -257,7 +257,12 @@ fn submit_inner(
         mmio_w32(base + OFF_QUEUE_NOTIFY, notify_q);
         core::arch::asm!("dsb sy; dmb ish", options(nostack, preserves_flags));
         ss.avail_idx[q] = idx.wrapping_add(1);
-        *req_id = idx as u32;
+        // Cookie echoed by the device is the descriptor head
+        // (used-ring id), not the monotonic counter: pollers compare
+        // against the used-ring id, so returning idx mismatches once
+        // idx >= qsize (every console write past the first 64 stalled
+        // ~1s then EINVAL).
+        *req_id = head as u32;
         VIRTIO_OK
     }
 }
