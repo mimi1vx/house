@@ -124,6 +124,7 @@ unsafe extern "C" {
     fn house_el0_park(elr: u64, sp_el0: u64, imm: u32, gpr: *const u64) -> i32;
     fn house_ipc_should_park(op: u32, x1: u64, x2: u64) -> i32;
     fn house_sock_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32;
+    fn house_pipe_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32;
     fn house_svc_allowed(pdir: *mut u8, imm: u32) -> i32;
     fn house_fd_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32;
     fn house_dir_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32;
@@ -382,7 +383,9 @@ pub unsafe extern "C" fn c_handle_sync(
             // `house_dir_should_park` passes; IPC 0x10..0x13 park only after
             // `house_ipc_should_park` passes; sock 0x15..0x18 park only after
             // `house_sock_should_park` passes (OPEN/CLOSE carry no user
-            // memory, SEND/RECV validate buf/len). GRANT_MAP 0x14 never parks
+            // memory, SEND/RECV validate buf/len); pipe 0x19..0x1A park only
+            // after `house_pipe_should_park` passes (PIPE validates the 4-byte
+            // *x1 write-end store, DUP2 checks new <= 34). GRANT_MAP 0x14 never parks
             // (inline ENOSYS until the grant slice).
             let park_candidate = svc_imm == 0x00
                 || svc_imm == 0x03
@@ -393,7 +396,8 @@ pub unsafe extern "C" fn c_handle_sync(
                 || svc_imm == 0x0A
                 || (0x0C..=0x0F).contains(&svc_imm)
                 || (0x10..=0x13).contains(&svc_imm)
-                || (0x15..=0x18).contains(&svc_imm);
+                || (0x15..=0x18).contains(&svc_imm)
+                || (0x19..=0x1A).contains(&svc_imm);
             if park_candidate {
                 // Per-pdir syscall mask: denied imms skip parking and take
                 // the inline-ENOSYS dispatch path below (same as 0x14).
@@ -466,6 +470,17 @@ pub unsafe extern "C" fn c_handle_sync(
                         };
                         // SAFETY: lock-free validator, page-table reads only.
                         unsafe { house_sock_should_park(svc_imm, x0, x1, x2) }
+                    } else if svc_imm == 0x19 || svc_imm == 0x1A {
+                        // SAFETY: gpr is the 896B vec_sync frame; x0/x1/x2 reads only.
+                        let (x0, x1, x2) = unsafe {
+                            if gpr.is_null() {
+                                (0, 0, 0)
+                            } else {
+                                (*gpr.add(0), *gpr.add(1), *gpr.add(2))
+                            }
+                        };
+                        // SAFETY: lock-free validator, page-table reads only.
+                        unsafe { house_pipe_should_park(svc_imm, x0, x1, x2) }
                     } else {
                         // SAFETY: gpr is the 896B vec_sync frame; x1/x2 reads only.
                         let (x1, x2) = unsafe {

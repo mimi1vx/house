@@ -36,6 +36,13 @@ const HOUSE_SVC_SOCK_OPEN: u32 = 0x15;
 const HOUSE_SVC_SOCK_SEND: u32 = 0x16;
 const HOUSE_SVC_SOCK_RECV: u32 = 0x17;
 const HOUSE_SVC_SOCK_CLOSE: u32 = 0x18;
+// Pipe slice (house-1mo.3): PIPE takes (ignored, wfd_va, ignored) — only x1
+// (the user VA receiving the 4-byte write-end fd store) is validated
+// trap-side, x0/x2 ignored like CLOSE's args; DUP2 takes (old, new,
+// ignored) — only new (fd-table range 0..34, Haskell re-checks liveness) is
+// checked trap-side. Ride the delegation ring.
+const HOUSE_SVC_PIPE: u32 = 0x19;
+const HOUSE_SVC_DUP2: u32 = 0x1A;
 
 static mut HOUSE_USER_EXITED: i32 = 0;
 static mut HOUSE_USER_EXIT_CODE: i32 = 0;
@@ -58,7 +65,7 @@ const EL0_N: usize = 64;
 
 // Park request codes (svc #imm that parks instead of completing inline).
 // YIELD + BRK + fd 0x04..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B +
-// dir 0x0C..0x0F + sock 0x15..0x18 +
+// dir 0x0C..0x0F + sock 0x15..0x18 + pipe 0x19..0x1A +
 // IPC 0x10..0x13 ride the delegation ring (validate-then-park in
 // `c_handle_sync`); GRANT_MAP 0x14 stays inline ENOSYS
 // until the grant-transfer slice.
@@ -85,6 +92,10 @@ const EL0_REQ_SOCK_OPEN: u32 = 0x15;
 const EL0_REQ_SOCK_SEND: u32 = 0x16;
 const EL0_REQ_SOCK_RECV: u32 = 0x17;
 const EL0_REQ_SOCK_CLOSE: u32 = 0x18;
+// Pipe parks (house-1mo.3, validated below; req codes mirror the svc imms
+// so the Haskell park loop reads the trapped imm back unchanged).
+const EL0_REQ_PIPE: u32 = 0x19;
+const EL0_REQ_DUP2: u32 = 0x1A;
 // COW fault park (not an svc number: the RO perm guard parks a write to a
 // shared page so Haskell can copy/remap RW; resumed x0 is the trapped x0
 // so the faulting store retries).
@@ -611,6 +622,56 @@ unsafe fn validate_sock(op: u32, x0: u64, x1: u64, _x2: u64) -> i64 {
 pub unsafe extern "C" fn house_sock_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32 {
     // SAFETY: delegates to the lock-free validator.
     let r = unsafe { validate_sock(op, x0, x1, x2) };
+    if r == VALID_PARK {
+        1
+    } else if r == ENOSYS || r == EFAULT || r == EINVAL {
+        0
+    } else {
+        -22
+    }
+}
+
+// Shared pipe validator: VALID_PARK when the call is well-formed and should
+// park for Haskell pairing, otherwise a precise errno (EFAULT/EINVAL).
+// Arg convention (svc x0..x2): PIPE(ignored, wfd_va, ignored) validates only
+// x1 with `validate_user_buffer(x1, 4)` — the 4-byte user store where Haskell
+// writes the write-end fd on resume (x0/x2 carry no meaning, ignored like
+// CLOSE's args); DUP2(old, new, _) checks `new <= 34` (fd-table range
+// 0..34; old lives Haskell-side, re-checked on pairing). Never blocks.
+unsafe fn validate_pipe(op: u32, _x0: u64, x1: u64, _x2: u64) -> i64 {
+    unsafe {
+        match op {
+            HOUSE_SVC_PIPE => {
+                if validate_user_buffer(x1, 4) != 0 {
+                    return EFAULT;
+                }
+                VALID_PARK
+            }
+            HOUSE_SVC_DUP2 => {
+                if x1 > 34 {
+                    return EINVAL;
+                }
+                VALID_PARK
+            }
+            _ => EINVAL,
+        }
+    }
+}
+
+/// Pipe-svc park gate: 1 park, 0 fail-through, -22 unknown op.
+///
+/// # Safety
+///
+/// Call from EL1 trap context; safe with any register values (integer plus
+/// page-table validation only, never blocks).
+// SAFETY: trap context (`c_handle_sync` park gate); integer + page-table
+// validation only, no locks or allocation. Returns 1 when validated and the
+// caller should park, 0 when validation failed (caller falls through to
+// dispatch for the precise errno), -22 unknown op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_pipe_should_park(op: u32, x0: u64, x1: u64, x2: u64) -> i32 {
+    // SAFETY: delegates to the lock-free validator.
+    let r = unsafe { validate_pipe(op, x0, x1, x2) };
     if r == VALID_PARK {
         1
     } else if r == ENOSYS || r == EFAULT || r == EINVAL {
@@ -1697,6 +1758,24 @@ pub unsafe extern "C" fn house_svc_dispatch(
                     r
                 }
             }
+            HOUSE_SVC_PIPE | HOUSE_SVC_DUP2 => {
+                // Validate-then-park like the fd slice: well-formed calls
+                // park in `c_handle_sync` before reaching dispatch; reaching
+                // here means unregistered slot (fail closed ENOSYS) or a
+                // trap-side errno (bad *x1 store / new > 34, never parked).
+                let r = validate_pipe(imm, x0, x1, x2);
+                if r == VALID_PARK {
+                    if !gpr.is_null() {
+                        *gpr = -38i64 as u64;
+                    }
+                    -38
+                } else {
+                    if !gpr.is_null() {
+                        *gpr = r as u64;
+                    }
+                    r
+                }
+            }
             HOUSE_SVC_EXEC => {
                 // Validate-then-park like OPEN: well-formed paths park in
                 // `c_handle_sync`; reaching here means unregistered slot
@@ -1830,6 +1909,32 @@ mod tests {
             );
             assert_eq!(validate_sock(HOUSE_SVC_SOCK_SEND, 0x01000000, 8, 0), -14);
             assert_eq!(validate_sock(HOUSE_SVC_SOCK_RECV, 0x1000, 8, 0), -14);
+        }
+    }
+
+    #[test]
+    fn pipe_gates_shape() {
+        unsafe {
+            assert_eq!(validate_pipe(0xFF, 0, 0, 0), -22);
+            assert_eq!(validate_pipe(HOUSE_SVC_PIPE, 0, 0x1000, 0), -14);
+            assert_eq!(validate_pipe(HOUSE_SVC_PIPE, 0, 0x01000000, 0), -14);
+            assert_eq!(validate_pipe(HOUSE_SVC_DUP2, 0, 35, 0), -22);
+            assert_eq!(validate_pipe(HOUSE_SVC_DUP2, 0, 34, 0), 1);
+            assert_eq!(validate_pipe(HOUSE_SVC_DUP2, 3, 1, 99), 1);
+            assert_eq!(house_pipe_should_park(HOUSE_SVC_PIPE, 0, 0x1000, 0), 0);
+            assert_eq!(house_pipe_should_park(HOUSE_SVC_DUP2, 0, 35, 0), 0);
+            assert_eq!(house_pipe_should_park(HOUSE_SVC_DUP2, 0, 1, 0), 1);
+            // Unknown op fails through (validator EINVAL → gate 0) so dispatch
+            // reports -22 inline — same shape as the fd/sock gates.
+            assert_eq!(house_pipe_should_park(0xFF, 0, 0, 0), 0);
+            assert_eq!(
+                house_svc_dispatch(HOUSE_SVC_PIPE, 0, 0x1000, 0, 0, core::ptr::null_mut()),
+                -14
+            );
+            assert_eq!(
+                house_svc_dispatch(HOUSE_SVC_DUP2, 0, 35, 0, 0, core::ptr::null_mut()),
+                -22
+            );
         }
     }
 

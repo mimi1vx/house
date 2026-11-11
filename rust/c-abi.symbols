@@ -212,6 +212,7 @@ house_mmu_set_ttbr0
 house_mmu_update_alias
 house_page_budget_reset
 house_page_budget_try_acquire
+house_pipe_should_park
 house_pipe_wait
 house_probe_addr
 house_probe_core
