@@ -54,14 +54,14 @@ mkW n
   | n <= 30 = Just (W n)
   | otherwise = Nothing
 
--- | svc immediate, bounded to the existing EL0 set (@0x00..0x14@).
+-- | svc immediate, bounded to the existing EL0 set (@0x00..0x1A@).
 newtype SvcImm = SvcImm {svcImmValue :: Word8}
   deriving (Eq, Show)
 
 -- | Smart constructor for svc immediates. @Nothing@ when out of range.
 mkSvc :: Word8 -> Maybe SvcImm
 mkSvc n
-  | n <= 0x14 = Just (SvcImm n)
+  | n <= 0x1A = Just (SvcImm n)
   | otherwise = Nothing
 
 -- | 12-bit immediate for @add@/@sub@/@cmp@/@ldr@/@strb@ offsets (0..4095).

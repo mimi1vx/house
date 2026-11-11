@@ -4,7 +4,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, catch, evaluate)
 import Control.Monad (unless, when)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 import Userspace.Asm (mkSvc, mkU12, mkW, mkX)
@@ -58,8 +58,11 @@ main = do
   when (isJust (mkW 45)) $ do
     hPutStrLn stderr "asm: mkW 45 must be Nothing"
     exitFailure
-  when (isJust (mkSvc 0x15)) $ do
-    hPutStrLn stderr "asm: mkSvc 0x15 must be Nothing"
+  when (isNothing (mkSvc 0x1A)) $ do
+    hPutStrLn stderr "asm: mkSvc 0x1A must be Just"
+    exitFailure
+  when (isJust (mkSvc 0x1B)) $ do
+    hPutStrLn stderr "asm: mkSvc 0x1B must be Nothing"
     exitFailure
   when (isJust (mkU12 4096)) $ do
     hPutStrLn stderr "asm: mkU12 4096 must be Nothing"

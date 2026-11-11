@@ -80,10 +80,12 @@ import Kernel.Initramfs.Cpio qualified as Cpio
 import Kernel.Initramfs.Unpack qualified as Unpack
 import Kernel.Log.Dmesg qualified as Dmesg
 import Kernel.Shell.Commands qualified as Shell
+import Kernel.Userspace.Fd qualified as Fd
 import Kernel.Userspace.Linker qualified as Linker
 import Kernel.Userspace.Loader qualified as Ldr
 import Kernel.Userspace.Process qualified as Proc
 import Kernel.Userspace.Trampoline qualified as Tramp
+import Kernel.Userspace.Types (Pid (..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
@@ -1845,6 +1847,11 @@ main = do
       , check "svc mask full allows all" svcMaskFullGolden
       , check "svc mask narrow revokes one" svcMaskNarrowGolden
       , check "svc mask fork inherit exec retain" svcMaskInheritGolden
+      , checkIO "pipe round-trip" pipeRoundTripGolden
+      , checkIO "pipe EOF after close" pipeEofGolden
+      , checkIO "pipe write no readers fails" pipeNoReadersGolden
+      , checkIO "pipe fork shares buffer" pipeForkGolden
+      , checkIO "pipe dup2 onto 1 then write" pipeDup2Golden
       , checkIO "blockdev fake maps to FsError" blockDevGolden
       , checkIO "blk corrupt entry dropped from ls" blkCorruptDroppedGolden
       , checkIO "console hook set clear" consoleHookGolden
@@ -2608,12 +2615,12 @@ wedgedGolden = do
     return (res == Left IT.WouldBlock)
   return (r == Just True)
 
--- | Full mask allows every defined imm and denies beyond 0x18.
+-- | Full mask allows every defined imm and denies beyond 0x1A.
 svcMaskFullGolden :: Bool
 svcMaskFullGolden =
-  all (Proc.svcAllowed Proc.svcFullMask) [0 .. 0x18]
-    && not (Proc.svcAllowed Proc.svcFullMask 0x19)
-    && Proc.svcFullMask == 0x1FFFFFF
+  all (Proc.svcAllowed Proc.svcFullMask) [0 .. 0x1A]
+    && not (Proc.svcAllowed Proc.svcFullMask 0x1B)
+    && Proc.svcFullMask == 0x7FFFFFF
 
 -- | Narrowing revokes exactly one imm.
 svcMaskNarrowGolden :: Bool
@@ -2634,6 +2641,89 @@ svcMaskInheritGolden =
         && Proc.svcAllowed child 0x00
         && retained == child
         && Proc.svcAllowed Proc.svcFullMask 0x01
+
+{- | Pipe round-trip: fdPipe allocates a read+write pair, write stores,
+read drains back.
+-}
+pipeRoundTripGolden :: IO Bool
+pipeRoundTripGolden = HM.runH $ do
+  let pid = Pid 7001
+  r <- Fd.fdPipe pid
+  case r of
+    Left _ -> return False
+    Right (rd, wr) -> do
+      w <- Fd.fdWrite pid wr [104, 105]
+      ok <- case w of
+        Left _ -> return False
+        Right k -> do
+          c <- Fd.fdRead pid rd 64
+          return (k == 2 && c == Right [104, 105])
+      Fd.fdRelease pid
+      return ok
+
+-- | EOF after close: closing the write end makes the read end see [].
+pipeEofGolden :: IO Bool
+pipeEofGolden = HM.runH $ do
+  let pid = Pid 7002
+  r <- Fd.fdPipe pid
+  case r of
+    Left _ -> return False
+    Right (rd, wr) -> do
+      _ <- Fd.fdWrite pid wr [7, 8, 9]
+      _ <- Fd.fdClose pid wr
+      c <- Fd.fdRead pid rd 64
+      d <- Fd.fdRead pid rd 64
+      Fd.fdRelease pid
+      return (c == Right [7, 8, 9] && d == Right [])
+
+-- | Write with no readers fails broken-pipe (EINVAL-shaped Left).
+pipeNoReadersGolden :: IO Bool
+pipeNoReadersGolden = HM.runH $ do
+  let pid = Pid 7003
+  r <- Fd.fdPipe pid
+  case r of
+    Left _ -> return False
+    Right (rd, wr) -> do
+      _ <- Fd.fdClose pid rd
+      w <- Fd.fdWrite pid wr [1]
+      Fd.fdRelease pid
+      return (w == Left (Fd.FdInval "broken pipe"))
+
+-- | Fork shares the buffer: the child reads what the parent wrote.
+pipeForkGolden :: IO Bool
+pipeForkGolden = HM.runH $ do
+  let pa = Pid 7004
+      ch = Pid 7005
+  r <- Fd.fdPipe pa
+  case r of
+    Left _ -> return False
+    Right (rd, wr) -> do
+      Fd.fdFork pa ch
+      w <- Fd.fdWrite pa wr [1, 2, 3]
+      c <- Fd.fdRead ch rd 8
+      Fd.fdRelease pa
+      Fd.fdRelease ch
+      return (w == Right 3 && c == Right [1, 2, 3])
+
+{- | DUP2 onto 1 installs a real fd 1: fdWrite (Fd 1) stores the count.
+This is the assertion the stdout-migration slice rests on.
+-}
+pipeDup2Golden :: IO Bool
+pipeDup2Golden = HM.runH $ do
+  let pid = Pid 7006
+  r <- Fd.fdPipe pid
+  case r of
+    Left _ -> return False
+    Right (rd, Fd.Fd wn) -> do
+      d <- Fd.fdDup2 pid wn 1
+      ok <- case d of
+        Left _ -> return False
+        Right () -> do
+          w <- Fd.fdWrite pid (Fd.Fd 1) [9, 9, 9, 9]
+          c <- Fd.fdRead pid rd 8
+          return (w == Right 4 && c == Right [9, 9, 9, 9])
+      Fd.fdRelease pid
+      return ok
 
 {- | BlockDev mapping: a fake device with all-zero block 0 reads as empty,
 and an error return surfaces as FsError (not a throw).

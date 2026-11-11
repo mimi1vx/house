@@ -140,18 +140,18 @@ foreign import ccall unsafe "house_svc_mask_set" c_svc_mask_set :: Ptr Word64 ->
 
 foreign import ccall unsafe "house_svc_mask_get" c_svc_mask_get :: Ptr Word64 -> IO Word32
 
--- | Full syscall mask: 0x00..0x18 allowed.
+-- | Full syscall mask: 0x00..0x1A allowed.
 svcFullMask :: Word32
-svcFullMask = 0x1FFFFFF
+svcFullMask = 0x7FFFFFF
 
--- | Pure mask check: allowed iff imm <= 0x18 and the bit is set.
+-- | Pure mask check: allowed iff imm <= 0x1A and the bit is set.
 svcAllowed :: Word32 -> Word32 -> Bool
-svcAllowed mask imm = imm <= 0x18 && (mask .&. (1 `shiftL` fromIntegral imm)) /= 0
+svcAllowed mask imm = imm <= 0x1A && (mask .&. (1 `shiftL` fromIntegral imm)) /= 0
 
 -- | Pure narrow: clear one imm bit (revoke).
 svcNarrow :: Word32 -> Word32 -> Word32
 svcNarrow mask imm
-  | imm > 0x18 = mask
+  | imm > 0x1A = mask
   | otherwise = mask .&. complement (1 `shiftL` fromIntegral imm)
 
 -- | Write a mask and read it back: False when the Rust table dropped it.
@@ -171,7 +171,7 @@ inheritSvcMask src dst = do
 -- | Revoke one syscall for a live pid (shell verb). Returns the new mask.
 svcMaskRevoke :: Pid -> Word32 -> H (Either String Word32)
 svcMaskRevoke pid imm
-  | imm > 0x18 = return (Left "imm out of range 0x00..0x18")
+  | imm > 0x1A = return (Left "imm out of range 0x00..0x1A")
   | otherwise = withQSem userSem $ do
       mp <- readRef procMap
       case Map.lookup pid mp of
@@ -211,10 +211,12 @@ unmapStackPage pdir stk = do
 
 {- | Request parked by an EL0 trap (svc #imm). Yield plus brk/fd
 0x03..0x07/0x0A plus fork 0x08/wait 0x09/exec 0x0B plus dir 0x0C..0x0F
-plus sock 0x15..0x18 plus IPC 0x10..0x13 ride
+plus sock 0x15..0x18 plus pipe 0x19/0x1A plus IPC 0x10..0x13 ride
 the ring; GRANT_MAP 0x14 stays inline ENOSYS. Each IPC request carries the
 trapped x0..x3 (ep, va, nwords, tag); fd requests carry their trapped
-x0..x2 (see 'classify' below); WAIT carries the child pid in x0, EXEC the
+x0..x2 (see 'classify' below); PIPE carries its trapped x1 (the user VA
+receiving the write-end fd) and DUP2 its trapped x0/x1 (old, new);
+WAIT carries the child pid in x0, EXEC the
 path VA in x0, FORK takes no args; MKDIR/UNLINK carry the path VA in x0,
 STAT/GETDENTS carry (path VA, buf VA, len). SOCK_OPEN carries (packed
 IPv4, port), SOCK_SEND/SOCK_RECV carry (buf VA, len), SOCK_CLOSE takes
@@ -248,6 +250,8 @@ data ParkRequest
   | ReqSockSend Word64 Word64
   | ReqSockRecv Word64 Word64
   | ReqSockClose
+  | ReqPipe Word64
+  | ReqDup2 Word64 Word64
   | ReqFault Word64 Word64
   | ReqFaultKill Word64 Word64
   | ReqPreempt Word64
@@ -1433,12 +1437,15 @@ killPid pid@(Pid pidInt) = do
 capability is pinned while this thread polls. EXIT wins over PARK; yield
 resumes immediately with x0 = 0; brk grows via 'procBrkGrow' (resumes the
 new break); fd 0x04..0x07/0x0A run against the pid's 'Fd' table (per-pid,
-so cross-pid use fails EBADF); fork 0x08 shares via 'shareAddrSpace'
+so cross-pid use fails EBADF); pipe 0x19/0x1A run against the same table
+('fdPipe' allocates the pair, 'fdDup2' aliases onto 0..34); fork 0x08 shares via 'shareAddrSpace'
 (child x0 = 0, parent resumes the child pid); wait 0x09 blocks in 'waitPid'
 until the waiter's own child exits (reaps, resumes the exit code); exec 0x0B replaces
 the image via 'execReplace' (resumes 0 in the new image); dir 0x0C..0x0F
 run against the pid's VFS namespace (MKDIR/UNLINK resume 0, STAT/GETDENTS
-resume the rendered byte count); a write to a cow
+resume the rendered byte count); PIPE resumes the read-end fd number with
+the write-end number stored as a 4-byte LE word at the x1 VA (both ends
+closed and EFAULT resumed when the store faults); DUP2 resumes 0; a write to a cow
 page parks FAULT and 'breakCow' copies/remaps RW (resumes the trapped x0
 so the faulting store retries); an over-quantum frame parks PREEMPT and the
 baton passes to the next runnable pid ('Sched.schedElectNext', resume x0);
@@ -1539,6 +1546,8 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                 Just (ReqSockSend va ln) -> do handleSockSend va ln; loop
                 Just (ReqSockRecv va ln) -> do handleSockRecv va ln; loop
                 Just ReqSockClose -> do handleSockClose; loop
+                Just (ReqPipe va) -> do handlePipe va; loop
+                Just (ReqDup2 o n) -> do handleDup2 o n; loop
                 Just (ReqFault x0 va) -> do cont <- handleDemandFault x0 va; when cont loop
                 Just (ReqFaultKill _x0 va) -> do handleFaultKill va
                 Just (ReqPreempt x0) -> do handlePreempt x0; loop
@@ -1953,6 +1962,27 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
       case r of
         Left e -> resumeWith (sockErrno e)
         Right () -> resumeWith 0
+    handlePipe va = do
+      r <- Fd.fdPipe pid
+      case r of
+        Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
+        Right (Fd.Fd rd, Fd.Fd wr) -> do
+          let wb = map (\s -> fromIntegral ((wr `shiftR` s) .&. 0xFF) :: Word8) [0, 8, 16, 24]
+          mRc <- writeUserBytes pid pdir va wb
+          case mRc of
+            Nothing -> return ()
+            Just 0 -> resumeWith (fromIntegral rd)
+            Just rc -> do
+              _ <- Fd.fdClose pid (Fd.Fd rd)
+              _ <- Fd.fdClose pid (Fd.Fd wr)
+              resumeWith (fromIntegral rc)
+    handleDup2 o n
+      | n > 34 = resumeWith negINVAL
+      | otherwise = do
+          r <- Fd.fdDup2 pid (fromIntegral o) (fromIntegral n)
+          case r of
+            Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
+            Right () -> resumeWith 0
 
 {- | Read nwords from a live pid's user VA under 'userSem' (so 'freePDir'
 cannot run concurrently). Nothing when reaped underfoot; 0-length reads
@@ -2106,7 +2136,8 @@ VA), 0x0D to unlink (x0 = path VA), 0x0E to stat / 0x0F to getdents
 (x0 = path VA, x1 = buf, x2 = len), 0x10..0x13 to IPC (with the
 trapped x0..x3 as ep/va/nwords/tag), 0x15 to SOCK_OPEN (packed IPv4,
 port), 0x16/0x17 to SOCK_SEND/SOCK_RECV (buf VA, len), 0x18 to
-SOCK_CLOSE, 0x1F to a COW fault (trapped x0 plus
+SOCK_CLOSE, 0x19 to PIPE (x1 = write-end VA), 0x1A to DUP2 (x0 = old,
+x1 = new), 0x1F to a COW fault (trapped x0 plus
 the fault VA from the slot), 0x1D to an unhandled EL0 fault kill (trapped
 x0 plus the fault VA), 0x1E to a timer preemption (trapped x0),
 anything else is unknown (resumed with
@@ -2161,6 +2192,8 @@ tryTakeParkedOnce pdir = do
     classify 0x16 va ln _ _ = ReqSockSend va ln
     classify 0x17 va ln _ _ = ReqSockRecv va ln
     classify 0x18 _ _ _ _ = ReqSockClose
+    classify 0x19 _ va _ _ = ReqPipe va
+    classify 0x1A o n _ _ = ReqDup2 o n
     classify w _ _ _ _ = ReqUnknown w
 
 takeParkedDrained :: Ptr Word64 -> H (Maybe ParkRequest)

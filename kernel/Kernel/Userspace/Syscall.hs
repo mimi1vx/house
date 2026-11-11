@@ -6,7 +6,7 @@ Description : SVC -> IPC/fd/brk shims docs.
 Stability   : experimental
 
   Syscalls 0x03..0x07/0x0A + fork 0x08/wait 0x09/exec 0x0B + dir
-  0x0C..0x0F + 0x10..0x13 + sock 0x15..0x18
+  0x0C..0x0F + 0x10..0x13 + sock 0x15..0x18 + pipe 0x19/0x1A
   delegate through the park/resume ring: Rust ('svc.rs'
   'house_brk_should_park' / 'house_fd_should_park' / 'house_dir_should_park'
   / 'house_fork_should_park' / 'house_wait_should_park'
@@ -56,6 +56,8 @@ module Kernel.Userspace.Syscall (
   syscallSockSend,
   syscallSockRecv,
   syscallSockClose,
+  syscallPipe,
+  syscallDup2,
 )
 where
 
@@ -125,6 +127,31 @@ syscallSockOpen = 0x15
 syscallSockSend = 0x16
 syscallSockRecv = 0x17
 syscallSockClose = 0x18
+
+{- | Pipe/dup2 numbers (svc #imm, pipe slice). PIPE takes (ignored, wfd VA,
+ignored): Haskell allocates a read+write pair in the caller's pid (fds
+from 3..34; 'FdNoSpace' when fewer than two slots are free), stores the
+write-end number as a 4-byte LE word at the x1 VA ('EFAULT' plus both
+ends closed when the store faults), and resumes the read-end number in
+x0. This one-resume-plus-one-out-param shape mirrors STAT/GETDENTS: an
+svc returns a single x0, and a two-call convention would race under fork.
+DUP2 takes (old, new, ignored): @new@ must be 0..34 ('EINVAL' otherwise,
+checked trap-side and re-checked here), @old@ must be live ('EBADF'
+otherwise); the prior occupant of @new@ is closed first (POSIX-like;
+@old == new@ is a no-op), and a duped pipe end keeps sharing the buffer.
+Fd 0/1 become real table entries only via DUP2; without it @WRITE fd 1@
+stays 'EBADF' as today. Pipes hold 64 KiB: reads drain up to the request,
+poll bounded (~5s yield-poll, then idle-empty like console) while writers
+live, and see EOF once all writers close; writes to a readerless pipe
+resume 'EINVAL' (broken pipe); a full pipe polls bounded then short-writes
+the stored count (never silent truncation). 'SEEK' on pipes is 'EINVAL'.
+Fork inherits both ends (shared buffer, counts bumped); fds stay open
+across 'EXEC' (already true per the exec contract, restated because
+pipelines depend on it).
+-}
+syscallPipe, syscallDup2 :: Int
+syscallPipe = 0x19
+syscallDup2 = 0x1A
 
 {- | brk contract: EL0 svc 0x03 parks and Haskell 'procBrkGrow' extends the
 caller's page map with zero pages inside 0x01000000-0x1000000000;

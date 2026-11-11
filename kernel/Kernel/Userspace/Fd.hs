@@ -6,9 +6,16 @@ Description : Per-pid EL0 fd tables over the VFS namespaces.
 Stability   : experimental
 
 Per-pid offsets over 'Kernel.FileSystem.Vfs'. Fds 3..34 per pid (stdio
-0-2 reserved: EL0 svc WRITE uses fd 1 for UART). All paths go through
-'Vfs.splitPath' in the opener's namespace on every call, except the
-reserved '/dev/console' which binds to the virtio-console endpoint via
+0-2 reserved: EL0 svc WRITE uses fd 1 for UART). DUP2 may additionally
+install entries at 0/1 (the ONLY way fd 0/1 become real table entries;
+without it @fdWrite (Fd 1)@ stays EBADF). Pipes are pairs of ends
+sharing one 64 KiB buffer 'Ref' (per-end offsets unused: the buffer is
+the offset); pipe reads drain, see EOF once all writers close, and poll
+bounded (~5s, console-style) while writers live; pipe writes to a
+readerless pipe fail broken-pipe and a full pipe short-writes after a
+bounded poll. All paths go through
+'Vfs.splitPath' in the opener's namespace on every call, except pipes
+and the reserved '/dev/console' which binds to the virtio-console endpoint via
 the IPC nameservice (no VFS node, no new svc); console reads poll bounded
 (~5s) and writes chunk to the 4K grant page. All lengths are
 capped at 64 KiB (matches the svc user-buffer bound); the RamFS page quota
@@ -16,21 +23,26 @@ capped at 64 KiB (matches the svc user-buffer bound); the RamFS page quota
 and no fd path grows it.
 
 Isolation: tables are keyed by 'Pid', so a cross-pid fd use misses the
-caller's map and fails EBADF. 'fdFork' copies entries+offsets on fork;
-'fdRelease' drops the table on wait/kill (no leak over fork/exit cycles).
+caller's map and fails EBADF. 'fdFork' copies entries+offsets on fork
+(pipe ends share the buffer ref with bumped reader/writer counts);
+'fdRelease' drops the table on wait/kill, closing pipe ends first (no leak
+over fork/exit cycles).
 
 Lock order: 'fdSem' is a leaf; it is never held across 'Vfs' calls
-(which take @registrySem@ then backend sems). Entries are snapshotted
-under the lock, VFS I/O runs unlocked, then offsets are committed
-under the lock. Each entry remembers the opener's namespace; 'fdOpen'
-resolves through the pid's namespace via 'vfsEnsurePid'.
+(which take @registrySem@ then backend sems) or pipe-block polling.
+Entries are snapshotted under the lock, VFS I/O runs unlocked, then
+offsets are committed under the lock. Pipe buffer reads/writes are short
+critical sections under the lock; the bounded yield-poll loops drop the
+lock across each 'threadDelay'. Each file entry remembers the opener's
+namespace; 'fdOpen' resolves through the pid's namespace via 'vfsEnsurePid'.
 
-EL0 trap wiring rides the delegation ring ('Syscall' 0x04..0x07 + 0x0A):
-Rust ('svc.rs' 'house_fd_should_park') validates the path NUL-termination
-(256B) and buffer window (64K) trap-side and parks; Haskell
+EL0 trap wiring rides the delegation ring ('Syscall' 0x04..0x07 + 0x0A,
+pipe 0x19/0x1A): Rust ('svc.rs' 'house_fd_should_park' /
+'house_pipe_should_park') validates the path NUL-termination
+(256B), buffer window (64K), and PIPE/DUP2 args trap-side and parks; Haskell
 ('Kernel.Userspace.Process.parkLoop') performs the table op and resumes
-with the result in x0. The shell 'fdtest' verb exercises this table from
-EL1 under pid 0.
+with the result in x0. The shell 'fdtest' verb exercises the file half of
+this table from EL1 under pid 0.
 -}
 module Kernel.Userspace.Fd (
   Fd (..),
@@ -39,9 +51,11 @@ module Kernel.Userspace.Fd (
   fdErrorToString,
   fdErrorToErrno,
   fdOpen,
+  fdPipe,
   fdRead,
   fdWrite,
   fdClose,
+  fdDup2,
   fdSeek,
   fdFork,
   fdRelease,
@@ -58,6 +72,7 @@ module Kernel.Userspace.Fd (
 )
 where
 
+import Control.Monad (forM_)
 import Data.Bits (complement, (.&.))
 import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
@@ -177,14 +192,91 @@ consoleWrite content = do
         Left _ -> return (Left (FdInval "con write"))
         Right () -> go slot rest' (k + length chunk)
 
--- | Table entry: absolute path + offset + access mode + opener namespace.
-data Entry = Entry {
-  entPath :: FilePath
-  , entOff :: Int
-  , entAcc :: Int
-  , entNs :: NamespaceId
+{- | Table entry: a file (path + offset + access mode + opener
+namespace) or one end of a pipe. Both ends of a pipe point at the same
+'Ref'-held 'PipeState'; per-end offsets are unused for pipes.
+-}
+data Entry
+  = FileEntry {
+      entPath :: FilePath
+      , entOff :: Int
+      , entAcc :: Int
+      , entNs :: NamespaceId
+      }
+  | PipeEntry
+      -- Shared buffer 'Ref' and True for the read end.
+      (Ref PipeState)
+      Bool
+  deriving (Eq)
+
+instance Show Entry where
+  show (FileEntry p o a _) = "FileEntry " ++ show p ++ " " ++ show o ++ " " ++ show a
+  show (PipeEntry _ r) = "PipeEntry read=" ++ show r
+
+{- | Shared pipe buffer: one FIFO capped at 'maxFdBytes' plus the live
+reader/writer end counts. All ends (across pids after fork/dup2) point
+at one 'Ref'; last-writer close surfaces EOF, last-reader close
+surfaces broken-pipe.
+-}
+data PipeState = PipeState {
+  pipeBuf :: [Word8]
+  , pipeReaders :: Int
+  , pipeWriters :: Int
   }
   deriving (Eq, Show)
+
+{- | Bounded pipe read on a read end: nonempty drains up to n; empty with
+live writers polls yield-friendly (~5s, like console) then idles empty;
+empty with no writers is EOF. The lock is dropped across each poll.
+-}
+pipeReadWait :: Ref PipeState -> Int -> H (Either FdError [Word8])
+pipeReadWait st n
+  | n <= 0 = return (Right [])
+  | otherwise = go (500 :: Int)
+  where
+    go tries
+      | tries <= 0 = return (Right [])
+      | otherwise = do
+          r <- withQSem fdSem $ do
+            ps <- readRef st
+            if not (null (pipeBuf ps))
+              then do
+                let (out, rest) = splitAt n (pipeBuf ps)
+                writeRef st ps {pipeBuf = rest}
+                return (Just out)
+              else return (if pipeWriters ps == 0 then Just [] else Nothing)
+          case r of
+            Just out -> return (Right out)
+            Nothing -> threadDelay 10000 >> go (tries - 1)
+
+{- | Bounded pipe write on a write end: readerless is broken-pipe; a full
+buffer polls yield-friendly (~5s), then short-writes the stored count
+(never silent truncation). The lock is dropped across each poll.
+-}
+pipeWriteWait :: Ref PipeState -> [Word8] -> H (Either FdError Int)
+pipeWriteWait _ [] = return (Right 0)
+pipeWriteWait st content = go (500 :: Int)
+  where
+    go tries = do
+      r <- withQSem fdSem $ do
+        ps <- readRef st
+        if pipeReaders ps == 0
+          then return (Left (FdInval "broken pipe"))
+          else do
+            let room = maxFdBytes - length (pipeBuf ps)
+            if room > 0
+              then do
+                let k = min room (length content)
+                writeRef st ps {pipeBuf = pipeBuf ps ++ take k content}
+                return (Right (Just k))
+              else
+                if tries <= 0
+                  then return (Right (Just 0))
+                  else return (Right Nothing)
+      case r of
+        Left e -> return (Left e)
+        Right (Just k) -> return (Right k)
+        Right Nothing -> threadDelay 10000 >> go (tries - 1)
 
 {-# NOINLINE fdTable #-}
 fdTable :: Ref (Map Pid (Map Fd Entry))
@@ -271,8 +363,34 @@ fdOpen pid@(Pid pidInt) path flags
       case allocFd per of
         Nothing -> return (Left (FdInval "fd table full"))
         Just fd -> do
-          writeRef fdTable (Map.insert pid (Map.insert fd (Entry path 0 acc ns) per) m)
+          writeRef fdTable (Map.insert pid (Map.insert fd (FileEntry path 0 acc ns) per) m)
           return (Right fd)
+
+{- | Allocate a pipe read+write pair in the caller's pid (lowest two free
+fds >= 3; the read end takes the lower). 'FdNoSpace' when fewer than two
+slots are free, so a half-built pair never publishes. Both ends share one
+buffer 'Ref' with one reader and one writer.
+-}
+fdPipe :: Pid -> H (Either FdError (Fd, Fd))
+fdPipe pid = withQSem fdSem $ do
+  m <- readRef fdTable
+  let per = Map.findWithDefault Map.empty pid m
+      free2 = take 2 [Fd n | n <- [3 .. 3 + maxFdCount - 1], Map.notMember (Fd n) per]
+  case free2 of
+    [rd, wr] -> do
+      st <- newRef (PipeState [] 1 1)
+      let per' = Map.insert rd (PipeEntry st True) (Map.insert wr (PipeEntry st False) per)
+      writeRef fdTable (Map.insert pid per' m)
+      return (Right (rd, wr))
+    _ -> return (Left FdNoSpace)
+
+{- | Reposition a file entry's offset; pipes carry no offset (Nothing),
+so a commit racing a dup2-replacement fails EBADF instead of crashing
+a record update.
+-}
+setFileOff :: Entry -> Int -> Maybe Entry
+setFileOff (FileEntry p _ a ns) o = Just (FileEntry p o a ns)
+setFileOff _ _ = Nothing
 
 -- | Read up to n bytes from the pid's fd offset. Advances the offset.
 fdRead :: Pid -> Fd -> Int -> H (Either FdError [Word8])
@@ -282,6 +400,8 @@ fdRead pid fd n
       mEnt <- lookupEntry pid fd
       case mEnt of
         Nothing -> return (Left FdBadFd)
+        Just (PipeEntry st True) -> pipeReadWait st n
+        Just (PipeEntry _ False) -> return (Left (FdInval "not readable"))
         Just ent
           | entAcc ent == o_WRONLY -> return (Left (FdInval "not readable"))
           | entPath ent == consolePath -> consoleRead n
@@ -300,11 +420,11 @@ fdRead pid fd n
                           off' = entOff ent + length chunk
                       withQSem fdSem $ do
                         m <- readRef fdTable
-                        case Map.lookup pid m >>= Map.lookup fd of
+                        case Map.lookup pid m >>= Map.lookup fd >>= (`setFileOff` off') of
                           Nothing -> return (Left FdBadFd)
                           Just e2 -> do
                             let per = Map.findWithDefault Map.empty pid m
-                            writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = off'} per) m)
+                            writeRef fdTable (Map.insert pid (Map.insert fd e2 per) m)
                             return (Right chunk)
 
 -- | Write bytes at the pid's fd offset (read-modify-write). Advances the offset.
@@ -315,6 +435,10 @@ fdWrite pid fd content
       mEnt <- lookupEntry pid fd
       case mEnt of
         Nothing -> return (Left FdBadFd)
+        Just (PipeEntry st False)
+          | null content -> return (Right 0)
+          | otherwise -> pipeWriteWait st content
+        Just (PipeEntry _ True) -> return (Left (FdInval "not writable"))
         Just ent
           | entAcc ent == o_RDONLY -> return (Left (FdInval "not writable"))
           | entPath ent == consolePath -> consoleWrite content
@@ -344,24 +468,84 @@ fdWrite pid fd content
                               let off' = entOff ent + length content
                               withQSem fdSem $ do
                                 m <- readRef fdTable
-                                case Map.lookup pid m >>= Map.lookup fd of
+                                case Map.lookup pid m >>= Map.lookup fd >>= (`setFileOff` off') of
                                   Nothing -> return (Left FdBadFd)
                                   Just e2 -> do
                                     let per = Map.findWithDefault Map.empty pid m
-                                    writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = off'} per) m)
+                                    writeRef fdTable (Map.insert pid (Map.insert fd e2 per) m)
                                     return (Right (length content))
 
--- | Close a pid's fd (miss is EBADF).
+{- | Close a pid's fd (miss is EBADF). Closing a pipe end decrements its
+shared count: last-writer close surfaces EOF to readers, last-reader
+close surfaces broken-pipe to writers.
+-}
 fdClose :: Pid -> Fd -> H (Either FdError ())
 fdClose pid fd = withQSem fdSem $ do
   m <- readRef fdTable
   case Map.lookup pid m >>= Map.lookup fd of
     Nothing -> return (Left FdBadFd)
-    Just _ -> do
+    Just ent -> do
+      dropEnd ent
       let per = Map.findWithDefault Map.empty pid m
           per' = Map.delete fd per
       writeRef fdTable (if Map.null per' then Map.delete pid m else Map.insert pid per' m)
       return (Right ())
+
+{- | Alias @old@ onto @new@ (any 0..34; the ONLY way fd 0/1 become real
+table entries) in the pid, closing the prior occupant of @new@ first
+(POSIX-like; @old == new@ with a live @old@ is a no-op). Missing @old@
+is EBADF; @new@ outside 0..34 is EINVAL-shaped 'FdInval'. A duped pipe
+end shares the buffer 'Ref' (counts bumped, so the alias holds its end).
+-}
+fdDup2 :: Pid -> Int -> Int -> H (Either FdError ())
+fdDup2 pid old new
+  | new < 0 || new > 34 = return (Left (FdInval "bad fd"))
+  | otherwise = withQSem fdSem $ do
+      m <- readRef fdTable
+      let per = Map.findWithDefault Map.empty pid m
+      case Map.lookup (Fd old) per of
+        Nothing -> return (Left FdBadFd)
+        Just ent
+          | old == new -> return (Right ())
+          | otherwise -> do
+              per1 <- closeLocked per (Fd new)
+              shareEnd ent
+              writeRef fdTable (Map.insert pid (Map.insert (Fd new) ent per1) m)
+              return (Right ())
+  where
+    closeLocked per fd = case Map.lookup fd per of
+      Nothing -> return per
+      Just victim -> do
+        dropEnd victim
+        return (Map.delete fd per)
+
+{- | One more live reference on a pipe end's shared buffer (fork/dup2
+share); files have no shared state.
+-}
+shareEnd :: Entry -> H ()
+shareEnd (PipeEntry st isRead) = do
+  ps <- readRef st
+  writeRef
+    st
+    ( if isRead
+        then ps {pipeReaders = pipeReaders ps + 1}
+        else ps {pipeWriters = pipeWriters ps + 1}
+    )
+shareEnd (FileEntry {}) = return ()
+
+{- | Drop one pipe end reference (close/release/dup2-evict), clamped at 0
+so a double-drop degrades to EOF/broken-pipe, never a negative count.
+-}
+dropEnd :: Entry -> H ()
+dropEnd (PipeEntry st isRead) = do
+  ps <- readRef st
+  writeRef
+    st
+    ( if isRead
+        then ps {pipeReaders = max 0 (pipeReaders ps - 1)}
+        else ps {pipeWriters = max 0 (pipeWriters ps - 1)}
+    )
+dropEnd (FileEntry {}) = return ()
 
 -- | Reposition the pid's fd offset.
 fdSeek :: Pid -> Fd -> Int -> Int -> H (Either FdError Int)
@@ -369,6 +553,7 @@ fdSeek pid fd off whence = do
   mEnt <- lookupEntry pid fd
   case mEnt of
     Nothing -> return (Left FdBadFd)
+    Just (PipeEntry _ _) -> return (Left (FdInval "not seekable"))
     Just ent
       | entPath ent == consolePath -> return (Left (FdInval "not seekable"))
       | otherwise -> do
@@ -395,23 +580,35 @@ fdSeek pid fd off whence = do
                     then return (Left (FdInval "negative offset"))
                     else withQSem fdSem $ do
                       m <- readRef fdTable
-                      case Map.lookup pid m >>= Map.lookup fd of
+                      case Map.lookup pid m >>= Map.lookup fd >>= (`setFileOff` newOff) of
                         Nothing -> return (Left FdBadFd)
                         Just e2 -> do
                           let per = Map.findWithDefault Map.empty pid m
-                          writeRef fdTable (Map.insert pid (Map.insert fd e2 {entOff = newOff} per) m)
+                          writeRef fdTable (Map.insert pid (Map.insert fd e2 per) m)
                           return (Right newOff)
 
--- | Inherit entries+offsets on fork (fresh map, shared nothing mutable).
+{- | Inherit entries+offsets on fork (fresh map). Pipe ends share the
+buffer 'Ref' with bumped reader/writer counts, so the child holds its
+own ends (offsets are the buffer itself, not per-fd).
+-}
 fdFork :: Pid -> Pid -> H ()
 fdFork parent child = withQSem fdSem $ do
   m <- readRef fdTable
   case Map.lookup parent m of
     Nothing -> return ()
-    Just per -> writeRef fdTable (Map.insert child per m)
+    Just per -> do
+      forM_ (Map.elems per) shareEnd
+      writeRef fdTable (Map.insert child per m)
 
--- | Drop the pid's table on wait/kill (no leak over fork/exit cycles).
+{- | Drop the pid's table on wait/kill, closing pipe ends first (counts
+decremented, so survivors see EOF/broken-pipe, not a wedge). No leak
+over fork/exit cycles.
+-}
 fdRelease :: Pid -> H ()
 fdRelease pid = withQSem fdSem $ do
   m <- readRef fdTable
-  writeRef fdTable (Map.delete pid m)
+  case Map.lookup pid m of
+    Nothing -> return ()
+    Just per -> do
+      forM_ (Map.elems per) dropEnd
+      writeRef fdTable (Map.delete pid m)

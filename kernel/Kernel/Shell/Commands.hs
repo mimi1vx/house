@@ -267,7 +267,7 @@ helpTable =
   , ("       ", "run </path> [args...]", "load static aarch64 ELF from ramfs 0x01000000 window, argv+env on EL0 stack, svc write/exit/brk/fd/ipc, EL0 eret (TTBR0/ASID/pager)")
   , ("       ", "spawn </path> [args...]", "run without waiting (prints pid) | jobs -- list live pids | wait [pid] -- reap (all when bare)")
   , ("       ", "quantum <ticks>", "preempt quantum in timer ticks (0..1000000, 0 means 1; default 10)")
-  , ("       ", "svcmask <pid> <imm>", "revoke one syscall for a live pid (0x00..0x18)")
+  , ("       ", "svcmask <pid> <imm>", "revoke one syscall for a live pid (0x00..0x1A)")
   , ("       ", "fdtest", "per-pid EL1 fd open/write/seek/read/close over ramfs (2 MiB cap; EL0 svc 0x04..0x07+0x0A ride the ring; cross-pid use fails EBADF)")
   , ("       ", "forktest", "EL1 forkProc COW share/diverge/leak check (stack page shared RO+cow, breakCow diverges, refs drain)")
   , ("       ", "loaderrefs [path]", "launch two dynamic images (default /bin/hello-dyn), verify finalized DSO page sharing, then drain refs")
