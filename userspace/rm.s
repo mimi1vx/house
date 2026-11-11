@@ -1,4 +1,4 @@
-// EL0 rm for /bin/rm (pid1 slice).
+// EL0 rm for /bin/rm (pid1 slice + house-1mo.5).
 // Removes a file or empty dir via UNLINK 0x0D (x0 = path VA, resumes 0).
 // Needs argv[1]; prints `rm ok` + exit 0, else `rm fail` + exit 1.
 .arch armv8-a
@@ -16,7 +16,7 @@ _start:
     add     x1, x1, :lo12:okmsg
     mov     x2, #6
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "rm ok\n", 6)
+    svc     #0x06                   // WRITE_FD(1, "rm ok\n", 6)
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
 fail:
@@ -24,7 +24,7 @@ fail:
     add     x1, x1, :lo12:failmsg
     mov     x2, #8
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "rm fail\n", 8)
+    svc     #0x06                   // WRITE_FD(1, "rm fail\n", 8)
     mov     x0, #1
     svc     #0x02                   // EXIT(1)
 okmsg:

@@ -1,4 +1,4 @@
-// EL0 mkdir for /bin/mkdir (pid1 slice).
+// EL0 mkdir for /bin/mkdir (pid1 slice + house-1mo.5).
 // Creates one directory via MKDIR 0x0C (x0 = path VA, resumes 0).
 // Needs argv[1]; prints `mkdir ok` + exit 0, else `mkdir fail` + exit 1.
 .arch armv8-a
@@ -16,7 +16,7 @@ _start:
     add     x1, x1, :lo12:okmsg
     mov     x2, #9
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "mkdir ok\n", 9)
+    svc     #0x06                   // WRITE_FD(1, "mkdir ok\n", 9)
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
 fail:
@@ -24,7 +24,7 @@ fail:
     add     x1, x1, :lo12:failmsg
     mov     x2, #11
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "mkdir fail\n", 11)
+    svc     #0x06                   // WRITE_FD(1, "mkdir fail\n", 11)
     mov     x0, #1
     svc     #0x02                   // EXIT(1)
 okmsg:

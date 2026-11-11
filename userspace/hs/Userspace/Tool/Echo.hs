@@ -39,11 +39,11 @@ echoInstrs =
       u15 = mustU12 15
       u16 = mustU12 16
       u2048 = mustU12 2048
-      svcWrite = mustSvc 0x01
+      svcWrite = mustSvc 0x06
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 echo for /bin/echo (pid1 slice)."
+   in [ Comment "EL0 echo for /bin/echo (pid1 slice + house-1mo.5)."
       , Comment "Prints argv[1..] joined with single spaces plus a trailing newline via"
-      , Comment "svc WRITE (one call per word), exits 0. Bare `echo` prints just `\\n`."
+      , Comment "svc WRITE_FD (one call per word), exits 0. Bare `echo` prints just `\\n`."
       , Comment "String scans are capped at 2048 (kernel argv strings are <=1024 by the"
       , Comment "setupArgStack contract, so the cap only fires on a hostile stack)."
       , Arch "armv8-a"
@@ -74,7 +74,7 @@ echoInstrs =
       , MovImm x0 0
       , Svc svcExit (Just "EXIT(0)")
       , Blank
-      , Comment "putstr(x1): WRITE(1, x1, strlen_cap(x1, 2048)). Clobbers x0-x4."
+      , Comment "putstr(x1): WRITE_FD(1, x1, strlen_cap(x1, 2048)). Clobbers x0-x4."
       , Label "putstr"
       , StpPush x29 x30 SP
       , MovReg x29 SP
@@ -95,7 +95,7 @@ echoInstrs =
       , LocalInstr "3" (LdpPop x29 x30 SP)
       , Ret
       , Blank
-      , Comment "putc(w0): WRITE(1, &byte, 1) via stack scratch (SP stays 16-byte"
+      , Comment "putc(w0): WRITE_FD(1, &byte, 1) via stack scratch (SP stays 16-byte"
       , Comment "aligned throughout). Clobbers x0-x2."
       , Label "putc"
       , StpPush x29 x30 SP

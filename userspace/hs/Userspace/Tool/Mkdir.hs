@@ -21,9 +21,9 @@ mkdirInstrs =
       x1 = mustX 1
       x2 = mustX 2
       svcMkdir = mustSvc 0x0C
-      svcWrite = mustSvc 0x01
+      svcWrite = mustSvc 0x06
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 mkdir for /bin/mkdir (pid1 slice)."
+   in [ Comment "EL0 mkdir for /bin/mkdir (pid1 slice + house-1mo.5)."
       , Comment "Creates one directory via MKDIR 0x0C (x0 = path VA, resumes 0)."
       , Comment "Needs argv[1]; prints `mkdir ok` + exit 0, else `mkdir fail` + exit 1."
       , Arch "armv8-a"
@@ -41,7 +41,7 @@ mkdirInstrs =
       , AddLo12 x1 x1 "okmsg"
       , MovImm x2 9
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"mkdir ok\\n\", 9)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"mkdir ok\\n\", 9)"
       , MovImm x0 0
       , Trail (Svc svcExit Nothing) "EXIT(0)"
       , Label "fail"
@@ -49,7 +49,7 @@ mkdirInstrs =
       , AddLo12 x1 x1 "failmsg"
       , MovImm x2 11
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"mkdir fail\\n\", 11)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"mkdir fail\\n\", 11)"
       , MovImm x0 1
       , Trail (Svc svcExit Nothing) "EXIT(1)"
       , Label "okmsg"

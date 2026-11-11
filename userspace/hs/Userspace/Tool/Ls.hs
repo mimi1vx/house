@@ -23,12 +23,12 @@ lsInstrs =
       x19 = mustX 19
       x20 = mustX 20
       svcGetdents = mustSvc 0x0F
-      svcWrite = mustSvc 0x01
+      svcWrite = mustSvc 0x06
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 ls for /bin/ls (pid1 slice)."
+   in [ Comment "EL0 ls for /bin/ls (pid1 slice + house-1mo.5)."
       , Comment "Lists a directory via GETDENTS 0x0C..0x0F slice: svc #0x0F"
       , Comment "(x0 = path VA, x1 = buf VA, x2 = buflen) resumes the newline-separated"
-      , Comment "listing length, which is echoed with one WRITE. Path is argv[1],"
+      , Comment "listing length, which is echoed with one WRITE_FD. Path is argv[1],"
       , Comment "defaulting to `/`. Prints `ls fail` and exits 1 on any error."
       , Arch "armv8-a"
       , Text
@@ -57,7 +57,7 @@ lsInstrs =
       , AddLo12 x1 x1 "buf"
       , MovReg x2 x20
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, buf, n)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, buf, n)"
       , Label "done"
       , MovImm x0 0
       , Trail (Svc svcExit Nothing) "EXIT(0)"
@@ -66,7 +66,7 @@ lsInstrs =
       , AddLo12 x1 x1 "failmsg"
       , MovImm x2 8
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"ls fail\\n\", 8)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"ls fail\\n\", 8)"
       , MovImm x0 1
       , Trail (Svc svcExit Nothing) "EXIT(1)"
       , Label "defpath"

@@ -27,7 +27,7 @@ catInstrs =
       svcRead = mustSvc 0x05
       svcClose = mustSvc 0x07
       svcSeek = mustSvc 0x0A
-      svcWrite = mustSvc 0x01
+      svcWrite = mustSvc 0x06
       svcExit = mustSvc 0x02
    in [ Comment "EL0 cat for /bin/cat (pid1 slice)."
       , Comment "Streams a file to stdout via the fd ring: OPEN 0x04, READ 0x05 loop,"
@@ -75,7 +75,7 @@ catInstrs =
       , AddLo12 x1 x1 "buf"
       , MovReg x2 x20
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, buf, n)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, buf, n)"
       , B "read_loop"
       , Label "eof"
       , MovReg x0 x19
@@ -106,7 +106,7 @@ catInstrs =
       , AddLo12 x1 x1 "seekmsg"
       , MovImm x2 8
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"seek ok\\n\", 8)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"seek ok\\n\", 8)"
       , MovReg x0 x19
       , Trail (Svc svcClose Nothing) "CLOSE(fd)"
       , Cbnz x0 "fail"
@@ -114,7 +114,7 @@ catInstrs =
       , AddLo12 x1 x1 "okmsg"
       , MovImm x2 7
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"cat ok\\n\", 7)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"cat ok\\n\", 7)"
       , MovImm x0 0
       , Trail (Svc svcExit Nothing) "EXIT(0)"
       , Label "fail"
@@ -125,7 +125,7 @@ catInstrs =
       , AddLo12 x1 x1 "failmsg"
       , MovImm x2 9
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"cat fail\\n\", 9)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"cat fail\\n\", 9)"
       , MovImm x0 1
       , Trail (Svc svcExit Nothing) "EXIT(1)"
       , Label "enoent"
@@ -133,7 +133,7 @@ catInstrs =
       , AddLo12 x1 x1 "enoentmsg"
       , MovImm x2 12
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"cat: ENOENT\\n\", 12)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"cat: ENOENT\\n\", 12)"
       , MovImm x0 1
       , Trail (Svc svcExit Nothing) "EXIT(1)"
       , Label "defpath"

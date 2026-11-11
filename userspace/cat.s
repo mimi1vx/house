@@ -44,7 +44,7 @@ read_loop:
     add     x1, x1, :lo12:buf
     mov     x2, x20
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, buf, n)
+    svc     #0x06                   // WRITE_FD(1, buf, n)
     b       read_loop
 eof:
     mov     x0, x19
@@ -75,7 +75,7 @@ seek_ok:
     add     x1, x1, :lo12:seekmsg
     mov     x2, #8
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "seek ok\n", 8)
+    svc     #0x06                   // WRITE_FD(1, "seek ok\n", 8)
     mov     x0, x19
     svc     #0x07                   // CLOSE(fd)
     cbnz    x0, fail
@@ -83,7 +83,7 @@ seek_ok:
     add     x1, x1, :lo12:okmsg
     mov     x2, #7
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "cat ok\n", 7)
+    svc     #0x06                   // WRITE_FD(1, "cat ok\n", 7)
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
 fail:
@@ -94,7 +94,7 @@ fail:
     add     x1, x1, :lo12:failmsg
     mov     x2, #9
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "cat fail\n", 9)
+    svc     #0x06                   // WRITE_FD(1, "cat fail\n", 9)
     mov     x0, #1
     svc     #0x02                   // EXIT(1)
 enoent:
@@ -102,7 +102,7 @@ enoent:
     add     x1, x1, :lo12:enoentmsg
     mov     x2, #12
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "cat: ENOENT\n", 12)
+    svc     #0x06                   // WRITE_FD(1, "cat: ENOENT\n", 12)
     mov     x0, #1
     svc     #0x02                   // EXIT(1)
 defpath:

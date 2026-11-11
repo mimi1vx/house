@@ -22,9 +22,9 @@ statInstrs =
       x2 = mustX 2
       x20 = mustX 20
       svcStat = mustSvc 0x0E
-      svcWrite = mustSvc 0x01
+      svcWrite = mustSvc 0x06
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 stat for /bin/stat (pid1 slice)."
+   in [ Comment "EL0 stat for /bin/stat (pid1 slice + house-1mo.5)."
       , Comment "Stats a path via STAT 0x0E (x0 = path VA, x1 = buf VA, x2 = buflen):"
       , Comment "the kernel renders one text line (`dir ...` / `file ...`), resumes its"
       , Comment "length, and this echoes it. Needs argv[1]; exits 0, else `stat fail` + 1."
@@ -49,7 +49,7 @@ statInstrs =
       , AddLo12 x1 x1 "buf"
       , MovReg x2 x20
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, buf, n)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, buf, n)"
       , Label "done"
       , MovImm x0 0
       , Trail (Svc svcExit Nothing) "EXIT(0)"
@@ -58,7 +58,7 @@ statInstrs =
       , AddLo12 x1 x1 "failmsg"
       , MovImm x2 10
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"stat fail\\n\", 10)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"stat fail\\n\", 10)"
       , MovImm x0 1
       , Trail (Svc svcExit Nothing) "EXIT(1)"
       , Label "failmsg"

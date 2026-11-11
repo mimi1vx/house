@@ -33,9 +33,9 @@ writeInstrs =
       svcOpen = mustSvc 0x04
       svcWriteFd = mustSvc 0x06
       svcClose = mustSvc 0x07
-      svcWrite = mustSvc 0x01
+      svcWrite = mustSvc 0x06
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 write for /bin/write (pid1 slice)."
+   in [ Comment "EL0 write for /bin/write (pid1 slice + house-1mo.5)."
       , Comment "Writes argv[2..] joined with spaces to the file at argv[1] via the fd"
       , Comment "ring: OPEN 0x04 (O_WRONLY|O_CREAT|O_TRUNC), WRITE_FD 0x06, CLOSE 0x07."
       , Comment "Needs prog + path + text; payload capped at 1024 (one WRITE_FD, under"
@@ -101,7 +101,7 @@ writeInstrs =
       , AddLo12 x1 x1 "okmsg"
       , MovImm x2 9
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"write ok\\n\", 9)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"write ok\\n\", 9)"
       , MovImm x0 0
       , Trail (Svc svcExit Nothing) "EXIT(0)"
       , Label "fail_close"
@@ -115,7 +115,7 @@ writeInstrs =
       , AddLo12 x1 x1 "failmsg"
       , MovImm x2 11
       , MovImm x0 1
-      , Trail (Svc svcWrite Nothing) "WRITE(1, \"write fail\\n\", 11)"
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"write fail\\n\", 11)"
       , MovImm x0 1
       , Trail (Svc svcExit Nothing) "EXIT(1)"
       , Blank

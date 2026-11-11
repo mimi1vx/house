@@ -1,4 +1,4 @@
-// EL0 stat for /bin/stat (pid1 slice).
+// EL0 stat for /bin/stat (pid1 slice + house-1mo.5).
 // Stats a path via STAT 0x0E (x0 = path VA, x1 = buf VA, x2 = buflen):
 // the kernel renders one text line (`dir ...` / `file ...`), resumes its
 // length, and this echoes it. Needs argv[1]; exits 0, else `stat fail` + 1.
@@ -23,7 +23,7 @@ _start:
     add     x1, x1, :lo12:buf
     mov     x2, x20
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, buf, n)
+    svc     #0x06                   // WRITE_FD(1, buf, n)
 done:
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
@@ -32,7 +32,7 @@ fail:
     add     x1, x1, :lo12:failmsg
     mov     x2, #10
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "stat fail\n", 10)
+    svc     #0x06                   // WRITE_FD(1, "stat fail\n", 10)
     mov     x0, #1
     svc     #0x02                   // EXIT(1)
 failmsg:

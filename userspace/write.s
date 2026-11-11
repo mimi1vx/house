@@ -1,4 +1,4 @@
-// EL0 write for /bin/write (pid1 slice).
+// EL0 write for /bin/write (pid1 slice + house-1mo.5).
 // Writes argv[2..] joined with spaces to the file at argv[1] via the fd
 // ring: OPEN 0x04 (O_WRONLY|O_CREAT|O_TRUNC), WRITE_FD 0x06, CLOSE 0x07.
 // Needs prog + path + text; payload capped at 1024 (one WRITE_FD, under
@@ -64,7 +64,7 @@ join_done:
     add     x1, x1, :lo12:okmsg
     mov     x2, #9
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "write ok\n", 9)
+    svc     #0x06                   // WRITE_FD(1, "write ok\n", 9)
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
 fail_close:
@@ -78,7 +78,7 @@ fail:
     add     x1, x1, :lo12:failmsg
     mov     x2, #11
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "write fail\n", 11)
+    svc     #0x06                   // WRITE_FD(1, "write fail\n", 11)
     mov     x0, #1
     svc     #0x02                   // EXIT(1)
 

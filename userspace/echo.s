@@ -1,6 +1,6 @@
-// EL0 echo for /bin/echo (pid1 slice).
+// EL0 echo for /bin/echo (pid1 slice + house-1mo.5).
 // Prints argv[1..] joined with single spaces plus a trailing newline via
-// svc WRITE (one call per word), exits 0. Bare `echo` prints just `\n`.
+// svc WRITE_FD (one call per word), exits 0. Bare `echo` prints just `\n`.
 // String scans are capped at 2048 (kernel argv strings are <=1024 by the
 // setupArgStack contract, so the cap only fires on a hostile stack).
 .arch armv8-a
@@ -31,7 +31,7 @@ newline:
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
 
-// putstr(x1): WRITE(1, x1, strlen_cap(x1, 2048)). Clobbers x0-x4.
+// putstr(x1): WRITE_FD(1, x1, strlen_cap(x1, 2048)). Clobbers x0-x4.
 putstr:
     stp     x29, x30, [sp, #-16]!
     mov     x29, sp
@@ -48,11 +48,11 @@ putstr:
     ldp     x1, x4, [sp], #16       // x1 = ptr (x4 scratch)
     mov     x0, #1
     cbz     x2, 3f
-    svc     #0x01
+    svc     #0x06
 3:  ldp     x29, x30, [sp], #16
     ret
 
-// putc(w0): WRITE(1, &byte, 1) via stack scratch (SP stays 16-byte
+// putc(w0): WRITE_FD(1, &byte, 1) via stack scratch (SP stays 16-byte
 // aligned throughout). Clobbers x0-x2.
 putc:
     stp     x29, x30, [sp, #-16]!
@@ -62,7 +62,7 @@ putc:
     add     x1, sp, #15
     mov     x2, #1
     mov     x0, #1
-    svc     #0x01
+    svc     #0x06
     add     sp, sp, #16
     ldp     x29, x30, [sp], #16
     ret

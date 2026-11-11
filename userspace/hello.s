@@ -1,6 +1,6 @@
-// EL0 hello for /bin/hello (pid1 slice).
+// EL0 hello for /bin/hello (pid1 slice + house-1mo.5).
 // Source twin of the historic helloBytes blob: prints `Hello from EL0`
-// via svc WRITE and exits 0. /sbin/init execs this as its v1 child, and
+// via svc WRITE_FD and exits 0. /sbin/init execs this as its v1 child, and
 // qemu-userspace/qemu-fork (exec leg) assert this exact line.
 .arch armv8-a
 .text
@@ -11,7 +11,7 @@ _start:
     add     x1, x1, :lo12:msg
     mov     x2, #15
     mov     x0, #1
-    svc     #0x01                   // WRITE(1, "Hello from EL0\n", 15)
+    svc     #0x06                   // WRITE_FD(1, "Hello from EL0\n", 15)
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
 msg:
