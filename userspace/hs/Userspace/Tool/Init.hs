@@ -21,17 +21,20 @@ initInstrs =
       x1 = mustX 1
       x2 = mustX 2
       x19 = mustX 19
+      x20 = mustX 20
+      svcYield = mustSvc 0x00
       svcWrite = mustSvc 0x01
       svcExit = mustSvc 0x02
       svcFork = mustSvc 0x08
       svcWait = mustSvc 0x09
       svcExec = mustSvc 0x0B
    in [ Comment "EL0 pid1 for /sbin/init (pid1 slice)."
-      , Comment "v3: forks and execs /bin/sh, reaps it with wait, announces, and exits"
-      , Comment "with the child's status. The kernel logs `init pid N` at spawn and"
-      , Comment "`init exit CODE` at reap (Kernel.Init). One-shot: no respawn loop, so"
-      , Comment "a missing console fails closed once (`sh: ENOENT`, exit 1) instead of"
-      , Comment "spamming the UART."
+      , Comment "v4: minimal getty supervisor: WRITE \"init up\" once, then respawn forever:"
+      , Comment "FORK, child EXEC /bin/sh, parent WAIT + WRITE \"init done\", YIELD-paced"
+      , Comment "re-loop with a bounded YIELD budget (2048 parks) so an instantly-exiting"
+      , Comment "child cannot starve the shell. Exec miss fails closed per iteration (`init fail` +"
+      , Comment "EXIT 1 in the child); the exit code stays visible via `init exit`"
+      , Comment "from Kernel.Init's reaper thread only when init itself exits."
       , Arch "armv8-a"
       , Text
       , Global "_start"
@@ -42,6 +45,7 @@ initInstrs =
       , MovImm x2 8
       , MovImm x0 1
       , Trail (Svc svcWrite Nothing) "WRITE(1, \"init up\\n\", 8)"
+      , Label "respawn"
       , Trail (Svc svcFork Nothing) "FORK -> x0 = 0 (child) | pid (parent)"
       , Cbz x0 "child"
       , CmpImm x0 (mustU12 0)
@@ -49,14 +53,17 @@ initInstrs =
       , Trail (MovReg x19 x0) "child pid"
       , MovReg x0 x19
       , Trail (Svc svcWait Nothing) "WAIT(child) -> x0 = exit code"
-      , Trail (MovReg x19 x0) "save code across WRITE"
       , Adrp x1 "donemsg"
       , AddLo12 x1 x1 "donemsg"
       , MovImm x2 10
       , MovImm x0 1
       , Trail (Svc svcWrite Nothing) "WRITE(1, \"init done\\n\", 10)"
-      , MovReg x0 x19
-      , Trail (Svc svcExit Nothing) "EXIT(child code)"
+      , Trail (MovImm x20 2048) "pace budget: 2048 YIELD parks, not a sleep"
+      , Label "pace"
+      , Trail (Svc svcYield Nothing) "YIELD: park so a fast-exiting child cannot starve the shell"
+      , SubImm x20 x20 (mustU12 1)
+      , Cbnz x20 "pace"
+      , B "respawn"
       , Label "child"
       , Adrp x0 "shpath"
       , AddLo12 x0 x0 "shpath"

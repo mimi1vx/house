@@ -27,10 +27,11 @@ expect {
 }
 # EL0 output races the boot thread on SMP ("init up" may precede
 # "init pid"; either may precede the prompt): collect all markers
-# order-free, then re-sync with an empty line so straggler init output
-# ("init done"/"init exit 1") drains before the first command.
+# order-free, then prove the getty respawn before the first command.
 # "sh: ENOENT" here is pid1's own child (no `run` was sent): with no
 # console device attached the EL0 sh open fails closed and init reaps it.
+# Init loops FOREVER (up once, then FORK/EXEC sh + WAIT/done per cycle
+# with YIELD pacing), so there is no `init exit` to drain.
 set saw_pid 0
 set saw_up 0
 set saw_sh 0
@@ -40,10 +41,28 @@ while {!$saw_pid || !$saw_up || !$saw_sh || !$saw_prompt} {
         -re "init pid (\[0-9\]+)" { puts "\nPASS: pid1 launched"; set saw_pid 1 }
         -re "init up" { puts "\nPASS: /sbin/init running"; set saw_up 1 }
         -re "sh: ENOENT" { puts "\nPASS: pid1 spawned sh (no-device ENOENT)"; set saw_sh 1 }
+        -re "house login:" { puts "\nFAIL: no-device sh printed login"; catch {exec kill -9 [exp_pid]}; exit 1 }
         -re "> " { puts "\nPASS: saw prompt"; set saw_prompt 1 }
         timeout { puts "\nFAIL: boot marker timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
         eof { puts "\nFAIL: eof before boot markers"; exit 1 }
     }
+}
+# Getty respawn (house-1mo.1): the boot loop above saw the first ENOENT;
+# the first done plus a second ENOENT/done pair proves init re-forked.
+expect {
+    -re "init done" { puts "\nPASS: pid1 reaped first sh" }
+    timeout { puts "\nFAIL: first init done timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before first init done"; exit 1 }
+}
+expect {
+    -re "sh: ENOENT" { puts "\nPASS: pid1 respawned sh (second ENOENT)" }
+    timeout { puts "\nFAIL: respawn ENOENT timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before respawn ENOENT"; exit 1 }
+}
+expect {
+    -re "init done" { puts "\nPASS: pid1 reaped respawned sh (second done)" }
+    timeout { puts "\nFAIL: second init done timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
+    eof { puts "\nFAIL: eof before second init done"; exit 1 }
 }
 send "\r"
 house_prompt "re-synced prompt"
@@ -80,6 +99,7 @@ expect {
 house_prompt "prompt after cat"
 send "run /bin/sh\r"
 expect {
+    -re "house login:" { puts "\nFAIL: sh no-device printed login"; catch {exec kill -9 [exp_pid]}; exit 1 }
     -re "sh: ENOENT" { puts "\nPASS: sh no-device ENOENT (EL0 open of reserved path)" }
     timeout { puts "\nFAIL: sh output timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before sh output"; exit 1 }
@@ -92,7 +112,7 @@ expect {
 house_prompt "prompt after sh"
 send "spawn /bin/hello\r"
 expect {
-    -re {spawned pid ([0-9]+)} { set p1 $expect_out(1,string); puts "\nPASS: spawn pid $p1" }
+    -re {spawned pid ([0-9]+)[^0-9]} { set p1 $expect_out(1,string); puts "\nPASS: spawn pid $p1" }
     timeout { puts "\nFAIL: spawn timeout"; catch {exec kill -9 [exp_pid]}; exit 1 }
     eof { puts "\nFAIL: eof before spawn"; exit 1 }
 }
