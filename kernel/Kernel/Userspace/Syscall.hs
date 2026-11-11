@@ -171,9 +171,10 @@ blocks until the child exits, reaps, and resumes the exit code (low 8
 bits, like EXIT); unknown pid resumes ENOENT, self/zero pid resumes
 EINVAL. Exec contract: svc 0x0B parks with x0 = NUL-terminated path
 (≤256, EFAULT trap-side when unfaultable); Haskell replaces the image
-under the same pid (fds stay open, argv = [path]) and resumes 0 in the
-new image; missing/unparseable path resumes ENOENT/EINVAL, OOM resumes
-ENOMEM.
+under the same pid (fds stay open, argv = [path] ++ extras from x1, where
+x1 = 0 means no extras and any fault/misshape falls back to [path]) and
+resumes 0 in the new image; missing/unparseable path resumes ENOENT/EINVAL,
+OOM resumes ENOMEM.
 Stack contract (runElf): sp is 16-byte aligned; [sp]=argc,
 [sp+8]=argv[argc+1] NULL-terminated, then envp[envc+1] NULL-terminated,
 then NUL-terminated strings. Bounds: 64 entries and 1024 bytes per string.

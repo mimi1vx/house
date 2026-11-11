@@ -1,0 +1,217 @@
+#!/usr/bin/expect -f
+# EL0 sh shell test (house-1mo.2 line discipline + house-1mo.6 exec/redirect/pipes).
+# Boots with a console device, runs `con init <slot>` via the kernel shell
+# (slot discovered via `virtio scan`, asserted `ok qsize`), then drives the
+# init-spawned EL0 sh over the console socket. Since house-1mo.6 the shell
+# binds fd 1 to /dev/console, so ALL EL0 output (prompt, echo, command
+# results) arrives on the socket: kernel-side markers use plain `expect` on
+# the QEMU uart, EL0 assertions poll the socket via `sock_expect` (same
+# shape as qemu-virtio-con.exp). Host side: Tcl `socket` cannot speak
+# AF_UNIX, so bridge via socat:
+#   socat TCP-LISTEN:4446,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/tmp/house-sh.sock
+# Usage: expect scripts/qemu-sh.exp <kernel.bin> [timeout] [accel] [mem] [smp] [-- extra qemu args]
+# QEMU side (see Makefile house-sh-check):
+#   -chardev socket,path=/tmp/house-sh.sock,server=on,wait=off,id=c0
+#   -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
+set kernel [lindex $argv 0]
+if {[lindex $argv 1] ne ""} {
+    set timeout [lindex $argv 1]
+} else {
+    set timeout 45
+}
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+set qemu_extra [lrange $argv 5 end]
+set has_serial [string match "*virtconsole*" [join $qemu_extra " "]]
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+set sockpath "/tmp/house-sh.sock"
+set tcpport 4446
+set bridge_pid ""
+set ::sockbuf ""
+log_user 1
+source [file join [file dirname [info script]] house.exp]
+proc fail {msg} {
+    global bridge_pid
+    puts "\nFAIL: $msg"
+    puts "SOCKBUF: $::sockbuf"
+    catch {exec kill -9 $bridge_pid}
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+# Poll the console socket for a needle (up to tries * 300 ms). The buffer
+# accumulates; callers drain before each command so a match is fresh output,
+# never a stale line.
+proc sock_expect {s needle tries} {
+    for {set i 0} {$i < $tries} {incr i} {
+        after 300
+        if {[eof $s]} { fail "console socket EOF (bridge/device down?)" }
+        catch {append ::sockbuf [read $s]}
+        if {[string first $needle $::sockbuf] >= 0} { return 1 }
+    }
+    return 0
+}
+proc sock_drain {s} {
+    after 500
+    catch {append ::sockbuf [read $s]}
+    set ::sockbuf ""
+}
+# Send one shell line (buffer drained first so later matches are fresh).
+# Writes are blocking: a partial/non-blocking send could strand the trailing
+# `\n` in Tcl's buffer and wedge the shell mid-line with no diagnostic.
+proc sh_send {cmd} {
+    global s
+    sock_drain $s
+    fconfigure $s -blocking 1
+    if {[catch {puts -nonewline $s "$cmd\n"} err]} { fail "socket write failed: $err" }
+    if {[catch {flush $s} err]} { fail "socket flush failed: $err" }
+    fconfigure $s -blocking 0
+}
+# Common shape: command output needle, then `ok exit 0`, then a fresh prompt.
+proc sh_case {cmd needle label} {
+    global s
+    sh_send $cmd
+    if {![sock_expect $s $needle 400]} { fail "$label: no <$needle>" }
+    if {![sock_expect $s "ok exit 0" 600]} { fail "$label: no ok exit 0" }
+    if {![sock_expect $s {sh$ } 60]} { fail "$label: no fresh prompt" }
+    puts "\nPASS: $label"
+}
+if {!$has_serial} { fail "qemu-sh needs -device virtconsole (no serial device)" }
+set cmd "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs.cpio"
+foreach a $qemu_extra {
+    if {$a eq "--"} { continue }
+    append cmd " $a"
+}
+puts "SPAWN: $cmd"
+eval spawn $cmd
+expect {
+    -re "Welcome to the House shell" { puts "\nPASS: saw welcome" }
+    timeout { fail "welcome timeout" }
+    eof { fail "eof before welcome" }
+}
+# init-spawned sh is known up via `init up` (boot prompt may be skipped here;
+# every command below resyncs a fresh prompt afterwards).
+expect {
+    -re "init up" { puts "\nPASS: /sbin/init running" }
+    timeout { fail "init up timeout" }
+    eof { fail "eof before init up" }
+}
+# The serial device sits on the last free transport, so discover its slot
+# instead of assuming one. A single scan asserts slot 0, captures the
+# console slot, and resyncs at the next prompt (not a slot-31 end marker:
+# the console itself may sit at slot 31, and matching a slot-31 prefix
+# would win the expect race before `device_id=3` arrives).
+set conSlot -1
+set sawSlot0 0
+send "virtio scan\r"
+expect {
+    -re "virtio slot 0" { puts "\nPASS: virtio scan slot 0"; set sawSlot0 1; exp_continue }
+    -re {virtio slot (\d+): device_id=3} {
+        set conSlot $expect_out(1,string)
+        puts "\nPASS: virtio scan device_id=3 at slot $conSlot"
+        exp_continue
+    }
+    -re ">  " {
+        if {!$sawSlot0} {
+            # Stale boot prompt (scan output not seen yet): keep waiting.
+            exp_continue
+        }
+        puts "\nPASS: prompt after scan"
+    }
+    timeout { fail "virtio scan timeout" }
+    eof { fail "eof before scan end" }
+}
+if {$conSlot == -1} { fail "virtio scan no console device with -device present" }
+if {[catch {exec socat -V} err]} { fail "socat missing on host: $err" }
+set bridge_pid [exec socat TCP-LISTEN:$tcpport,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:$sockpath &]
+after 1000
+set s [socket 127.0.0.1 $tcpport]
+fconfigure $s -translation binary -buffering none -blocking 0
+puts "\nPASS: host socket connected"
+send "con init $conSlot\r"
+expect {
+    -re "ok qsize" { puts "\nPASS: con init $conSlot ok qsize" }
+    -re "Con" { fail "con init $conSlot returned error with serial present" }
+    timeout { fail "con init timeout" }
+}
+house_prompt "prompt after con init"
+# EL0 login (house-1mo.7): init respawns sh until the console is up; the first
+# sh with a live console prints `house login: ` to the socket (not `sh$ `).
+# Kernel prompt is `>  `, EL0 prompt is `sh$ ` — match only the latter, and
+# only after the login line proves the session boundary came first.
+# Login budget is 60s (200 polls): the pace+fork+exec+bind path is fast
+# unloaded but dilates several-fold with another VM on the host (observed
+# login-prompt timeout at 30s under two-VM contention, 2026-11-11).
+if {![sock_expect $s {house login: } 200]} { fail "login prompt timeout (no house login: )" }
+puts "\nPASS: EL0 login prompt on console socket"
+# Login precedes the first shell prompt: answer `tester`, log `login tester`.
+sh_send "tester"
+if {![sock_expect $s {login tester} 600]} { fail "login tester missing" }
+puts "\nPASS: login tester logged"
+if {![sock_expect $s {sh$ } 100]} { fail "sh prompt timeout" }
+puts "\nPASS: EL0 sh prompt on console socket"
+# Bare word: lookup-miss (was a bare echo pre-1mo.6). The per-byte echo
+# returns the command, so output needles stay line-anchored.
+sh_send "hello-line"
+if {![sock_expect $s "hello-line" 400]} { fail "sh echo timeout" }
+puts "\nPASS: EL0 sh echoed hello-line"
+if {![sock_expect $s "sh: not found" 600]} { fail "lookup miss message missing" }
+if {![sock_expect $s "ok exit 127" 600]} { fail "lookup miss exit 127 missing" }
+if {![sock_expect $s {sh$ } 600]} { fail "sh fresh prompt timeout" }
+puts "\nPASS: lookup-miss reports sh: not found, exit 127, shell survives"
+# house-1mo.6 exec/redirect/pipeline asserts (all EL0 output on the socket).
+sh_case "echo hello-sh" "\nhello-sh\n" "builtin echo via fork+DUP2"
+sh_case "/bin/hello" "\nHello from EL0\n" "exec /bin/hello, ok exit 0"
+# `>` round-trip through sh-spawned processes (echo redirected, cat argv path
+# streams with seek ok + cat ok trailers).
+sh_send "echo hi > /f"
+if {![sock_expect $s "ok exit 0" 600]} { fail "redirect: no ok exit 0" }
+if {![sock_expect $s {sh$ } 60]} { fail "redirect: no fresh prompt" }
+puts "\nPASS: echo hi > /f, ok exit 0, silent on console"
+sh_case "cat /f" "\nhi\n" "cat /f round-trip"
+if {[string first "seek ok" $::sockbuf] < 0} { fail "cat /f: no seek ok trailer" }
+if {[string first "cat ok" $::sockbuf] < 0} { fail "cat /f: no cat ok trailer" }
+puts "\nPASS: cat /f trailers intact"
+# Canonical pipe proof: exactly one `hi` (a parent that keeps its pipe ends
+# open hangs at EOF instead; a double-mapped fd would duplicate).
+sh_send "echo hi | cat"
+if {![sock_expect $s "\nhi\n" 600]} { fail "pipe: no hi" }
+if {![sock_expect $s "ok exit 0" 600]} { fail "pipe: no ok exit 0" }
+if {[regexp -all "\nhi\n" $::sockbuf] != 1} { fail "pipe: hi != exactly once" }
+if {![sock_expect $s {sh$ } 60]} { fail "pipe: no fresh prompt" }
+puts "\nPASS: echo hi | cat exactly once"
+sh_case "ls /bin | cat" "hello" "ls /bin | cat lists hello"
+# Broken pipe misuse: message, shell survives, next prompt answers.
+sh_send "echo hi |"
+if {![sock_expect $s "sh: missing command" 600]} { fail "broken pipe message missing" }
+if {![sock_expect $s {sh$ } 60]} { fail "shell died on broken pipe" }
+puts "\nPASS: echo hi | reports sh: missing command, shell survives"
+sh_case "cat < /f" "\nhi\n" "cat < /f reads stdin file"
+# Idle EOF exits 0 (pid1 contract): closing the socket drains the console
+# read to empty, sh CLOSEs + EXITs, init reaps and prints `init done`.
+# The guest needs ~30s here by design (6 consecutive empty 5s console
+# polls; QEMU reports no disconnect to the guest, so the close is
+# undetectable any faster), dilated under host load (148s observed with
+# a second VM running, 2026-11-11). The tail wait is therefore its own
+# 300s budget, not the per-step accel budget. Timestamps bracket the
+# close->done window; on eof the QEMU wait status is reported so a
+# killed/crashed QEMU is distinguishable from a slow guest.
+puts "\nPASS: sh exec/redirect/pipe ok"
+catch {close $s}
+puts "TAILCLOSE [exec date +%s.%N]"
+set timeout 300
+expect {
+    -re "init done" { puts "\nPASS: sh EOF exit 0 (init reaped) TAILDONE [exec date +%s.%N]" }
+    timeout { fail "EOF init done timeout" }
+    eof {
+        catch {set wres [wait]; puts "QEMUSTATUS $wres"}
+        fail "eof before init done"
+    }
+}
+catch {exec kill -9 $bridge_pid}
+catch {exec kill -9 [exp_pid]}
+catch {close}
+catch {wait}
+exit 0

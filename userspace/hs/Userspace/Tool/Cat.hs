@@ -29,16 +29,22 @@ catInstrs =
       svcSeek = mustSvc 0x0A
       svcWrite = mustSvc 0x06
       svcExit = mustSvc 0x02
-   in [ Comment "EL0 cat for /bin/cat (pid1 slice)."
+   in [ Comment "EL0 cat for /bin/cat (pid1 slice + house-1mo.5 + house-1mo.6)."
       , Comment "Streams a file to stdout via the fd ring: OPEN 0x04, READ 0x05 loop,"
-      , Comment "CLOSE 0x07. Path is argv[1], defaulting to /probe.txt so the legacy"
-      , Comment "`run /bin/cat` probe (qemu-fd-el0.exp) keeps working. At EOF a SEEK 0x0A"
-      , Comment "self-check runs first: SEEK_END must resume the streamed total, SEEK_SET"
-      , Comment "must resume 0, and a head re-read must return the full chunk (prints"
-      , Comment "`seek ok`). Prints `cat ok` and exits 0 after the full stream; a missing"
-      , Comment "path prints `cat: ENOENT` (keeps the fs-harness ENOENT match), any other"
-      , Comment "mismatch `cat fail`, all exit 1. Read chunk is 1024 (well under the 64K"
-      , Comment "svc buffer cap)."
+      , Comment "CLOSE 0x07. With zero argv (argc < 2) reads fd 0 in 1 KiB chunks and"
+      , Comment "WRITE_FD(1, ...) until empty/EOF (the pipeline stdin mode; no SEEK"
+      , Comment "self-check there, pipes are not seekable). The zero-length READ"
+      , Comment "probe at entry keeps the default alive for `run /bin/cat`: fd 0"
+      , Comment "unbound (EBADF) falls back to /probe.txt, a bound fd 0 streams"
+      , Comment "stdin. Path is argv[1],"
+      , Comment "defaulting to /probe.txt so the legacy `run /bin/cat` probe"
+      , Comment "(qemu-fd-el0.exp) keeps working. At EOF a SEEK 0x0A self-check runs"
+      , Comment "first: SEEK_END must resume the streamed total, SEEK_SET must resume"
+      , Comment "0, and a head re-read must return the full chunk (prints `seek ok`)."
+      , Comment "Prints `cat ok` and exits 0 after the full stream; a missing path"
+      , Comment "prints `cat: ENOENT` (keeps the fs-harness ENOENT match), any other"
+      , Comment "mismatch `cat fail`, all exit 1. Read chunk is 1024 (well under the"
+      , Comment "64K svc buffer cap)."
       , Arch "armv8-a"
       , Text
       , Global "_start"
@@ -47,9 +53,7 @@ catInstrs =
       , Trail (LdrMem x0 SP) "argc"
       , CmpImm x0 (mustU12 2)
       , BCond Hs "have_arg"
-      , Adrp x19 "defpath"
-      , AddLo12 x19 x19 "defpath"
-      , B "do_open"
+      , B "probe_fd0"
       , Label "have_arg"
       , Trail (LdrOff x19 SP (mustU12 16)) "argv[1]"
       , Label "do_open"
@@ -115,6 +119,38 @@ catInstrs =
       , MovImm x2 7
       , MovImm x0 1
       , Trail (Svc svcWrite Nothing) "WRITE_FD(1, \"cat ok\\n\", 7)"
+      , MovImm x0 0
+      , Trail (Svc svcExit Nothing) "EXIT(0)"
+      , Label "probe_fd0"
+      , Adrp x1 "buf"
+      , AddLo12 x1 x1 "buf"
+      , MovImm x2 0
+      , MovImm x0 0
+      , Trail (Svc svcRead Nothing) "READ(0, buf, 0) probe: silent when bound"
+      , CmpImm x0 (mustU12 0)
+      , Trail (BCond Lt "use_default") "EBADF: fd 0 unbound"
+      , B "stdin_mode"
+      , Label "use_default"
+      , Adrp x19 "defpath"
+      , AddLo12 x19 x19 "defpath"
+      , B "do_open"
+      , Label "stdin_mode"
+      , Adrp x1 "buf"
+      , AddLo12 x1 x1 "buf"
+      , MovImm x2 1024
+      , MovImm x0 0
+      , Trail (Svc svcRead Nothing) "READ(0) -> x0 = n"
+      , CmpImm x0 (mustU12 1024)
+      , Trail (BCond Hi "fail") "negative errno or over-cap"
+      , Cbz x0 "stdin_eof"
+      , Trail (MovReg x20 x0) "n"
+      , Adrp x1 "buf"
+      , AddLo12 x1 x1 "buf"
+      , MovReg x2 x20
+      , MovImm x0 1
+      , Trail (Svc svcWrite Nothing) "WRITE_FD(1, buf, n)"
+      , B "stdin_mode"
+      , Label "stdin_eof"
       , MovImm x0 0
       , Trail (Svc svcExit Nothing) "EXIT(0)"
       , Label "fail"

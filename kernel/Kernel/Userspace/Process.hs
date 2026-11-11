@@ -140,6 +140,14 @@ foreign import ccall unsafe "house_svc_mask_set" c_svc_mask_set :: Ptr Word64 ->
 
 foreign import ccall unsafe "house_svc_mask_get" c_svc_mask_get :: Ptr Word64 -> IO Word32
 
+{- | Scoped house-1mo.6 UART fallback (see 'uartFallbackPids'): raw PL011 byte
+out, the frozen 0x01 transport. Reached only when a run/spawn-lineage pid
+writes an unbound fd 1 (no console device, empty fd table); the sh lineage
+never takes this path, so its probe always sees the honest EBADF. Per-byte
+locking, binary-safe (unlike puts).
+-}
+foreign import ccall unsafe "uart_putc" c_uart_putc :: Word8 -> IO ()
+
 -- | Full syscall mask: 0x00..0x1A allowed.
 svcFullMask :: Word32
 svcFullMask = 0x7FFFFFF
@@ -237,7 +245,7 @@ data ParkRequest
   | ReqSeek Word64 Word64 Word64
   | ReqFork
   | ReqWait Word64
-  | ReqExec Word64
+  | ReqExec Word64 Word64
   | ReqMkdir Word64
   | ReqUnlink Word64
   | ReqStat Word64 Word64 Word64
@@ -292,6 +300,20 @@ hasGrant :: Pid -> EndpointId -> H Bool
 hasGrant pid eid = withQSem userSem $ do
   m <- readRef procGrants
   return (eid `elem` Map.findWithDefault [] pid m)
+
+{- | Pids spawned via 'runElf' (the House-shell run/spawn lineage) keep the
+house-1mo.5 UART fallback for fd 1, as does any pid holding no fd entries at
+all (see 'Fd.fdIsEmpty'): they start with an empty fd table and no sh
+fork+bind ever runs for them, so without it their first WRITE_FD(1) would go
+silent-EBADF and the run/spawn harnesses (no console device attached) -- and
+the no-console sh startup that must still report ENOENT -- would go red.
+Forked children with inherited entries are NOT covered: fork inherits the
+table but never the flag, so sh's probe always sees the honest EBADF and
+binds the real console. Reap ('waitPid'/'killPid') deletes the flag.
+-}
+{-# NOINLINE uartFallbackPids #-}
+uartFallbackPids :: Ref (Set.Set Pid)
+uartFallbackPids = unsafePerformH (newRef Set.empty)
 
 {- | COW sharer counts keyed by host phys address ('ptrToWord64' of the
 backing page). A page is listed while two or more pdirs map it, or while a
@@ -843,6 +865,10 @@ runPreparedBound pidInt image argv envp grants = do
                               -- thread is forked below, so the new process's
                               -- first trap can never observe an empty set.
                               modifyRef procGrants (Map.insert pid grants)
+                              -- The run/spawn lineage keeps the scoped UART
+                              -- fallback (reap deletes it, fork never inherits
+                              -- it); see 'uartFallbackPids'.
+                              modifyRef uartFallbackPids (Set.insert pid)
                               Sched.schedRegister pid
                               let finiSteps = mappedFiniSteps mappedImage
                               _ <- forkH $ do
@@ -1174,15 +1200,20 @@ releaseBacking raw = do
 
 {- | EL0 exec (svc 0x0B): replace the image under the same pid. Reads + parses
 the path (VFS, then 'loadElf') before touching the old image; only then frees
-old user pages, maps the new segments, lays a fresh argv ([path]) + env
-stack, updates entry/brk, and redirects the parked slot via
-'house_el0_set_entry' (resume with x0 = 0 follows in the caller). Fds stay
-open across exec (Unix semantics); the pid/namespace/slot/parent are unchanged.
+old user pages, maps the new segments, lays a fresh argv + env stack, updates
+entry/brk, and redirects the parked slot via 'house_el0_set_entry' (resume
+with x0 = 0 follows in the caller). Fds stay open across exec (Unix
+semantics); the pid/namespace/slot/parent are unchanged.
+New argv is @[path] ++ extras@: the trap's x1 carries either 0 (legacy: argv
+is exactly [path]) or the VA of a NULL-terminated array of string-VAs (the sh
+pipeline convention, capped at 16 extras of 256 B each; any fault or shape
+mismatch falls back to [path] so stale callers such as init, whose x1 is
+garbage at the EXEC site, keep working).
 Errors before the point of no return resume errnos (ENOENT/EINVAL/ENOMEM);
 a mapping failure past it resumes ENOMEM on a half-built image.
 -}
-execReplace :: Pid -> Ptr Word64 -> String -> H (Either LoadError (Word64, Word64))
-execReplace pid@(Pid pidInt) pdir path = do
+execReplaceArgs :: Pid -> Ptr Word64 -> String -> [String] -> H (Either LoadError (Word64, Word64))
+execReplaceArgs pid@(Pid pidInt) pdir path extras = do
   ns <- Vfs.vfsEnsurePid pidInt
   mBytes <- Vfs.vfsRead ns path
   case mBytes of
@@ -1193,10 +1224,10 @@ execReplace pid@(Pid pidInt) pdir path = do
         prepared <- prepareImage ns elf
         case prepared of
           Left err -> return (Left err)
-          Right image -> execReplaceValidated pid pdir path image
+          Right image -> execReplaceValidated pid pdir path extras image
 
-execReplaceValidated :: Pid -> Ptr Word64 -> String -> PreparedImage -> H (Either LoadError (Word64, Word64))
-execReplaceValidated pid pdir path image = withQSem userSem $ do
+execReplaceValidated :: Pid -> Ptr Word64 -> String -> [String] -> PreparedImage -> H (Either LoadError (Word64, Word64))
+execReplaceValidated pid pdir path extras image = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup pid mp of
     Nothing -> return (Left (BadSegment "no such pid"))
@@ -1217,7 +1248,7 @@ execReplaceValidated pid pdir path image = withQSem userSem $ do
               return (Left NoSpace)
             Just stk -> do
               HPages.zeroPage stk
-              eSp <- setupArgStack stk [path] ["HOUSE=1", "PATH=/bin"]
+              eSp <- setupArgStack stk (path : extras) ["HOUSE=1", "PATH=/bin"]
               case eSp of
                 Left err -> do
                   HPages.freePage stk
@@ -1357,6 +1388,7 @@ waitPid waiter pid@(Pid pidInt) = do
             writeRef pendingReply (Map.delete pid pend)
             g <- readRef procGrants
             writeRef procGrants (Map.delete pid g)
+            modifyRef uartFallbackPids (Set.delete pid)
             return (Just pr, Map.lookup pid pend)
       case mStash of
         Just h -> do _ <- liftIO (tryPutMVar h (Left NoSuchEndpoint)); return ()
@@ -1406,6 +1438,7 @@ killPid pid@(Pid pidInt) = do
         writeRef pendingReply (Map.delete pid m)
         g <- readRef procGrants
         writeRef procGrants (Map.delete pid g)
+        modifyRef uartFallbackPids (Set.delete pid)
         a <- readRef procStopMap
         writeRef procStopMap (Map.delete pid a)
         return (Just (pr, Map.lookup pid m, Map.lookup pid a))
@@ -1533,7 +1566,7 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                 Just (ReqSeek fd off wh) -> do handleSeek fd off wh; loop
                 Just ReqFork -> do handleFork; loop
                 Just (ReqWait c) -> do handleWait c; loop
-                Just (ReqExec va) -> do handleExec va; loop
+                Just (ReqExec va ava) -> do handleExec va ava; loop
                 Just (ReqMkdir va) -> do handleMkdir va; loop
                 Just (ReqUnlink va) -> do handleUnlink va; loop
                 Just (ReqStat va buf ln) -> do handleStat va buf ln; loop
@@ -1619,6 +1652,24 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
             Just (Right bytes) -> do
               r <- Fd.fdWrite pid (Fd.Fd (fromIntegral fdNum)) bytes
               case r of
+                -- Scoped house-1mo.6 fallback (see 'uartFallbackPids'): a bare
+                -- fd-1 miss takes the frozen 0x01 transport directly
+                -- (byte-identical on UART, slot-independent) when the writer is
+                -- run/spawn-lineage (flag) or holds no fd entries at all (the
+                -- no-console sh startup that must still report ENOENT: an empty
+                -- table means no sh fork+bind could have run yet). A sh-lineage
+                -- process with inherited console entries resumes EBADF here, so
+                -- the sh-side probe binds the real console and no live fallback
+                -- can deaden it. Any live entry (pipe via DUP2, console, file)
+                -- uses the table path; other fds and errors keep their errnos.
+                Left e | fdNum == 1 && e == Fd.FdBadFd -> do
+                  flagged <- withQSem userSem (Set.member pid <$> readRef uartFallbackPids)
+                  empty <- Fd.fdIsEmpty pid
+                  if flagged || empty
+                    then do
+                      liftIO (mapM_ c_uart_putc bytes)
+                      resumeWith (fromIntegral (length bytes))
+                    else resumeWith (fromIntegral (Fd.fdErrorToErrno e))
                 Left e -> resumeWith (fromIntegral (Fd.fdErrorToErrno e))
                 Right k -> resumeWith (fromIntegral k)
     handleClose fdNum = do
@@ -1651,19 +1702,52 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
             Right code -> do
               alive2 <- withQSem userSem (Map.member pid <$> readRef procMap)
               when alive2 (resumeWith (fromIntegral (code .&. 0xFF)))
-    handleExec va = do
+    handleExec va ava = do
       mPath <- readUserCString pid pdir va 256
       case mPath of
         Nothing -> return ()
         Just (Left rc) -> resumeWith (fromIntegral rc)
         Just (Right path) -> do
-          r <- execReplace pid pdir path
+          extras <- readExecArgv pid pdir ava
+          r <- execReplaceArgs pid pdir path extras
           case r of
             Left (BadSegment "enoent") -> resumeWith negENOENT
             Left (DependencyMissing _) -> resumeWith negENOENT
             Left NoSpace -> resumeWith negNOMEM
             Left _ -> resumeWith negINVAL
             Right _ -> resumeWith 0
+    -- \| Read the trap x1 argv-extras array for EXEC (see 'execReplaceArgs'): a
+    -- NULL-terminated array of string VAs, at most 16 extras of 256 B each.
+    -- x1 == 0 means no extras; anything unreadable or misshapen (including
+    -- stale garbage x1 from pre-argv callers) falls back to no extras.
+    readExecArgv p pd ava
+      | ava == 0 = return []
+      | otherwise = do
+          mWords <- readArgWords ava
+          case mWords of
+            Nothing -> return []
+            Just ws ->
+              let ptrs = takeWhile (/= 0) ws
+               in if length ptrs == length ws
+                    then return []
+                    else readArgvStrs ptrs
+      where
+        readArgWords base = do
+          mrs <- mapM (\o -> readUser p pd (base + o) 1) ([0, 8 .. 128] :: [Word64])
+          case sequence mrs of
+            Nothing -> return Nothing
+            Just rrs -> case sequence rrs of
+              Left _ -> return Nothing
+              Right wss -> return (Just (concat wss))
+        readArgvStrs ptrs
+          | length ptrs > 16 = return []
+          | otherwise = do
+              mStrs <- mapM (\ptr -> readUserCString p pd ptr 256) ptrs
+              case sequence mStrs of
+                Nothing -> return []
+                Just rs -> case sequence rs of
+                  Left _ -> return []
+                  Right strs -> return strs
     fsErrno e = case e of
       Vfs.ENOENT -> negENOENT
       Vfs.EEXIST -> fromIntegral (-17 :: Int)
@@ -2131,7 +2215,8 @@ tryReadExitOnce pdir = allocaArray 1 $ \p -> do
 {- | Single parked-request poll: 0 maps to yield, 0x03 to brk (x0 = new
 break), 0x04..0x07/0x0A to fd (OPEN pathVa/flags, READ/WRITE fd/buf/len,
 CLOSE fd, SEEK fd/off/whence), 0x08 to fork (no args), 0x09 to wait
-(x0 = child pid), 0x0B to exec (x0 = path VA), 0x0C to mkdir (x0 = path
+(x0 = child pid), 0x0B to exec (x0 = path VA, x1 = argv-extras array VA or
+0), 0x0C to mkdir (x0 = path
 VA), 0x0D to unlink (x0 = path VA), 0x0E to stat / 0x0F to getdents
 (x0 = path VA, x1 = buf, x2 = len), 0x10..0x13 to IPC (with the
 trapped x0..x3 as ep/va/nwords/tag), 0x15 to SOCK_OPEN (packed IPv4,
@@ -2177,7 +2262,7 @@ tryTakeParkedOnce pdir = do
     classify 0x07 fd _ _ _ = ReqClose fd
     classify 0x08 _ _ _ _ = ReqFork
     classify 0x09 c _ _ _ = ReqWait c
-    classify 0x0B va _ _ _ = ReqExec va
+    classify 0x0B va av _ _ = ReqExec va av
     classify 0x0C va _ _ _ = ReqMkdir va
     classify 0x0D va _ _ _ = ReqUnlink va
     classify 0x0E va buf ln _ = ReqStat va buf ln

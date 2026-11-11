@@ -1,13 +1,19 @@
-// EL0 cat for /bin/cat (pid1 slice).
+// EL0 cat for /bin/cat (pid1 slice + house-1mo.5 + house-1mo.6).
 // Streams a file to stdout via the fd ring: OPEN 0x04, READ 0x05 loop,
-// CLOSE 0x07. Path is argv[1], defaulting to /probe.txt so the legacy
-// `run /bin/cat` probe (qemu-fd-el0.exp) keeps working. At EOF a SEEK 0x0A
-// self-check runs first: SEEK_END must resume the streamed total, SEEK_SET
-// must resume 0, and a head re-read must return the full chunk (prints
-// `seek ok`). Prints `cat ok` and exits 0 after the full stream; a missing
-// path prints `cat: ENOENT` (keeps the fs-harness ENOENT match), any other
-// mismatch `cat fail`, all exit 1. Read chunk is 1024 (well under the 64K
-// svc buffer cap).
+// CLOSE 0x07. With zero argv (argc < 2) reads fd 0 in 1 KiB chunks and
+// WRITE_FD(1, ...) until empty/EOF (the pipeline stdin mode; no SEEK
+// self-check there, pipes are not seekable). The zero-length READ
+// probe at entry keeps the default alive for `run /bin/cat`: fd 0
+// unbound (EBADF) falls back to /probe.txt, a bound fd 0 streams
+// stdin. Path is argv[1],
+// defaulting to /probe.txt so the legacy `run /bin/cat` probe
+// (qemu-fd-el0.exp) keeps working. At EOF a SEEK 0x0A self-check runs
+// first: SEEK_END must resume the streamed total, SEEK_SET must resume
+// 0, and a head re-read must return the full chunk (prints `seek ok`).
+// Prints `cat ok` and exits 0 after the full stream; a missing path
+// prints `cat: ENOENT` (keeps the fs-harness ENOENT match), any other
+// mismatch `cat fail`, all exit 1. Read chunk is 1024 (well under the
+// 64K svc buffer cap).
 .arch armv8-a
 .text
 .global _start
@@ -16,9 +22,7 @@ _start:
     ldr     x0, [sp]                // argc
     cmp     x0, #2
     b.hs    have_arg
-    adrp    x19, defpath
-    add     x19, x19, :lo12:defpath
-    b       do_open
+    b       probe_fd0
 have_arg:
     ldr     x19, [sp, #16]          // argv[1]
 do_open:
@@ -84,6 +88,38 @@ seek_ok:
     mov     x2, #7
     mov     x0, #1
     svc     #0x06                   // WRITE_FD(1, "cat ok\n", 7)
+    mov     x0, #0
+    svc     #0x02                   // EXIT(0)
+probe_fd0:
+    adrp    x1, buf
+    add     x1, x1, :lo12:buf
+    mov     x2, #0
+    mov     x0, #0
+    svc     #0x05                   // READ(0, buf, 0) probe: silent when bound
+    cmp     x0, #0
+    b.lt    use_default             // EBADF: fd 0 unbound
+    b       stdin_mode
+use_default:
+    adrp    x19, defpath
+    add     x19, x19, :lo12:defpath
+    b       do_open
+stdin_mode:
+    adrp    x1, buf
+    add     x1, x1, :lo12:buf
+    mov     x2, #1024
+    mov     x0, #0
+    svc     #0x05                   // READ(0) -> x0 = n
+    cmp     x0, #1024
+    b.hi    fail                    // negative errno or over-cap
+    cbz     x0, stdin_eof
+    mov     x20, x0                 // n
+    adrp    x1, buf
+    add     x1, x1, :lo12:buf
+    mov     x2, x20
+    mov     x0, #1
+    svc     #0x06                   // WRITE_FD(1, buf, n)
+    b       stdin_mode
+stdin_eof:
     mov     x0, #0
     svc     #0x02                   // EXIT(0)
 fail:

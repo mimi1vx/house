@@ -59,6 +59,7 @@ module Kernel.Userspace.Fd (
   fdSeek,
   fdFork,
   fdRelease,
+  fdIsEmpty,
   maxFdCount,
   maxFdBytes,
   o_RDONLY,
@@ -612,3 +613,14 @@ fdRelease pid = withQSem fdSem $ do
     Just per -> do
       forM_ (Map.elems per) dropEnd
       writeRef fdTable (Map.delete pid m)
+
+{- | True when the pid holds no fd entries (never opened, or all closed).
+The house-1mo.6 scoped UART fallback consults this: an empty table plus an
+unbound fd 1 means no sh fork+bind could have run yet (the no-console sh
+startup that must still report ENOENT), as opposed to a sh-lineage process
+whose inherited console entries make the probe honest.
+-}
+fdIsEmpty :: Pid -> H Bool
+fdIsEmpty pid = withQSem fdSem $ do
+  m <- readRef fdTable
+  return (maybe True Map.null (Map.lookup pid m))

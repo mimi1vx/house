@@ -115,6 +115,9 @@ data Instr
   | LdrMem Reg Reg
   | LdrOff Reg Reg U12
   | LdrbReg Reg Reg Reg
+  | StrMem Reg Reg
+  | StrOff Reg Reg U12
+  | StrReg Reg Reg Reg
   | StrbOff Reg Reg U12
   | StrbPost Reg Reg U12
   | StpPush Reg Reg Reg
@@ -256,6 +259,11 @@ renderInstr (LdrOff rd rn n) =
   "    ldr     " ++ renderReg rd ++ ", [" ++ renderReg rn ++ ", #" ++ show (u12Value n) ++ "]"
 renderInstr (LdrbReg rd rn rm) =
   "    ldrb    " ++ renderReg rd ++ ", [" ++ renderReg rn ++ ", " ++ renderReg rm ++ "]"
+renderInstr (StrMem rd rn) = "    str     " ++ renderReg rd ++ ", [" ++ renderReg rn ++ "]"
+renderInstr (StrOff rd rn n) =
+  "    str     " ++ renderReg rd ++ ", [" ++ renderReg rn ++ ", #" ++ show (u12Value n) ++ "]"
+renderInstr (StrReg rd rn rm) =
+  "    str     " ++ renderReg rd ++ ", [" ++ renderReg rn ++ ", " ++ renderReg rm ++ "]"
 renderInstr (StrbOff rd rn n) =
   "    strb    " ++ renderReg rd ++ ", [" ++ renderReg rn ++ ", #" ++ show (u12Value n) ++ "]"
 renderInstr (StrbPost rd rn n) =
