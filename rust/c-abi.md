@@ -334,6 +334,7 @@ bounded only by the 32-entry HW tables.
 | `house-hal-aarch64` | `fdt_get_ram_bank` | `int fdt_get_ram_bank(const void *dtb, int i, uint64_t *base, uint64_t *size)` | `house_dtb.c` (new) |
 | `house-hal-aarch64` | `fdt_get_initrd` | `int fdt_get_initrd(const void *dtb, uint64_t *start, uint64_t *end)` | `house_dtb.c` (new: chosen `linux,initrd-start\|end`, BE32→u64, fail-closed 0) |
 | `house-hal-aarch64` | `fdt_get_cpu_count` | `int fdt_get_cpu_count(const void *dtb)` | `house_dtb.c` |
+| `house-hal-aarch64` | `house_bootarg_present` | `int house_bootarg_present(const char *token)` | `dtb.rs` (new: cached `/chosen/bootargs`, 256 B cap, whitespace-exact token match, fail-closed 0) |
 
 Chosen (`linux,initrd-start|end`) is a QEMU-supplied hostile-input trust
 boundary: validated (`fdt_valid` + `checked_add` + strings/prop bounds)

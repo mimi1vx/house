@@ -7,6 +7,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::dtb::boot_quiet;
 use crate::virtio_transport::{virtio_transport_ack, virtio_transport_interrupt_status};
 
 const RING_SZ: usize = 256;
@@ -46,17 +47,21 @@ pub unsafe extern "C" fn house_irq_init() {
         if pipe(fds.as_mut_ptr()) == 0 {
             PIPE_R = fds[0];
             PIPE_W = fds[1];
-            uart_puts(b"[house] irq: pipe r=\0".as_ptr());
-            uart_putc(b'0' + (PIPE_R % 10) as u8);
-            uart_puts(b" w=\0".as_ptr());
-            uart_putc(b'0' + (PIPE_W % 10) as u8);
-            uart_puts(b"\n\0".as_ptr());
-        } else {
+            if !boot_quiet() {
+                uart_puts(b"[house] irq: pipe r=\0".as_ptr());
+                uart_putc(b'0' + (PIPE_R % 10) as u8);
+                uart_puts(b" w=\0".as_ptr());
+                uart_putc(b'0' + (PIPE_W % 10) as u8);
+                uart_puts(b"\n\0".as_ptr());
+            }
+        } else if !boot_quiet() {
             uart_puts(b"[house] irq: pipe create failed\n\0".as_ptr());
         }
         house_timer_init();
         house_irq_enable();
-        uart_puts(b"[house] irq ok\n\0".as_ptr());
+        if !boot_quiet() {
+            uart_puts(b"[house] irq ok\n\0".as_ptr());
+        }
     }
 }
 

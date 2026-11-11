@@ -105,9 +105,10 @@ SMP_N=2 make smp-check                               # 2 cores online + Haskell 
 SMP_N=4 make smp-check                               # 4 cores online + Haskell parallel (hvf+tcg, 4G working set)
 
 # all gates from clean (CI runs the TCG subset)
-make check              # the 19 gates named by the banner
+make check              # the 20 gates named by the banner
 make check-tcg          # TCG-only subset for Linux CI (no dynamic-root: needs QEMU 11+); nightly covers the rest
-make run                # alias for house-run (hvf, $SPIKE_MEM)
+make run                # alias for house-run (hvf, $SPIKE_MEM): quiet + auto console, EL0 shell on /tmp/house-run.sock
+# EL0 shell: socat -,raw,echo=0 UNIX-CONNECT:/tmp/house-run.sock
 ```
 
 Inside the container (via `make container-shell`):
@@ -135,14 +136,15 @@ pid1 failure runs the `Kernel.Shell.Emergency.loop` fallback
 
 Pid1 parenting lives at EL0, not in the kernel: `/sbin/init` prints
 `init up` once, then loops FOREVER — forks and execs `/bin/sh`, waits
-for it, announces `init done`, paces the re-loop with a bounded run of
-`YIELD`s, and re-forks (an exec miss fails closed per iteration as
-`init fail` with child exit 1). The kernel console shell is therefore
-pid1's sibling — a monitor/debugger next to the EL0 tree — not its
-child. With a console device attached (`virtio-con` + `con init`), the
-`sh$ ` prompt comes from EL0 `sh` after its `house login: ` line;
-without one its open fails closed (`sh: ENOENT`, exit 1) and init reaps
-that instead, forever.
+for it, announces `init done`, paces the re-loop with exponential backoff
+(budget in `x21`, start 2048 `YIELD`s, doubles on non-zero child exit up to
+131072, resets on exit 0), and re-forks (an exec miss fails closed per
+iteration as `init fail` with child exit 1). The kernel console shell is
+therefore pid1's sibling — a monitor/debugger next to the EL0 tree — not its
+child. With a console device attached (`virtio-con` + `con init`, or
+`make run` auto `con init`), the `sh$ ` prompt comes from EL0 `sh` after
+its `house login: ` line; without one its open fails closed (`sh: ENOENT`,
+exit 1) and init reaps that instead, backing off to ~10 s per cycle.
 
 QEMU `-initrd build/initramfs.cpio` supplies a cpio newc archive via
 `chosen/linux,initrd-start|end`, unpacked at boot into the default VFS
@@ -171,6 +173,19 @@ After unpack, `/sbin/init` forks and execs `/bin/sh`, waits for it
 (`init done`, exit logged as `init exit CODE`), and
 `/etc/house-servers` registers `name path endpoint` lines (≤64,
 `#` comments) in `ns ls` and spawns each ELF as a `runElf` child.
+
+`make run` boots `build/initramfs-run.cpio` (same sources as the gated
+`initramfs.cpio`, packed with `HOUSE_SKIP_GATES=1` so no `cabal`/drift/manifest
+gates run) with `-append "quiet house.con=auto"` plus a virtio-console on
+`/tmp/house-run.sock`.
+`quiet` suppresses the `[house] dtb|bank0|psci|smp|rts|buddy`
+boot lines (fatal/`[kill]`/`[svc]`/`[probe]`, `Welcome`, `initramfs:` and
+`init pid/up` stay); `house.con=auto` makes `HouseA64.autoConInit` scan virtio slots and `con init` the first `device_id=3`, so the first
+`sh` already finds `/dev/console` (connect `socat` promptly; if auto
+already failed before you connected, do manual `con init <slot>` via
+`virtio scan` on the kernel shell — the next pid1 `sh` will then find it).
+Without a device it prints
+`con auto: no virtio-console device` once and backs off.
 
 ## Closure & extensions
 

@@ -31,6 +31,8 @@ unsafe extern "C" {
     static mut house_smp_n: i32;
 }
 
+use crate::dtb::{boot_quiet, house_bootargs_init};
+
 unsafe extern "C" {
     fn fdt_valid(dtb: *const u8) -> i32;
     fn fdt_get_ram_bytes(dtb: *const u8) -> u64;
@@ -70,6 +72,8 @@ pub unsafe extern "C" fn house_detect_early() {
         let mut src: *const u8 = b"fallback\0".as_ptr();
         let mut smp: i32 = 0;
         let dtb = __boot_dtb as *const u8;
+        // Parse bootargs first: quiet gates every [house] print below.
+        house_bootargs_init(dtb);
         if fdt_valid(dtb) != 0 {
             let dtb_ram = fdt_get_ram_bytes(dtb);
             if dtb_ram != 0 {
@@ -87,13 +91,15 @@ pub unsafe extern "C" fn house_detect_early() {
             }
             // Contiguity log from RAM_BASE (QEMU virt is one bank at 0x40000000).
             let nbanks = fdt_ram_bank_count(dtb);
-            uart_puts(b"[house] dtb banks=\0".as_ptr());
-            uart_putc(b'0' + (nbanks.min(9).max(0)) as u8);
-            uart_puts(b"\n\0".as_ptr());
+            if !boot_quiet() {
+                uart_puts(b"[house] dtb banks=\0".as_ptr());
+                uart_putc(b'0' + (nbanks.min(9).max(0)) as u8);
+                uart_puts(b"\n\0".as_ptr());
+            }
             if nbanks > 0 {
                 let mut b0: u64 = 0;
                 let mut s0: u64 = 0;
-                if fdt_get_ram_bank(dtb, 0, &raw mut b0, &raw mut s0) != 0 {
+                if fdt_get_ram_bank(dtb, 0, &raw mut b0, &raw mut s0) != 0 && !boot_quiet() {
                     uart_puts(b"[house] bank0 base=\0".as_ptr());
                     puthex(b0);
                     uart_puts(b" size=\0".as_ptr());
@@ -250,23 +256,25 @@ pub unsafe extern "C" fn house_detect_late() {
         }
         house_smp = chosen;
         core::ptr::write_volatile(&raw mut house_smp_n, chosen);
-        uart_puts(b"[house] detect late: smp dtb=\0".as_ptr());
-        let mut tmp = [b'0'; 2];
-        if chosen >= 10 {
-            tmp[0] = b'0' + (chosen / 10) as u8;
-            tmp[1] = b'0' + (chosen % 10) as u8;
-            uart_putc(tmp[0]);
-            uart_putc(tmp[1]);
-        } else {
-            uart_putc(b'0' + chosen as u8);
+        if !boot_quiet() {
+            uart_puts(b"[house] detect late: smp dtb=\0".as_ptr());
+            let mut tmp = [b'0'; 2];
+            if chosen >= 10 {
+                tmp[0] = b'0' + (chosen / 10) as u8;
+                tmp[1] = b'0' + (chosen % 10) as u8;
+                uart_putc(tmp[0]);
+                uart_putc(tmp[1]);
+            } else {
+                uart_putc(b'0' + chosen as u8);
+            }
+            uart_puts(b" src=\0".as_ptr());
+            uart_puts(src);
+            uart_puts(b" psci=\0".as_ptr());
+            uart_putc(b'0' + (psci & 0xF) as u8);
+            uart_puts(b" gicr=\0".as_ptr());
+            uart_putc(b'0' + (gicr & 0xF) as u8);
+            uart_puts(b"\n\0".as_ptr());
         }
-        uart_puts(b" src=\0".as_ptr());
-        uart_puts(src);
-        uart_puts(b" psci=\0".as_ptr());
-        uart_putc(b'0' + (psci & 0xF) as u8);
-        uart_puts(b" gicr=\0".as_ptr());
-        uart_putc(b'0' + (gicr & 0xF) as u8);
-        uart_puts(b"\n\0".as_ptr());
         let _ = src;
     }
 }

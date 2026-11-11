@@ -142,6 +142,7 @@ hasmntopt
 house_asid_for_pdir
 house_asid_forget_pdir
 house_boot_stack_top
+house_bootarg_present
 house_brk_should_park
 house_clear_exit
 house_current_thr

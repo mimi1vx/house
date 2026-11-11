@@ -5,4 +5,5 @@
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p build
-(cd initramfs-staging && find . -mindepth 1 | sort | cpio -o -H newc) >build/initramfs.cpio
+OUT=${1:-build/initramfs.cpio}
+(cd initramfs-staging && find . -mindepth 1 | sort | cpio -o -H newc) >"$OUT"

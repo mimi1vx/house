@@ -1,0 +1,134 @@
+#!/usr/bin/expect -f
+# house-run check: quiet boot + auto console (make run) + backoff without device.
+# Part A (with virtconsole): boots build/initramfs-run.cpio with
+#   -append "quiet house.con=auto" + virtconsole socket; asserts Welcome,
+#   zero quieted [house] lines before it, socket yields `login tester` + `sh$ `,
+#   and UART has no `sh: ENOENT`.
+# Part B (no device): same bootargs, no virtconsole; asserts
+#   `con auto: no virtio-console device` and `sh: ENOENT` count in a 20 s
+#   window <= 10 (proves exponential backoff; unpaced would be ~100).
+# Usage: expect scripts/qemu-run.exp <kernel.bin> [timeout] [accel] [mem] [smp]
+set kernel [lindex $argv 0]
+set boot_timeout [lindex $argv 1]
+set accel [lindex $argv 2]
+set mem [lindex $argv 3]
+set smp [lindex $argv 4]
+if {$boot_timeout eq "" || $boot_timeout == 0} { set boot_timeout 60 }
+if {$accel eq ""} { set accel hvf }
+if {$mem eq ""} { set mem 4G }
+if {$smp eq ""} { set smp 2 }
+set sockpath "/tmp/house-run.sock"
+set tcpport 4447
+set bridge_pid ""
+set ::sockbuf ""
+log_user 1
+source [file join [file dirname [info script]] house.exp]
+proc fail {msg} {
+    global bridge_pid
+    puts "\nFAIL: $msg"
+    puts "SOCKBUF: $::sockbuf"
+    catch {exec kill -9 $bridge_pid}
+    catch {exec kill -9 [exp_pid]}
+    exit 1
+}
+proc sock_expect {s needle tries} {
+    for {set i 0} {$i < $tries} {incr i} {
+        after 300
+        if {[eof $s]} { fail "console socket EOF (bridge/device down?)" }
+        catch {append ::sockbuf [read $s]}
+        if {[string first $needle $::sockbuf] >= 0} { return 1 }
+    }
+    return 0
+}
+proc sock_drain {s} {
+    after 500
+    catch {append ::sockbuf [read $s]}
+    set ::sockbuf ""
+}
+# --- Part A: with virtconsole ---
+catch {exec rm -f $sockpath}
+set cmdA "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs-run.cpio -append \"quiet house.con=auto\" -chardev socket,path=$sockpath,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0"
+puts "SPAWN-A: $cmdA"
+eval spawn $cmdA
+set timeout $boot_timeout
+expect {
+    -re "\\\[house\\\] dtb banks" { fail "quiet boot leaked [house] dtb banks" }
+    -re "\\\[house\\\] bank0" { fail "quiet boot leaked [house] bank0" }
+    -re "\\\[house\\\] psci" { fail "quiet boot leaked [house] psci" }
+    -re "\\\[house\\\] smp:" { fail "quiet boot leaked [house] smp" }
+    -re "\\\[house\\\] rts caps" { fail "quiet boot leaked [house] rts caps" }
+    -re "\\\[house\\\] buddy" { fail "quiet boot leaked [house] buddy" }
+    -re "Welcome to the House shell" { puts "\nPASS-A: saw welcome (quiet, no dtb/bank/psci/smp/rts/buddy)" }
+    timeout { fail "welcome timeout (part A)" }
+    eof { fail "eof before welcome (part A)" }
+}
+expect {
+    -re "initramfs: 35 files" { puts "\nPASS-A: initramfs 35 files" }
+    timeout { fail "initramfs marker timeout (part A)" }
+    eof { fail "eof before initramfs marker (part A)" }
+}
+if {[catch {exec socat -V} err]} { fail "socat missing on host: $err" }
+set bridge_pid [exec socat TCP-LISTEN:$tcpport,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:$sockpath &]
+after 1000
+set s [socket 127.0.0.1 $tcpport]
+fconfigure $s -translation binary -buffering none -blocking 0
+puts "\nPASS-A: host socket connected"
+# Auto login races the socket connect: the first `house login: ` may already
+# be lost (no client yet), but sh still waits for the login name. Drain, send
+# `tester`, and require `login tester` + `sh$ ` instead of the prompt itself.
+proc sh_send {s cmd} {
+    sock_drain $s
+    fconfigure $s -blocking 1
+    if {[catch {puts -nonewline $s "$cmd\n"} err]} { fail "socket write failed: $err" }
+    if {[catch {flush $s} err]} { fail "socket flush failed: $err" }
+    fconfigure $s -blocking 0
+}
+after 1000
+sh_send $s "tester"
+if {![sock_expect $s {login tester} 200]} { fail "login tester missing (auto con?)" }
+puts "\nPASS-A: login tester logged (auto con, no typed con init)"
+if {![sock_expect $s {sh$ } 100]} { fail "sh prompt timeout (part A)" }
+puts "\nPASS-A: EL0 sh prompt on console socket"
+catch {close $s}
+# UART must have no ENOENT: 10 s watch, any hit fails.
+set timeout 10
+expect {
+    -re "sh: ENOENT" { fail "UART sh: ENOENT with console up (auto con failed?)" }
+    timeout { puts "\nPASS-A: UART no sh: ENOENT in 10 s" }
+    eof { fail "eof during ENOENT watch (part A)" }
+}
+catch {exec kill -9 $bridge_pid}
+set bridge_pid ""
+catch {exec kill -9 [exp_pid]}
+catch {close}
+catch {wait}
+after 1000
+# --- Part B: no virtconsole, same bootargs ---
+set cmdB "qemu-system-aarch64 -accel $accel -cpu max -M virt,gic-version=3 -global virtio-mmio.force-legacy=false -smp $smp -m $mem -nographic -kernel $kernel -initrd build/initramfs-run.cpio -append \"quiet house.con=auto\""
+puts "SPAWN-B: $cmdB"
+eval spawn $cmdB
+set timeout $boot_timeout
+expect {
+    -re "con auto: no virtio-console device" { puts "\nPASS-B: con auto no-device line" }
+    timeout { fail "con auto line timeout (part B)" }
+    eof { fail "eof before con auto line (part B)" }
+}
+# 20 s ENOENT window: backoff yields <= 10, unpaced would be ~100.
+set start [clock seconds]
+set enoent_count 0
+set timeout 2
+while {[expr {[clock seconds] - $start}] < 20} {
+    expect {
+        -re "sh: ENOENT" { incr enoent_count; puts "saw ENOENT $enoent_count" }
+        timeout { }
+        eof { fail "eof during backoff window (part B)" }
+    }
+}
+puts "\nINFO-B: ENOENT count in 20 s = $enoent_count"
+if {$enoent_count > 10} { fail "backoff failed: $enoent_count ENOENT in 20 s (>10)" }
+puts "\nPASS-B: backoff ok ($enoent_count ENOENT in 20 s <= 10)"
+catch {exec kill -9 [exp_pid]}
+catch {close}
+catch {wait}
+puts "\nPASS: house-run ok (quiet + auto con + backoff)"
+exit 0

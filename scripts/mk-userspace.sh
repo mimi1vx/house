@@ -21,6 +21,7 @@
 # 227B). build-probe/*.s keep the bare link line, untouched.
 set -eu
 cd "$(dirname "$0")/.."
+SKIP=${HOUSE_SKIP_GATES:-0}
 CC=${CC:-gcc}
 LD=${LD:-ld}
 PYTHON3=${PYTHON3:-python3}
@@ -77,42 +78,49 @@ CB_A=$(echo "$SYSROOT"/lib/rustlib/aarch64-unknown-none/lib/libcompiler_builtins
 }
 
 # house-gen binary (built once; list-bin path, never `cabal run` stdout).
-cabal build exe:house-gen
-GEN=$(cabal list-bin exe:house-gen 2>/dev/null | tail -1)
-[ -x "$GEN" ] || {
-	echo "house-gen not executable: $GEN" >&2
-	exit 1
-}
+# Skipped for run-only initrd (HOUSE_SKIP_GATES=1): no drift gate, no cabal.
+if [ "$SKIP" = "0" ]; then
+	cabal build exe:house-gen
+	GEN=$(cabal list-bin exe:house-gen 2>/dev/null | tail -1)
+	[ -x "$GEN" ] || {
+		echo "house-gen not executable: $GEN" >&2
+		exit 1
+	}
+fi
 
 # New pid1 toolchain (userspace.ld shared; init -> sbin).
 for prog in hello ls cat echo mkdir rm stat write sh; do
+	if [ "$SKIP" = "0" ]; then
+		case " $EDSL_TOOLS " in
+		*" $prog "*)
+			tmpgen=$(mktemp)
+			"$GEN" "$prog" >"$tmpgen"
+			if ! diff -u "userspace/$prog.s" "$tmpgen"; then
+				echo "drift: house-gen $prog != userspace/$prog.s" >&2
+				rm -f "$tmpgen"
+				exit 1
+			fi
+			rm -f "$tmpgen"
+			;;
+		esac
+	fi
+	build_user_one "userspace/$prog.s" userspace/userspace.ld \
+		"initramfs-staging/bin/$prog" "$TINY_A" "$CORE_A" "$CB_A"
+done
+if [ "$SKIP" = "0" ]; then
 	case " $EDSL_TOOLS " in
-	*" $prog "*)
+	*" init "*)
 		tmpgen=$(mktemp)
-		"$GEN" "$prog" >"$tmpgen"
-		if ! diff -u "userspace/$prog.s" "$tmpgen"; then
-			echo "drift: house-gen $prog != userspace/$prog.s" >&2
+		"$GEN" init >"$tmpgen"
+		if ! diff -u userspace/init.s "$tmpgen"; then
+			echo "drift: house-gen init != userspace/init.s" >&2
 			rm -f "$tmpgen"
 			exit 1
 		fi
 		rm -f "$tmpgen"
 		;;
 	esac
-	build_user_one "userspace/$prog.s" userspace/userspace.ld \
-		"initramfs-staging/bin/$prog" "$TINY_A" "$CORE_A" "$CB_A"
-done
-case " $EDSL_TOOLS " in
-*" init "*)
-	tmpgen=$(mktemp)
-	"$GEN" init >"$tmpgen"
-	if ! diff -u userspace/init.s "$tmpgen"; then
-		echo "drift: house-gen init != userspace/init.s" >&2
-		rm -f "$tmpgen"
-		exit 1
-	fi
-	rm -f "$tmpgen"
-	;;
-esac
+fi
 build_one userspace/init.s userspace/userspace.ld initramfs-staging/sbin/init
 
 # Existing probes (reference sources until userspace/ supersedes them).
@@ -133,10 +141,12 @@ lib_manifest=$(mktemp)
 trap 'rm -f "$static_manifest" "$dynamic_manifest" "$lib_manifest"' EXIT
 find initramfs-staging/bin initramfs-staging/sbin -type f -print | LC_ALL=C sort |
 	while IFS= read -r path; do sha256sum "$path"; done >"$static_manifest"
-if ! cmp -s scripts/static-userspace.sha256 "$static_manifest"; then
-	echo "static userspace manifest drift" >&2
-	diff -u scripts/static-userspace.sha256 "$static_manifest" >&2 || true
-	exit 1
+if [ "$SKIP" = "0" ]; then
+	if ! cmp -s scripts/static-userspace.sha256 "$static_manifest"; then
+		echo "static userspace manifest drift" >&2
+		diff -u scripts/static-userspace.sha256 "$static_manifest" >&2 || true
+		exit 1
+	fi
 fi
 
 sh scripts/mk-dynamic-probe.sh staging
@@ -175,10 +185,12 @@ find initramfs-staging/bin initramfs-staging/lib -type f \( \
 	-o -name libc-house.so.0 -o -name libmid-house.so.0 \
 	\) -print | LC_ALL=C sort |
 	while IFS= read -r path; do sha256sum "$path"; done >"$dynamic_manifest"
-if ! cmp -s scripts/dynamic-userspace.sha256 "$dynamic_manifest"; then
-	echo "dynamic userspace manifest drift" >&2
-	diff -u scripts/dynamic-userspace.sha256 "$dynamic_manifest" >&2 || true
-	exit 1
+if [ "$SKIP" = "0" ]; then
+	if ! cmp -s scripts/dynamic-userspace.sha256 "$dynamic_manifest"; then
+		echo "dynamic userspace manifest drift" >&2
+		diff -u scripts/dynamic-userspace.sha256 "$dynamic_manifest" >&2 || true
+		exit 1
+	fi
 fi
 
 # /lib version record: layer-relative manifest digest, no trailing newline.
@@ -192,9 +204,11 @@ echo "lib version pin $lib_pin" >&2
 printf '%s' "$lib_pin" >initramfs-staging/lib/.house-lib-version
 chmod 644 initramfs-staging/lib/.house-lib-version
 touch -d '@0' initramfs-staging/lib/.house-lib-version
-if ! sha256sum -c scripts/lib-version.sha256; then
-	echo "lib version pin drift" >&2
-	exit 1
+if [ "$SKIP" = "0" ]; then
+	if ! sha256sum -c scripts/lib-version.sha256; then
+		echo "lib version pin drift" >&2
+		exit 1
+	fi
 fi
 
 ls initramfs-staging/bin initramfs-staging/sbin initramfs-staging/lib

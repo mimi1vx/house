@@ -1,8 +1,9 @@
 # Console shell & getty
 
 EL0 `/bin/sh` over the virtio-console, supervised by EL0 `/sbin/init`.
-Harness: `scripts/qemu-sh.exp` via `make house-sh-check` (first-class gate
-in `make check` and `make check-tcg`). For boot/entry see
+Harness: `scripts/qemu-sh.exp` via `make house-sh-check` plus `scripts/qemu-run.exp`
+via `make house-run-check` (both first-class gates in `make check` and
+`make check-tcg`). For boot/entry see
 [Boot & runtime](boot-runtime.md); for host setup see
 [Host QEMU](host-qemu.md).
 
@@ -69,12 +70,14 @@ child close ALL pipe fds, then the parent closes its copies at once
 that keeps its pipe ends open hangs at EOF instead; a double-mapped fd
 would duplicate.
 
-## Getty: respawn, YIELD pacing, up | done | fail
+## Getty: respawn, exponential backoff, up | done | fail
 
 `/sbin/init` (`userspace/init.s`) prints `init up` once, then loops
 FOREVER: `FORK`, child `EXEC /bin/sh`, parent `WAIT` + `init done`,
-re-loop paced by a small bounded run of `YIELD`s so an instantly-exiting
-child cannot hot-spin. Exec miss fails closed per iteration (`init fail`
+re-loop paced by exponential backoff (budget in `x21`, start 2048 `YIELD`s,
+doubles on non-zero child exit up to 2048<<6 = 131072, resets on exit 0;
+counter in `x20` reloads each cycle) so an instantly-exiting child cannot
+hot-spin yet a live shell stays responsive. Exec miss fails closed per iteration (`init fail`
 + child `EXIT 1`); the exit code stays visible only via the kernel
 reaper thread's `init exit CODE` (`kernel/Kernel/Init.hs`, which also
 owns the fail-closed `initramfs: init fail E` when `/sbin/init` is
@@ -89,6 +92,41 @@ EL0 prompt is `sh$ ` — the harness matches only the latter, after the
 login line), answers `tester` with `login tester`, and idle EOF (socket
 close) drains the console read to empty so `sh` CLOSEs + `EXIT`s 0 and
 init reaps `init done`.
+
+## Quiet boot, bootargs, auto console, `make run`
+
+`qemu -append` bootargs land in `/chosen/bootargs` (flat `-kernel` image via
+QEMU Linux path, `x0=DTB`; checked with `dumpdtb`). `rust/.../dtb.rs` caches
+the property (256 B cap, NUL-terminated) during the existing `/chosen` walk
+and exports `int house_bootarg_present(const char *token)` (whitespace-exact,
+`quiet` does not match `quieter`; see `rust/c-abi.md`). `make run` passes
+`-append "quiet house.con=auto"`.
+
+`quiet` suppresses the `[house] dtb|bank0|psci|smp|rts|buddy` info lines in
+`c_start.rs`/`detect.rs`/`irq.rs` (via `boot_quiet()`) and the two
+`HouseA64.hs` info lines (via FFI); fatal/`[kill]`/`[svc]`/`[probe]`, `Welcome`,
+`initramfs:`, and `init pid/up` stay. `house.con=auto` makes
+`HouseA64.autoConInit` (called after `Boot.boot`, before `Init.launchPid1`)
+`virtioScan`, take the first present `device_id=3` slot, and `conServerInit`
+it — silent on success, exactly one UART line on failure (`con auto:
+no virtio-console device` / error). The first `sh` therefore already finds
+`/dev/console`; without a device the fail-closed
+`sh: ENOENT` backs off to ~10 s per pair. `scripts/qemu-run.exp` proves both: with a device no quieted
+lines, `Welcome`, socket `login tester` + `sh$ `, no UART `ENOENT` (the harness
+connects within ~1 s, so the first try already sees the client); without a
+device the `con auto` line plus `ENOENT` <= 10 in 20 s. Human `make run`:
+connect `socat` promptly after QEMU starts; if auto already failed (no client
+during its one handshake), do manual `con init <slot>` (via `virtio scan`)
+on the kernel shell — the next pid1 `sh` (backoff ~10 s) will then find
+`/dev/console`.
+
+`make run` (`house-run`) boots `build/initramfs-run.cpio` (same sources as the
+gated `initramfs.cpio`, packed with `HOUSE_SKIP_GATES=1` so no
+`cabal`/drift/manifest gates run) with the quiet+auto bootargs plus
+`-chardev socket,path=/tmp/house-run.sock` + `virtio-serial-device` +
+`virtconsole`.
+It prints `EL0 shell: socat -,raw,echo=0
+UNIX-CONNECT:/tmp/house-run.sock` before QEMU takes the terminal.
 
 ## Deferred: quoting, vars, glob, job control, wakeup queue
 

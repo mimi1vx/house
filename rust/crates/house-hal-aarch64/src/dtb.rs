@@ -601,6 +601,389 @@ pub unsafe extern "C" fn fdt_get_ram_bank(
     unsafe { ram_bank_at(dtb, idx, base, size).1 }
 }
 
+/// Cached `/chosen/bootargs` (cap 256 B, NUL-terminated).
+///
+/// Initialized once by `house_bootargs_init` from the DTB before any
+/// quiet-gated print. Fail-closed: invalid DTB or missing property leaves
+/// the buffer empty (all NUL), so every `house_bootarg_present` is 0.
+static mut BOOTARGS: [u8; 256] = [0; 256];
+
+/// Initialize the cached bootargs from the DTB.
+///
+/// Call once from `house_detect_early` before any quiet-gated print.
+/// Truncates to 255 payload bytes + NUL; empty on invalid/missing.
+///
+/// # Safety
+///
+/// `dtb` must be null (leaves empty) or point to a `fdt_valid`-accepted blob.
+pub unsafe fn house_bootargs_init(dtb: *const u8) {
+    // SAFETY: single early caller (primary core), BSS clear, no concurrent readers.
+    unsafe {
+        for b in BOOTARGS.iter_mut() {
+            *b = 0;
+        }
+        if fdt_valid(dtb) == 0 {
+            return;
+        }
+        let base = dtb;
+        let totalsize = be32(base.add(4));
+        let off_struct = be32(base.add(8));
+        let off_strings = be32(base.add(12));
+        let size_strings = be32(base.add(32));
+        let size_struct = be32(base.add(36));
+        let mut struct_end = off_struct.checked_add(size_struct).unwrap_or(totalsize);
+        if struct_end > totalsize {
+            struct_end = totalsize;
+        }
+        if off_strings.checked_add(size_strings).unwrap_or(u32::MAX) > totalsize {
+            return;
+        }
+        let mut stack_depth: i32 = 0;
+        let mut is_chosen_stack = [false; 16];
+        let mut p = off_struct;
+        let mut ok = true;
+        while ok && p.checked_add(4).unwrap_or(u32::MAX) <= struct_end {
+            let token = be32(base.add(p as usize));
+            p = p.wrapping_add(4);
+            if token == 0x1 {
+                let name_ptr = base.add(p as usize) as *const u8;
+                let mut namelen: u32 = 0;
+                while p.checked_add(namelen).unwrap_or(u32::MAX) < totalsize
+                    && *base.add((p + namelen) as usize) != 0
+                {
+                    namelen += 1;
+                    if namelen > 64 {
+                        break;
+                    }
+                }
+                if p.checked_add(namelen).unwrap_or(u32::MAX) >= totalsize {
+                    ok = false;
+                    break;
+                }
+                namelen += 1;
+                let is_chosen = if stack_depth == 1 {
+                    *name_ptr == b'c'
+                        && *name_ptr.add(1) == b'h'
+                        && *name_ptr.add(2) == b'o'
+                        && *name_ptr.add(3) == b's'
+                        && *name_ptr.add(4) == b'e'
+                        && *name_ptr.add(5) == b'n'
+                        && *name_ptr.add(6) == 0
+                } else {
+                    false
+                };
+                if stack_depth >= 0 && (stack_depth as usize) < 16 {
+                    is_chosen_stack[stack_depth as usize] = is_chosen;
+                }
+                stack_depth += 1;
+                if stack_depth > 16 {
+                    stack_depth = 16;
+                }
+                p = align4(p.wrapping_add(namelen));
+            } else if token == 0x2 {
+                if stack_depth > 0 {
+                    stack_depth -= 1;
+                }
+            } else if token == 0x3 {
+                if p.checked_add(8).unwrap_or(u32::MAX) > struct_end {
+                    ok = false;
+                    break;
+                }
+                let len = be32(base.add(p as usize));
+                p = p.wrapping_add(4);
+                let nameoff = be32(base.add(p as usize));
+                p = p.wrapping_add(4);
+                let prop_ptr = base.add(p as usize);
+                if p.checked_add(len).unwrap_or(u32::MAX) > struct_end {
+                    ok = false;
+                    break;
+                }
+                let cur_is_chosen = if stack_depth > 0 && (stack_depth as usize) <= 16 {
+                    is_chosen_stack[(stack_depth - 1) as usize]
+                } else {
+                    false
+                };
+                if cur_is_chosen && nameoff < size_strings {
+                    let s = base.add((off_strings + nameoff) as usize) as *const u8;
+                    let want: &[u8] = b"bootargs";
+                    let mut is_bootargs = nameoff
+                        .checked_add(want.len() as u32 + 1)
+                        .unwrap_or(u32::MAX)
+                        <= size_strings;
+                    if is_bootargs {
+                        for i in 0..want.len() {
+                            if *s.add(i) != want[i] {
+                                is_bootargs = false;
+                                break;
+                            }
+                        }
+                        if is_bootargs && *s.add(want.len()) != 0 {
+                            is_bootargs = false;
+                        }
+                    }
+                    if is_bootargs && len > 0 && len <= 4096 {
+                        let take = core::cmp::min(len as usize, 255);
+                        for i in 0..take {
+                            BOOTARGS[i] = *prop_ptr.add(i);
+                        }
+                        BOOTARGS[take] = 0;
+                        BOOTARGS[255] = 0;
+                        return;
+                    }
+                }
+                p = align4(p.wrapping_add(len));
+            } else if token == 0x4 {
+                continue;
+            } else if token == 0x9 {
+                break;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+    }
+}
+
+/// int house_bootarg_present(const char *token) — 1 if a whitespace-separated
+/// bootargs token equals `token` exactly, 0 otherwise.
+///
+/// Token match is exact on whitespace boundaries: `quiet` does not match
+/// `quieter` in either direction. `token` must be a NUL-terminated C string
+/// (max 128 B, no embedded whitespace); bootargs is the cached 256 B buffer.
+///
+/// # Safety
+///
+/// `token` must be null (returns 0) or point to a readable NUL-terminated
+/// C string; over-long (no NUL in 128 B) returns 0 without further reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn house_bootarg_present(token: *const u8) -> i32 {
+    if token.is_null() {
+        return 0;
+    }
+    // SAFETY: token non-null; all reads bounded (128 B token, 256 B cache).
+    unsafe {
+        let mut tlen: usize = 0;
+        while tlen < 128 {
+            let c = *token.add(tlen);
+            if c == 0 {
+                break;
+            }
+            if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+                return 0;
+            }
+            tlen += 1;
+        }
+        if tlen >= 128 || *token.add(tlen) != 0 || tlen == 0 {
+            return 0;
+        }
+        let mut i: usize = 0;
+        while i < 256 {
+            while i < 256
+                && (BOOTARGS[i] == b' '
+                    || BOOTARGS[i] == b'\t'
+                    || BOOTARGS[i] == b'\n'
+                    || BOOTARGS[i] == b'\r')
+            {
+                i += 1;
+            }
+            if i >= 256 || BOOTARGS[i] == 0 {
+                break;
+            }
+            let start = i;
+            while i < 256
+                && BOOTARGS[i] != 0
+                && BOOTARGS[i] != b' '
+                && BOOTARGS[i] != b'\t'
+                && BOOTARGS[i] != b'\n'
+                && BOOTARGS[i] != b'\r'
+            {
+                i += 1;
+            }
+            let flen = i - start;
+            if flen == tlen {
+                let mut eq = true;
+                for k in 0..tlen {
+                    if BOOTARGS[start + k] != *token.add(k) {
+                        eq = false;
+                        break;
+                    }
+                }
+                if eq {
+                    return 1;
+                }
+            }
+        }
+        0
+    }
+}
+
+/// Quiet-boot predicate: cached bootargs contains `quiet`.
+pub fn boot_quiet() -> bool {
+    // SAFETY: static C string, NUL-terminated by construction.
+    unsafe { house_bootarg_present(b"quiet\0".as_ptr()) != 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reset_bootargs() {
+        // SAFETY: single test thread (--test-threads=1), no concurrent readers.
+        unsafe {
+            for b in BOOTARGS.iter_mut() {
+                *b = 0;
+            }
+        }
+    }
+
+    fn set_bootargs(s: &[u8]) {
+        reset_bootargs();
+        // SAFETY: test-only, bounded copy into the static cache.
+        unsafe {
+            let take = core::cmp::min(s.len(), 255);
+            for i in 0..take {
+                BOOTARGS[i] = s[i];
+            }
+            BOOTARGS[take] = 0;
+        }
+    }
+
+    fn present(token: &[u8]) -> i32 {
+        // SAFETY: token is a NUL-terminated test literal.
+        unsafe { house_bootarg_present(token.as_ptr()) }
+    }
+
+    #[test]
+    fn bootarg_present_and_absent() {
+        set_bootargs(b"quiet house.con=auto\0");
+        assert_eq!(present(b"quiet\0"), 1);
+        assert_eq!(present(b"house.con=auto\0"), 1);
+        assert_eq!(present(b"missing\0"), 0);
+    }
+
+    #[test]
+    fn bootarg_prefix_is_not_a_match() {
+        set_bootargs(b"quieter\0");
+        assert_eq!(present(b"quiet\0"), 0);
+        set_bootargs(b"quiet\0");
+        assert_eq!(present(b"quieter\0"), 0);
+        set_bootargs(b"quiet quieter\0");
+        assert_eq!(present(b"quiet\0"), 1);
+        assert_eq!(present(b"quieter\0"), 1);
+    }
+
+    #[test]
+    fn bootarg_empty_and_missing() {
+        reset_bootargs();
+        assert_eq!(present(b"quiet\0"), 0);
+        set_bootargs(b"\0");
+        assert_eq!(present(b"quiet\0"), 0);
+        set_bootargs(b"   \t\n\0");
+        assert_eq!(present(b"quiet\0"), 0);
+        assert_eq!(present(b"\0"), 0);
+    }
+
+    #[test]
+    fn bootarg_over_cap_truncation() {
+        // 300 B payload: truncation must not overflow and tail is dropped.
+        let mut long = [b'a'; 300];
+        long[299] = 0;
+        // SAFETY: init reads a valid DTB only; here we test the cache cap
+        // directly by writing through the same 255-byte path as init.
+        set_bootargs(&long[..255]);
+        // SAFETY: BOOTARGS is 256 B; index 255 is in bounds.
+        unsafe {
+            assert_eq!(BOOTARGS[255], 0);
+        }
+        assert_eq!(present(b"quiet\0"), 0);
+        // Head-resident token survives truncation.
+        let mut head = [b'a'; 300];
+        head[0] = b'q';
+        head[1] = b'u';
+        head[2] = b'i';
+        head[3] = b'e';
+        head[4] = b't';
+        head[5] = b' ';
+        head[299] = 0;
+        set_bootargs(&head[..255]);
+        assert_eq!(present(b"quiet\0"), 1);
+    }
+
+    fn be(v: u32, out: &mut Vec<u8>) {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+
+    fn build_dtb(bootargs: Option<&[u8]>) -> Vec<u8> {
+        let mut strukt: Vec<u8> = Vec::new();
+        // root BEGIN_NODE ""
+        be(0x1, &mut strukt);
+        strukt.push(0);
+        strukt.extend_from_slice(&[0, 0, 0]);
+        // chosen BEGIN_NODE "chosen"
+        be(0x1, &mut strukt);
+        strukt.extend_from_slice(b"chosen\0");
+        strukt.push(0);
+        if let Some(val) = bootargs {
+            be(0x3, &mut strukt);
+            be(val.len() as u32, &mut strukt);
+            be(0, &mut strukt);
+            strukt.extend_from_slice(val);
+            while strukt.len() % 4 != 0 {
+                strukt.push(0);
+            }
+        }
+        be(0x2, &mut strukt);
+        be(0x2, &mut strukt);
+        be(0x9, &mut strukt);
+        let strings = b"bootargs\0";
+        let off_struct: u32 = 40;
+        let off_strings: u32 = off_struct + strukt.len() as u32;
+        let totalsize: u32 = off_strings + strings.len() as u32;
+        let mut blob: Vec<u8> = Vec::new();
+        be(FDT_MAGIC, &mut blob);
+        be(totalsize, &mut blob);
+        be(off_struct, &mut blob);
+        be(off_strings, &mut blob);
+        be(totalsize, &mut blob);
+        be(17, &mut blob);
+        be(16, &mut blob);
+        be(0, &mut blob);
+        be(strings.len() as u32, &mut blob);
+        be(strukt.len() as u32, &mut blob);
+        blob.extend_from_slice(&strukt);
+        blob.extend_from_slice(strings);
+        assert_eq!(blob.len() as u32, totalsize);
+        blob
+    }
+
+    #[test]
+    fn bootargs_init_parses_chosen() {
+        let dtb = build_dtb(Some(b"quiet house.con=auto\0"));
+        // SAFETY: dtb is a valid test blob, alive for the call.
+        unsafe {
+            house_bootargs_init(dtb.as_ptr());
+        }
+        assert_eq!(present(b"quiet\0"), 1);
+        assert_eq!(present(b"house.con=auto\0"), 1);
+        assert_eq!(present(b"missing\0"), 0);
+    }
+
+    #[test]
+    fn bootargs_init_missing_leaves_empty() {
+        // SAFETY: null DTB must leave the cache empty.
+        unsafe {
+            house_bootargs_init(core::ptr::null());
+        }
+        assert_eq!(present(b"quiet\0"), 0);
+        let dtb = build_dtb(None);
+        // SAFETY: valid blob without bootargs leaves the cache empty.
+        unsafe {
+            house_bootargs_init(dtb.as_ptr());
+        }
+        assert_eq!(present(b"quiet\0"), 0);
+    }
+}
+
 /// int fdt_get_initrd(const void *dtb, uint64_t *start, uint64_t *end)
 ///
 /// # Safety
