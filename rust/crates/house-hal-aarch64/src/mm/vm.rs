@@ -469,7 +469,11 @@ pub(crate) fn mmio_leaf_desc(pa_page: u64) -> u64 {
     const PTE_UXN: u64 = 1 << 54;
     const PTE_PXN: u64 = 1 << 53;
     const PTE_ATTR_DEVICE: u64 = 1 << 2;
-    (pa_page & !0xFFF)
+    // OA[47:12] only (matches OA_MASK in svc.rs): `pa_page` arrives
+    // page-aligned from `mmio_slot_page`, but masking the full output-address
+    // field — not just the low 12 bits — keeps any future caller from
+    // smuggling UXN/PXN or SW flag bits into the leaf's address field.
+    (pa_page & 0x0000FFFFFFFFF000)
         | PTE_VALID
         | PTE_TABLE
         | PTE_AF
@@ -885,11 +889,19 @@ pub unsafe extern "C" fn house_vm_munmap(addr: *mut u8, len: usize) -> i32 {
                     // RAM. Clear the entry and shoot down, but never free the
                     // address — freeing it would hand a device page to the
                     // buddy allocator (or the Haskell free list).
-                    let page = (d & !0xFFF) as *mut u8;
+                    // OA[47:12] only (matches `mAddress` in
+                    // kernel/H/VirtualMemory.hs and OA_MASK in svc.rs): strip
+                    // UXN/PXN and the SW COW mark (bit 57, set by the Haskell
+                    // fork-share path) so unmapping a still-COW page frees its
+                    // real buddy page, not garbage with bit 57 set.
+                    let page = (d & 0x0000FFFFFFFFF000) as *mut u8;
                     unsafe { *slot = 0 };
                     unsafe { core::arch::asm!("dsb ishst", options(nostack, preserves_flags)) };
                     unsafe { house_tlb_shootdown(va) };
                     if !is_mmio_desc(d) {
+                        // SAFETY: `page` is the masked OA of a live L3 leaf
+                        // just cleared above under VM_LOCK; non-MMIO leaves
+                        // name buddy RAM by construction.
                         unsafe { buddy_free_page(page) };
                     }
                 }

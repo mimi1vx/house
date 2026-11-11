@@ -994,7 +994,10 @@ shareAddrSpace src dst hi = do
                   case mInfo of
                     Nothing -> go l1 (va + 4096) n flipped
                     Just info -> do
-                      let shared = info {VM.writable = False, VM.cow = VM.writable info}
+                      -- Keep COW on re-share: deriving it from writability
+                      -- alone clears it on the second fork (RO, 3 sharers),
+                      -- so the next store fault-kills instead of breaking.
+                      let shared = info {VM.writable = False, VM.cow = VM.writable info || VM.cow info}
                       okC <- VM.setPage dst va (Just shared)
                       if not okC
                         then rollback flipped
@@ -1035,39 +1038,47 @@ breakCow pid pdirVa = withQSem userSem $ do
   mp <- readRef procMap
   case Map.lookup pid mp of
     Nothing -> return CowNotCow
-    Just pr -> do
-      let pdir = procPdir pr
-          va = pdirVa .&. complement 4095
-      mInfo <- VM.getPage pdir va
-      case mInfo of
-        Nothing -> return CowNotCow
-        Just info
-          | not (VM.cow info) -> return CowNotCow
-          | otherwise -> do
-              let key = ptrToWord64 (fromPhysPage (VM.physPage info))
-              n <- Map.findWithDefault 0 key <$> readRef cowRefs
-              if n <= 1
-                then do
-                  ok <- VM.setPage pdir va (Just (info {VM.writable = True, VM.cow = False}))
-                  when ok (liftIO (atomicModifyIORef' cowRefs (\m -> (Map.delete key m, ()))))
-                  return (if ok then CowOk else CowNoMem)
+    Just pr -> breakCowLocked pr pdirVa
+
+{- | Lock-free-internal COW breaker (caller already holds 'userSem', so no
+re-entry): private copy + remap RW + refcount decrement, mirroring the EL0
+fault path. Supervisor *writes* break through this; supervisor *reads*
+never call it (COW RO is readable as-is).
+-}
+breakCowLocked :: Process -> Word64 -> H CowBreak
+breakCowLocked pr pdirVa = do
+  let pdir = procPdir pr
+      va = pdirVa .&. complement 4095
+  mInfo <- VM.getPage pdir va
+  case mInfo of
+    Nothing -> return CowNotCow
+    Just info
+      | not (VM.cow info) -> return CowNotCow
+      | otherwise -> do
+          let key = ptrToWord64 (fromPhysPage (VM.physPage info))
+          n <- Map.findWithDefault 0 key <$> readRef cowRefs
+          if n <= 1
+            then do
+              ok <- VM.setPage pdir va (Just (info {VM.writable = True, VM.cow = False}))
+              when ok (liftIO (atomicModifyIORef' cowRefs (\m -> (Map.delete key m, ()))))
+              return (if ok then CowOk else CowNoMem)
+            else do
+              allowed <- liftIO (c_budget_acquire (VM.fromPageMap pdir) 1)
+              if allowed /= 1
+                then return CowNoMem
                 else do
-                  allowed <- liftIO (c_budget_acquire (VM.fromPageMap pdir) 1)
-                  if allowed /= 1
-                    then return CowNoMem
-                    else do
-                      mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
-                      case mp2 of
-                        Nothing -> return CowNoMem
-                        Just raw -> do
-                          copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
-                          let mine = info {VM.physPage = toPhysPage (castPtr raw), VM.writable = True, VM.cow = False}
-                          ok <- VM.setPage pdir va (Just mine)
-                          if not ok
-                            then do HPages.freePage raw; return CowNoMem
-                            else do
-                              liftIO (atomicModifyIORef' cowRefs (\m -> (Map.insert key (n - 1) m, ())))
-                              return CowOk
+                  mp2 <- HPages.allocPage :: H (Maybe (Ptr Word8))
+                  case mp2 of
+                    Nothing -> return CowNoMem
+                    Just raw -> do
+                      copyPageBytes (fromPhysPage (VM.physPage info)) (castPtr raw)
+                      let mine = info {VM.physPage = toPhysPage (castPtr raw), VM.writable = True, VM.cow = False}
+                      ok <- VM.setPage pdir va (Just mine)
+                      if not ok
+                        then do HPages.freePage raw; return CowNoMem
+                        else do
+                          liftIO (atomicModifyIORef' cowRefs (\m -> (Map.insert key (n - 1) m, ())))
+                          return CowOk
 
 copyPageBytes :: Ptr Word8 -> Ptr Word8 -> H ()
 copyPageBytes src dst = liftIO (IO.moveBytes dst src 4096)
@@ -1957,8 +1968,9 @@ parkLoop pmap bounds pid@(Pid selfInt) pdir asid exitVar stopVar sp finiSteps = 
                           else do
                             -- The reply lands in the server's message buffer,
                             -- which may not be faulted in yet: serve it first
-                            -- like the 'writeUser' path does.
-                            served <- ensureRange (procPdir pr) (procDemand pr) va (fromIntegral (length ws) * 8)
+                            -- like the 'writeUser' path does (breaking COW so
+                            -- the copy never writes a shared page in place).
+                            served <- ensureRangeWriteLocked pr va (fromIntegral (length ws) * 8)
                             case served of
                               DemandNoMem -> do modifyRef pendingReply (Map.delete pid); return (Just (-12))
                               DemandMiss -> do modifyRef pendingReply (Map.delete pid); return (Just (-14))
@@ -2086,7 +2098,8 @@ readUser p pd va nw = withQSem userSem $ do
             else do
               -- A supervisor copy may touch not-yet-faulted demand pages:
               -- fault them in first so the copy sees what EL0 would.
-              served <- ensureRange (procPdir pr) (procDemand pr) va (nw * 8)
+              -- Present COW pages read as-is (no mutation).
+              served <- ensureRangeReadLocked (procPdir pr) (procDemand pr) va (nw * 8)
               case served of
                 DemandNoMem -> return (Just (Left (-12)))
                 DemandMiss -> return (Just (Left (-14)))
@@ -2111,7 +2124,9 @@ writeUser p pd va ws = withQSem userSem $ do
           if null ws
             then return (Just 0)
             else do
-              served <- ensureRange (procPdir pr) (procDemand pr) va (fromIntegral (length ws) * 8)
+              -- Supervisor writes break COW first (private copy, never the
+              -- shared page in place); see 'ensureRangeWriteLocked'.
+              served <- ensureRangeWriteLocked pr va (fromIntegral (length ws) * 8)
               case served of
                 DemandNoMem -> return (Just (-12))
                 DemandMiss -> return (Just (-14))
@@ -2136,7 +2151,8 @@ readUserBytes p pd va ln = withQSem userSem $ do
           if ln == 0
             then return (Just (Right []))
             else do
-              served <- ensureRange (procPdir pr) (procDemand pr) va ln
+              -- Present COW pages read as-is (no mutation).
+              served <- ensureRangeReadLocked (procPdir pr) (procDemand pr) va ln
               case served of
                 DemandNoMem -> return (Just (Left (-12)))
                 DemandMiss -> return (Just (Left (-14)))
@@ -2161,7 +2177,9 @@ writeUserBytes p pd va ws = withQSem userSem $ do
           if null ws
             then return (Just 0)
             else do
-              served <- ensureRange (procPdir pr) (procDemand pr) va (fromIntegral (length ws))
+              -- Supervisor writes break COW first (private copy, never the
+              -- shared page in place); see 'ensureRangeWriteLocked'.
+              served <- ensureRangeWriteLocked pr va (fromIntegral (length ws))
               case served of
                 DemandNoMem -> return (Just (-12))
                 DemandMiss -> return (Just (-14))
@@ -2856,6 +2874,66 @@ ensureRange pdir table va len
             DemandServed -> go (page + 4096) end
             other -> return other
 
+{- | Supervisor-read pre-serve (caller holds 'userSem'): present pages --
+including COW RO sharers -- are readable as-is via the EL1 copy, so only
+truly unmapped pages go through 'demandServe'. Never mutates sharing.
+-}
+ensureRangeReadLocked :: VM.PageMap -> DemandTable -> Word64 -> Word64 -> H DemandResult
+ensureRangeReadLocked pdir table va len
+  | len == 0 = return DemandServed
+  | len > 65536 = return DemandMiss
+  | otherwise = case checkedAddWord "demand range" va len of
+      Left _ -> return DemandMiss
+      Right end -> go (va .&. complement 4095) end
+  where
+    go page end
+      | page >= end = return DemandServed
+      | page > maxBound - 4096 = return DemandMiss
+      | otherwise = do
+          mInfo <- VM.getPage pdir page
+          case mInfo of
+            Just _ -> go (page + 4096) end
+            Nothing -> do
+              r <- demandServe pdir table page
+              case r of
+                DemandServed -> go (page + 4096) end
+                other -> return other
+
+{- | Supervisor-write pre-serve (caller holds 'userSem'): demand-materialize
+first, then break COW pages via 'breakCowLocked' so the copy never writes a
+shared page in place (isolation). A freshly served page is private, so the
+range advances after either step.
+-}
+ensureRangeWriteLocked :: Process -> Word64 -> Word64 -> H DemandResult
+ensureRangeWriteLocked pr va len
+  | len == 0 = return DemandServed
+  | len > 65536 = return DemandMiss
+  | otherwise = case checkedAddWord "demand range" va len of
+      Left _ -> return DemandMiss
+      Right end -> go (va .&. complement 4095) end
+  where
+    pdir = procPdir pr
+    table = procDemand pr
+    go page end
+      | page >= end = return DemandServed
+      | page > maxBound - 4096 = return DemandMiss
+      | otherwise = do
+          mInfo <- VM.getPage pdir page
+          case mInfo of
+            Just info
+              | VM.cow info -> do
+                  r <- breakCowLocked pr page
+                  case r of
+                    CowOk -> go (page + 4096) end
+                    CowNoMem -> return DemandNoMem
+                    CowNotCow -> return DemandMiss
+              | otherwise -> go (page + 4096) end
+            Nothing -> do
+              r <- demandServe pdir table page
+              case r of
+                DemandServed -> go (page + 4096) end
+                other -> return other
+
 {- | Serve the pages of a NUL-terminated scan one at a time, stopping at the
 first NUL the supervisor copy sees. A string ending near the top of its
 page must not drag the next (possibly unmapped, possibly uncommitted) page
@@ -2867,21 +2945,28 @@ serveCString pdir table pd va mx = allocaArray 1 $ \lp -> go lp va mx
     go lp cur remaining
       | remaining == 0 = return DemandServed
       | otherwise = do
-          r <- demandServe pdir table cur
-          case r of
-            DemandServed -> do
-              rc <- liftIO (c_user_strlen pd cur remaining lp)
-              if rc == 0 || rc == -22
-                then return DemandServed
-                else do
-                  -- -14: the NUL lies past this page; advance. A later page
-                  -- outside every demand range misses fail-closed below.
-                  let pageEnd = (cur .&. complement 4095) + 4096
-                      step = min remaining (pageEnd - cur)
-                  if step == 0 || pageEnd <= cur
-                    then return DemandMiss
-                    else go lp pageEnd (remaining - step)
-            other -> return other
+          -- Present pages (including COW RO sharers) are readable as-is;
+          -- only unmapped pages need the demand serve.
+          mInfo <- VM.getPage pdir (cur .&. complement 4095)
+          case mInfo of
+            Just _ -> probe lp cur remaining
+            Nothing -> do
+              r <- demandServe pdir table cur
+              case r of
+                DemandServed -> probe lp cur remaining
+                other -> return other
+    probe lp cur remaining = do
+      rc <- liftIO (c_user_strlen pd cur remaining lp)
+      if rc == 0 || rc == -22
+        then return DemandServed
+        else do
+          -- -14: the NUL lies past this page; advance. A later page
+          -- outside every demand range misses fail-closed below.
+          let pageEnd = (cur .&. complement 4095) + 4096
+              step = min remaining (pageEnd - cur)
+          if step == 0 || pageEnd <= cur
+            then return DemandMiss
+            else go lp pageEnd (remaining - step)
 
 copyElfPageBytes :: BS.ByteString -> Ptr Word8 -> Int -> Int -> Int -> H (Either LoadError ())
 copyElfPageBytes source destination sourceOffset destinationOffset count

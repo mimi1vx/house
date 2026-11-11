@@ -259,6 +259,13 @@ unsafe fn translate_va(va: u64) -> usize {
 // EL1, the pdir outlives the call (Haskell holds `userSem` across the copy so
 // `freePDir` cannot run concurrently), and no lock is needed for the read.
 unsafe fn translate_va_pdir(pdir: *mut u8, va: u64) -> usize {
+    // Output address mask (OA[47:12], 4 KiB granule). Descriptor bits outside
+    // the output address — UXN/PXN, the SW bits (dirty/accessed/COW, e.g. set
+    // on fork-shared pages), and reserved bits — must not leak into the
+    // translated address: `!0xFFF` keeps them and yields a garbage PA (seen as
+    // EL1 data aborts with bit 57 set on child-exec path validation after a
+    // fork). Matches `mAddress` in kernel/H/VirtualMemory.hs.
+    const OA_MASK: u64 = 0x0000FFFFFFFFF000;
     unsafe {
         if pdir.is_null() || (pdir as usize & 4095) != 0 {
             return 0;
@@ -268,22 +275,22 @@ unsafe fn translate_va_pdir(pdir: *mut u8, va: u64) -> usize {
         if d0 & 1 == 0 {
             return 0;
         }
-        let l1 = (d0 & !0xFFF) as *mut u64;
+        let l1 = (d0 & OA_MASK) as *mut u64;
         let d1 = *l1.add(((va >> 30) & 0x1FF) as usize);
         if d1 & 1 == 0 {
             return 0;
         }
-        let l2 = (d1 & !0xFFF) as *mut u64;
+        let l2 = (d1 & OA_MASK) as *mut u64;
         let d2 = *l2.add(((va >> 21) & 0x1FF) as usize);
         if d2 & 1 == 0 {
             return 0;
         }
-        let l3 = (d2 & !0xFFF) as *mut u64;
+        let l3 = (d2 & OA_MASK) as *mut u64;
         let d3 = *l3.add(((va >> 12) & 0x1FF) as usize);
         if d3 & 1 == 0 {
             return 0;
         }
-        ((d3 & !0xFFF) | (va & 0xFFF)) as usize
+        ((d3 & OA_MASK) | (va & 0xFFF)) as usize
     }
 }
 
