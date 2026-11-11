@@ -8,6 +8,7 @@
 - [Build & run](build-run.md)
 - [Toolchain](toolchain.md)
 - [Host QEMU](host-qemu.md)
+- [Console shell & getty](console-shell-getty.md)
 
 # Architecture
 

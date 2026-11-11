@@ -80,6 +80,7 @@ make house-build house-run
 make house-check        # -> "Welcome to the House shell" banner, hvf+tcg
 make house-shell-check  # -> prompt, help->Usage, lambda, wastemem 10->55, hvf+tcg
 make house-posix-check  # -> help descriptions (-- ), echo, uname, uptime, shutdown -r (reboot) / -h (halt), hvf+tcg
+make house-sh-check     # -> EL0 sh over virtio-con: house login, exec/redirect/pipes, EOF exit 0, hvf+tcg
 make house-fs-check     # -> VFS/RamFS: write/cat/ls/mkdir/rm + echo > /path, hvf+tcg
 make smp-check          # -> N cores online + caps N + parfib 20=6765 + mvar ok, hvf+tcg (default N=2; SMP_N=4 for >2 gate)
 make smp-check-8        # -> smp-check at SMP_N=8/SPIKE_MEM=4G (scaling gate, ceiling 32; nightly, N=2 per-commit)
@@ -132,13 +133,16 @@ it: pid1 up runs the full `Kernel.Shell.Loop.loop` whose FS verbs
 pid1 failure runs the `Kernel.Shell.Emergency.loop` fallback
 (`help`/`uname`/`dmesg` only) so the console stays responsive.
 
-Pid1 parenting lives at EL0, not in the kernel: `/sbin/init` forks and
-execs `/bin/sh`, waits for it, announces `init done`, and exits with the
-child's status (one-shot, no respawn). The kernel console shell is therefore
-pid1's sibling — a monitor/debugger next to the EL0 tree — not its child.
-With a console device attached (`virtio-con` + `con init`), the `sh$ `
-prompt comes from EL0 `sh`; without one its open fails closed (`sh: ENOENT`,
-exit 1) and init reaps that instead.
+Pid1 parenting lives at EL0, not in the kernel: `/sbin/init` prints
+`init up` once, then loops FOREVER — forks and execs `/bin/sh`, waits
+for it, announces `init done`, paces the re-loop with a bounded run of
+`YIELD`s, and re-forks (an exec miss fails closed per iteration as
+`init fail` with child exit 1). The kernel console shell is therefore
+pid1's sibling — a monitor/debugger next to the EL0 tree — not its
+child. With a console device attached (`virtio-con` + `con init`), the
+`sh$ ` prompt comes from EL0 `sh` after its `house login: ` line;
+without one its open fails closed (`sh: ENOENT`, exit 1) and init reaps
+that instead, forever.
 
 QEMU `-initrd build/initramfs.cpio` supplies a cpio newc archive via
 `chosen/linux,initrd-start|end`, unpacked at boot into the default VFS

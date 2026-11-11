@@ -60,13 +60,15 @@ single source `rust/toolchain.lock` `miri_channel`).
 - `make haskell-check`: full-tree fourmolu+hlint + `cabal build all
   --enable-tests` + `cabal test all` (test-only package needs the flag).
 - `make check`: the 20 gates named by the banner (doctor, gate-coverage,
-  spike, irq, house, shell, posix, initrd, pid1, dynamic userspace,
+  spike, irq, house, shell, posix, initrd, pid1, sh, dynamic userspace,
   fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic,
   irq dispatch, rust (clippy + fmt + deny + abi), haskell, el0tiny,
   dynamic ELF), hvf+tcg where applicable.
 - `make check-tcg`: the check legs with `TCG_ONLY=1` (Linux CI has no nested
   virt, so the hvf halves are skipped), minus house-dynamic-root-check,
-  which needs QEMU 11+ for virtio-mmio-transports. The remaining focused
+  which needs QEMU 11+ for virtio-mmio-transports. `house-sh-check` runs
+  in both `check` and `check-tcg` (socket-driven EL0 login, exec/redirect/
+  pipe asserts, EOF-exit-0 reap). The remaining focused
   gates run in nightly (`house-fs/ipc/driver/virtio-*/irq-dispatch/
   userspace/fd-el0/fork/proc`, `smp-check`, `smp-hotplug-check` plus the
   scaling/memory/Miri legs). The virtio and irq-dispatch harnesses no longer

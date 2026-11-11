@@ -281,6 +281,12 @@ house-virtio-con-check: house-build initrd
 	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 45 hvf $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 	expect scripts/qemu-virtio-con.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-con.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
 
+# EL0 sh line discipline (house-1mo.2, echo-only): con init slot, socket-driven sh$ echo.
+house-sh-check: house-build initrd
+	rm -f /tmp/house-sh.sock
+	[ -n "$(TCG_ONLY)" ] || expect scripts/qemu-sh.exp $(SPIKE_DIR)/build/house.bin 150 hvf $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-sh.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
+	expect scripts/qemu-sh.exp $(SPIKE_DIR)/build/house.bin 180 tcg $(SPIKE_MEM) $(SMP_N) -- -chardev socket,path=/tmp/house-sh.sock,server=on,wait=off,id=c0 -device virtio-serial-device -device virtconsole,chardev=c0,name=org.house.con0
+
 # EL0 userspace + initramfs (pid1 slice): assemble userspace/*.s +
 # build-probe/*.s in the container, pack the cpio on the host.
 # File-tracked: repeat runs skip the rebuild and boot straight in.
@@ -527,6 +533,7 @@ check-tcg:
 	$(MAKE) house-posix-check TCG_ONLY=1
 	$(MAKE) house-initrd-check TCG_ONLY=1
 	$(MAKE) house-pid1-check TCG_ONLY=1
+	$(MAKE) house-sh-check TCG_ONLY=1
 	$(MAKE) house-dynamic-userspace-check TCG_ONLY=1
 	$(MAKE) house-fault-budget-check TCG_ONLY=1
 	$(MAKE) house-fault-kill-check TCG_ONLY=1
@@ -538,7 +545,7 @@ check-tcg:
 	$(MAKE) haskell-check
 	$(MAKE) el0tiny-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check-tcg: all aarch64 TCG gates passed (doctor, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, rust, haskell, el0tiny, dynamic ELF) =="
+	@echo "== make check-tcg: all aarch64 TCG gates passed (doctor, spike, irq, house banner, shell, posix, initrd, pid1, sh, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, rust, haskell, el0tiny, dynamic ELF) =="
 
 check:
 	$(MAKE) doctor
@@ -550,6 +557,7 @@ check:
 	$(MAKE) house-posix-check
 	$(MAKE) house-initrd-check
 	$(MAKE) house-pid1-check
+	$(MAKE) house-sh-check
 	$(MAKE) house-dynamic-userspace-check
 	$(MAKE) house-fault-budget-check
 	$(MAKE) house-fault-kill-check
@@ -562,8 +570,8 @@ check:
 	$(MAKE) haskell-check
 	$(MAKE) el0tiny-check
 	$(MAKE) dynamic-elf-check
-	@echo "== make check: all aarch64 gates passed (doctor, gate-coverage, spike, irq, house banner, shell, posix, initrd, pid1, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic, irq dispatch, rust, haskell, el0tiny, dynamic ELF) =="
+	@echo "== make check: all aarch64 gates passed (doctor, gate-coverage, spike, irq, house banner, shell, posix, initrd, pid1, sh, dynamic userspace, fault budget, fault kill, ipc-el0, tls-el0, mounted-root dynamic, irq dispatch, rust, haskell, el0tiny, dynamic ELF) =="
 
 .PHONY: container-image container-shell volumes lint _lint-inner miri spike-build spike-run spike-check gate-repeat \
         irq-build irq-run irq-check gate-coverage \
-        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-irq-dispatch-check house-initrd-check house-pid1-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg house-yield-spin-check
+        house-build house-run house-check house-shell-check house-posix-check house-proc-check house-fault-budget-check house-fault-kill-check house-tls-el0-check house-fd-el0-check house-fork-check house-preempt-check          house-spin-hotplug-check smp-check smp-check-8 smp-hotplug-check vm-check house-vm-check house-fs-check house-ipc-check house-ipc-el0-check house-driver-check house-virtio-transport-check house-virtio-blk-check house-virtio-net-check house-virtio-con-check house-userspace-check house-smp-fault-race-check house-dynamic-userspace-check dynamic-root-image house-dynamic-root-check house-irq-dispatch-check house-initrd-check house-pid1-check house-sh-check initrd rust-check rust-test rust-abi-check rust-clean haskell-check el0tiny-check dynamic-elf-check doctor run check check-tcg house-yield-spin-check
